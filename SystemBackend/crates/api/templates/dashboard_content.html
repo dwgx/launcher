@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-figure text-orange-500 text-3xl">◐</div>
+      <div class="stat-title text-xs">用户</div>
+      <div class="stat-value text-2xl">{{ user_count }}</div>
+      <div class="stat-desc">{{ user_today }} 今日新增</div>
+    </div>
+  </div>
+
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-figure text-emerald-500 text-3xl">●</div>
+      <div class="stat-title text-xs">活跃 session</div>
+      <div class="stat-value text-2xl">{{ active_sessions }}</div>
+      <div class="stat-desc">未过期</div>
+    </div>
+  </div>
+
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-figure text-amber-500 text-3xl">⟲</div>
+      <div class="stat-title text-xs">HWID 待审</div>
+      <div class="stat-value text-2xl">{{ pending_rebinds }}</div>
+      <div class="stat-desc">{% if pending_rebinds > 0 %}<a href="/admin/rebind" class="link link-primary">去处理</a>{% else %}清空{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-figure text-violet-500 text-3xl">✦</div>
+      <div class="stat-title text-xs">邀请码可用</div>
+      <div class="stat-value text-2xl">{{ active_invites }}</div>
+      <div class="stat-desc"><a href="/admin/invites" class="link link-primary">生成新码</a></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+  {# 最近 audit #}
+  <div class="card bg-base-100 shadow lg:col-span-2">
+    <div class="card-body">
+      <h2 class="card-title text-base">最近活动</h2>
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead>
+            <tr><th>时间</th><th>动作</th><th>操作者</th><th>对象</th></tr>
+          </thead>
+          <tbody>
+            {% for a in recent_audit %}
+            <tr>
+              <td class="font-mono text-xs opacity-70">{{ a.time }}</td>
+              <td><span class="badge badge-ghost badge-sm">{{ a.action }}</span></td>
+              <td class="font-mono text-xs">{{ a.actor }}</td>
+              <td class="font-mono text-xs opacity-60">{{ a.target }}</td>
+            </tr>
+            {% endfor %}
+            {% if recent_audit.is_empty() %}
+            <tr><td colspan="4" class="text-center opacity-40 py-8">暂无活动</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {# 系统状态 #}
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title text-base">系统</h2>
+      <ul class="text-sm space-y-2">
+        <li class="flex justify-between"><span class="opacity-60">Bind</span><span class="font-mono">{{ bind_addr }}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">TLS</span><span>{% if tls_on %}<span class="badge badge-success badge-sm">on</span>{% else %}<span class="badge badge-warning badge-sm">off</span>{% endif %}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">邀请制</span><span>{% if require_invite %}<span class="badge badge-success badge-sm">strict</span>{% else %}<span class="badge badge-ghost badge-sm">open</span>{% endif %}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">CDN</span><span class="font-mono text-xs truncate max-w-[10rem]">{{ cdn_base }}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">总订阅</span><span>{{ sub_count }}</span></li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

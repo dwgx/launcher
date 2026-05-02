@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="luxury">
+<head>
+<meta charset="utf-8">
+<title>登录 · Launcher Admin</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
+</head>
+<body class="min-h-screen bg-base-200 grid place-items-center">
+<div class="card bg-base-100 shadow-2xl w-96">
+  <div class="card-body">
+    <div class="flex items-center gap-3 mb-2">
+      <div class="w-12 h-12 rounded-full bg-orange-600 grid place-items-center text-white text-2xl font-bold">L</div>
+      <div>
+        <h1 class="text-xl font-semibold">Launcher Admin</h1>
+        <p class="text-xs opacity-60">private launcher control panel</p>
+      </div>
+    </div>
+    <form method="post" action="/admin/login" class="space-y-3 mt-4">
+      <input name="password" type="password" placeholder="管理员密码"
+             class="input input-bordered w-full" autofocus>
+      {% if error %}
+      <div class="text-xs text-rose-500">{{ error_msg }}</div>
+      {% endif %}
+      <button class="btn btn-primary w-full">登录</button>
+    </form>
+    <p class="text-xs opacity-50 mt-4 text-center">© 2026 dwgx · Launcher v0.1.0</p>
+  </div>
+</div>
+</body>
+</html>

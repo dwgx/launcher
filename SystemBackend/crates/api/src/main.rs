@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 mod auth;
 mod admin;
+mod admin_invites;
 mod admin_users;
 mod heartbeat;
 mod profile;
 mod rebind;
 mod state;
 mod subscription;
+mod ui;
 
 use state::AppState;
 
@@ -31,11 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState { cfg: cfg.clone(), db: pool });
 
     let app = axum::Router::new()
+        .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/admin") }))
         .nest("/api",   api_routes(state.clone()))
         .nest("/admin", admin::routes(state.clone()))
         .merge(admin_users::routes())
+        .merge(admin_invites::routes())
+        .merge(rebind::admin_routes())
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        // 头像上传走 multipart，限 5MB；生产再单独 raise multipart limit
         .layer(tower_http::limit::RequestBodyLimitLayer::new(6 * 1024 * 1024))
         .with_state(state);
 

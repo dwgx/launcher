@@ -8,12 +8,20 @@
 //   POST /admin/rebind/{id}/deny
 
 use crate::state::AppState;
-use axum::{extract::{State, Path, Json, Query}, http::StatusCode};
+use crate::ui;
+use axum::{
+    extract::{State, Path, Json, Query},
+    http::StatusCode,
+    response::{IntoResponse, Html},
+    Router,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use chrono::Utc;
 use uuid::Uuid;
+use askama::Template;
 
 #[derive(Deserialize)]
 pub struct RebindReq {
@@ -168,4 +176,88 @@ pub async fn admin_deny(
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+// ---------------- admin SSR ----------------
+pub struct RebindRowVm {
+    pub id: String, pub user_id: String, pub submitted_at: String,
+    pub old: String, pub new: String, pub reason: String, pub diff: String,
+}
+
+#[derive(Template)]
+#[template(path = "rebind_content.html")]
+pub struct RebindPage {
+    pub title:    String,
+    pub subtitle: Option<String>,
+    pub host:     &'static str,
+    pub route:    &'static str,
+    pub rows:     Vec<RebindRowVm>,
+}
+
+pub async fn admin_pending_page(State(s): State<Arc<AppState>>) -> Html<String> {
+    let rows = sqlx::query!(
+        r#"SELECT id, user_id, submitted_at, old_fingerprint, new_fingerprint,
+                  user_reason, parts_diff
+           FROM hwid_rebind_requests WHERE status='pending'
+           ORDER BY submitted_at DESC LIMIT 100"#)
+        .fetch_all(&s.db).await.unwrap_or_default();
+    let rows = rows.into_iter().map(|r| RebindRowVm {
+        id: r.id.to_string(),
+        user_id: r.user_id.to_string(),
+        submitted_at: r.submitted_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+        old: r.old_fingerprint.unwrap_or_default(),
+        new: r.new_fingerprint,
+        reason: r.user_reason.unwrap_or_default(),
+        diff: serde_json::to_string_pretty(&r.parts_diff).unwrap_or_default(),
+    }).collect();
+    ui::render(&RebindPage {
+        title: "HWID 重绑定".into(),
+        subtitle: Some("用户换硬件后等你审批".into()),
+        host: ui::host(),
+        route: ui::ROUTE_REBIND,
+        rows,
+    })
+}
+
+pub fn admin_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/admin/rebind",                   get(admin_pending_page))
+        .route("/admin/rebind/:id/approve",       post(form_approve))
+        .route("/admin/rebind/:id/deny",          post(form_deny))
+        .route("/api/admin/rebind/:id/approve",   post(admin_approve))
+        .route("/api/admin/rebind/:id/deny",      post(admin_deny))
+}
+
+// SSR 的 form approve/deny（无 body）走简化 handler，复用 admin_approve 的 SQL
+async fn form_approve(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Ok(Some(row)) = sqlx::query!(
+        r#"UPDATE hwid_rebind_requests SET status='approved', reviewed_at=now(), reviewer='admin'
+           WHERE id=$1 AND status='pending' RETURNING user_id, new_fingerprint"#, id)
+        .fetch_optional(&s.db).await
+    {
+        let _ = sqlx::query!(
+            "UPDATE users SET hwid_bound=$1, hwid_last_changed_at=now() WHERE id=$2",
+            row.new_fingerprint, row.user_id)
+            .execute(&s.db).await;
+        let _ = sqlx::query!(
+            "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.approve',$1,NULL)",
+            id.to_string()).execute(&s.db).await;
+    }
+    axum::response::Redirect::to("/admin/rebind")
+}
+
+async fn form_deny(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _ = sqlx::query!(
+        "UPDATE hwid_rebind_requests SET status='denied', reviewed_at=now(), reviewer='admin' WHERE id=$1 AND status='pending'",
+        id).execute(&s.db).await;
+    let _ = sqlx::query!(
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.deny',$1,NULL)",
+        id.to_string()).execute(&s.db).await;
+    axum::response::Redirect::to("/admin/rebind")
 }

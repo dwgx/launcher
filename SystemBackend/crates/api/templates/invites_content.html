@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+  {# 生成表单 #}
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title text-base">生成邀请码</h2>
+      <form method="post" action="/admin/invites" class="space-y-3 mt-2">
+        <label class="form-control">
+          <span class="label-text text-xs">备注（可选）</span>
+          <input name="note" placeholder="alpha test / friend xxx" class="input input-sm input-bordered">
+        </label>
+        <div class="grid grid-cols-3 gap-2">
+          <label class="form-control">
+            <span class="label-text text-xs">每码可用</span>
+            <input type="number" name="max_uses" value="1" min="1" max="1000" class="input input-sm input-bordered">
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">有效天</span>
+            <input type="number" name="days" placeholder="无限" class="input input-sm input-bordered">
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">生成几个</span>
+            <input type="number" name="count" value="1" min="1" max="50" class="input input-sm input-bordered">
+          </label>
+        </div>
+        <button class="btn btn-primary btn-sm w-full">生成</button>
+      </form>
+    </div>
+  </div>
+
+  {# 列表 #}
+  <div class="card bg-base-100 shadow lg:col-span-2">
+    <div class="card-body">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="card-title text-base">已生成的邀请码</h2>
+        <span class="badge badge-outline">{{ items.len() }}</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="table table-zebra table-sm">
+          <thead>
+            <tr><th>Code</th><th>用量</th><th>状态</th><th>备注</th><th>创建</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for it in items %}
+            <tr class="hover">
+              <td><code class="font-mono text-orange-400 text-base">{{ it.code }}</code></td>
+              <td class="font-mono">{{ it.uses }}</td>
+              <td>
+                {% if it.status == "active" %}<span class="badge badge-active badge-sm">可用</span>
+                {% else if it.status == "revoked" %}<span class="badge badge-revoked badge-sm">已撤销</span>
+                {% else if it.status == "expired" %}<span class="badge badge-expired badge-sm">已过期</span>
+                {% else %}<span class="badge badge-exhausted badge-sm">用完</span>
+                {% endif %}
+              </td>
+              <td class="text-xs opacity-70">{{ it.note }}</td>
+              <td class="text-xs opacity-60 font-mono">{{ it.created }}</td>
+              <td>
+                {% if it.status == "active" %}
+                <form method="post" action="/admin/invites/{{ it.code }}/revoke">
+                  <button class="btn btn-xs btn-ghost text-rose-500">撤销</button>
+                </form>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            {% if items.is_empty() %}
+            <tr><td colspan="6" class="text-center opacity-40 py-6">暂无</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

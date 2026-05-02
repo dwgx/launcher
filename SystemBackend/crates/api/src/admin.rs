@@ -1,108 +1,132 @@
-// 管理后台：SSR 渲染（askama），不要 SPA。
-// 路由：/admin/login → /admin/dashboard → /admin/users → /admin/subscriptions
+// Admin SSR：登录、dashboard。
+// users / invites / rebind 各管自己的 page struct（在对应文件）。
+// 全部继承 templates/base.html 的 layout（Tailwind + DaisyUI luxury 主题）。
 
 use crate::state::AppState;
+use crate::ui;
 use axum::{
-    routing::{get, post},
+    routing::get,
     extract::{State, Form},
     response::{IntoResponse, Redirect, Html},
-    http::StatusCode,
     Router,
 };
 use serde::Deserialize;
 use std::sync::Arc;
 use askama::Template;
 
-#[derive(Template)]
-#[template(source = "<!doctype html><html><head><meta charset=utf-8><title>Launcher Admin</title>\
-<style>body{font-family:'Source Han Sans CN',sans-serif;background:#FAF7F2;color:#1F1E1D;padding:32px;}\
-h1{color:#C96442;}table{border-collapse:collapse;width:100%}td,th{border:1px solid #EDE9E1;padding:8px;text-align:left;}\
-.btn{background:#C96442;color:#fff;padding:8px 16px;border:none;border-radius:8px;cursor:pointer;}</style></head>\
-<body><h1>Launcher Admin</h1><p>Users: {{ user_count }}, Subscriptions: {{ sub_count }}</p>\
-<p><a href=/admin/users>用户管理</a> · <a href=/admin/rebind>HWID 重绑定审批</a></p></body></html>", ext = "html")]
-struct DashTpl { user_count: i64, sub_count: i64 }
-
-#[derive(Template)]
-#[template(source = "<!doctype html><html><body><form method=post action=/admin/login>\
-<input name=password type=password placeholder=password><button>Sign in</button></form></body></html>", ext = "html")]
-struct LoginTpl;
+// ---------------- login ----------------
+#[derive(Template, Default)]
+#[template(path = "login.html")]
+pub struct LoginPage {
+    pub error:     bool,
+    pub error_msg: String,
+}
 
 #[derive(Deserialize)]
 pub struct AdminLogin { pub password: String }
 
-pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/", get(dashboard))
-        .route("/login", get(login_page).post(login_submit))
-        .route("/rebind", get(rebind_pending_page))
-        .route("/rebind/:id/approve", post(crate::rebind::admin_approve))
-        .route("/rebind/:id/deny",    post(crate::rebind::admin_deny))
-        .with_state(state)
-}
-
-#[derive(Template)]
-#[template(source = "<!doctype html><html><head><meta charset=utf-8><title>Rebind - Launcher</title>\
-<style>body{font-family:'Source Han Sans CN',sans-serif;background:#FAF7F2;color:#1F1E1D;padding:32px;}\
-h1{color:#C96442;}.row{background:#FFF;padding:16px;border-radius:12px;margin:8px 0;box-shadow:0 1px 3px rgba(0,0,0,.04);}\
-.btn{background:#C96442;color:#fff;padding:6px 14px;border:none;border-radius:8px;cursor:pointer;}\
-.deny{background:#E34B4B;}.muted{color:#6B6A67;font-size:13px;}</style></head>\
-<body><h1>HWID Rebind Requests</h1><p><a href=/admin>← Back</a></p>\
-{% for r in rows %}<div class=row>\
-<div><b>{{ r.user_id }}</b> · {{ r.submitted_at }}</div>\
-<div class=muted>old: {{ r.old }}<br>new: {{ r.new }}<br>reason: {{ r.reason }}</div>\
-<div class=muted>{{ r.diff }}</div>\
-<form method=post action=/admin/rebind/{{ r.id }}/approve style='display:inline'><button class=btn>Approve</button></form>\
-<form method=post action=/admin/rebind/{{ r.id }}/deny style='display:inline'><button class='btn deny'>Deny</button></form>\
-</div>{% endfor %}</body></html>", ext = "html")]
-struct RebindTpl { rows: Vec<RebindRowVm> }
-
-#[derive(Default)]
-struct RebindRowVm {
-    id: String, user_id: String, submitted_at: String,
-    old: String, new: String, reason: String, diff: String,
-}
-
-async fn rebind_pending_page(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = sqlx::query!(
-        r#"SELECT id, user_id, submitted_at, old_fingerprint, new_fingerprint,
-                  user_reason, parts_diff
-           FROM hwid_rebind_requests WHERE status='pending'
-           ORDER BY submitted_at DESC LIMIT 100"#)
-        .fetch_all(&s.db).await.unwrap_or_default();
-
-    let vm = RebindTpl {
-        rows: rows.into_iter().map(|r| RebindRowVm {
-            id: r.id.to_string(),
-            user_id: r.user_id.to_string(),
-            submitted_at: r.submitted_at.format("%Y-%m-%d %H:%M").to_string(),
-            old: r.old_fingerprint.unwrap_or_default(),
-            new: r.new_fingerprint,
-            reason: r.user_reason.unwrap_or_default(),
-            diff: r.parts_diff.to_string(),
-        }).collect()
-    };
-    Html(vm.render().unwrap_or_default())
-}
-
-async fn login_page() -> impl IntoResponse {
-    Html(LoginTpl.render().unwrap())
+async fn login_page() -> Html<String> {
+    ui::render(&LoginPage::default())
 }
 
 async fn login_submit(
     State(s): State<Arc<AppState>>,
     Form(form): Form<AdminLogin>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     if form.password == s.cfg.admin_password {
         Redirect::to("/admin").into_response()
     } else {
-        (StatusCode::UNAUTHORIZED, "wrong password").into_response()
+        ui::render(&LoginPage { error: true, error_msg: "密码错误".into() }).into_response()
     }
 }
 
-async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let user_count = sqlx::query_scalar!("SELECT COUNT(*) FROM users")
+async fn logout() -> impl IntoResponse {
+    // 当前简化：还没做 admin session，直接回 login 页
+    Redirect::to("/admin/login")
+}
+
+// ---------------- dashboard ----------------
+pub struct AuditRow {
+    pub time: String,
+    pub action: String,
+    pub actor: String,
+    pub target: String,
+}
+
+#[derive(Template)]
+#[template(path = "dashboard_content.html")]
+pub struct DashboardPage {
+    pub title:           String,
+    pub subtitle:        Option<String>,
+    pub host:            &'static str,
+    pub route:           &'static str,
+
+    pub user_count:      i64,
+    pub user_today:      i64,
+    pub active_sessions: i64,
+    pub pending_rebinds: i64,
+    pub active_invites:  i64,
+
+    pub bind_addr:       String,
+    pub tls_on:          bool,
+    pub require_invite:  bool,
+    pub cdn_base:        String,
+    pub sub_count:       i64,
+
+    pub recent_audit:    Vec<AuditRow>,
+}
+
+async fn dashboard(State(s): State<Arc<AppState>>) -> Html<String> {
+    let user_count   = sqlx::query_scalar!("SELECT COUNT(*) FROM users")
         .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
-    let sub_count  = sqlx::query_scalar!("SELECT COUNT(*) FROM subscriptions")
+    let user_today   = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM users WHERE created_at > now() - interval '1 day'")
         .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
-    Html(DashTpl { user_count, sub_count }.render().unwrap())
+    let active_sessions = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM sessions WHERE expires_at > now()")
+        .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
+    let pending_rebinds = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM hwid_rebind_requests WHERE status='pending'")
+        .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
+    let active_invites = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM invite_codes \
+         WHERE revoked_at IS NULL \
+           AND (expires_at IS NULL OR expires_at > now()) \
+           AND use_count < max_uses")
+        .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
+    let sub_count = sqlx::query_scalar!("SELECT COUNT(*) FROM subscriptions")
+        .fetch_one(&s.db).await.unwrap_or(Some(0)).unwrap_or(0);
+
+    let audit = sqlx::query!(
+        r#"SELECT occurred_at, action, actor, target
+           FROM audit_log ORDER BY occurred_at DESC LIMIT 12"#)
+        .fetch_all(&s.db).await.unwrap_or_default();
+    let recent_audit = audit.into_iter().map(|r| AuditRow {
+        time:   r.occurred_at.format("%m-%d %H:%M:%S").to_string(),
+        action: r.action,
+        actor:  r.actor.unwrap_or_else(|| "—".into()),
+        target: r.target.unwrap_or_else(|| "—".into()),
+    }).collect();
+
+    ui::render(&DashboardPage {
+        title: "仪表盘".into(),
+        subtitle: Some(format!("{} · 当前 {} 个活跃 session", ui::host(), active_sessions)),
+        host: ui::host(),
+        route: ui::ROUTE_DASHBOARD,
+        user_count, user_today, active_sessions, pending_rebinds, active_invites,
+        bind_addr: s.cfg.bind_addr.clone(),
+        tls_on: s.cfg.tls_cert_path.is_some(),
+        require_invite: s.cfg.require_invite_code,
+        cdn_base: s.cfg.cdn_base.clone(),
+        sub_count,
+        recent_audit,
+    })
+}
+
+pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/",       get(dashboard))
+        .route("/login",  get(login_page).post(login_submit))
+        .route("/logout", get(logout))
+        .with_state(state)
 }

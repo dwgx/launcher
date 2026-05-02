@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="card-title text-base">全部用户</h2>
+        <p class="text-xs opacity-60 mt-1">最近 200 个</p>
+      </div>
+      <span class="badge badge-outline">{{ users.len() }}</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="table table-zebra table-sm">
+        <thead>
+          <tr>
+            <th>UID</th>
+            <th>用户名</th>
+            <th>昵称</th>
+            <th>订阅</th>
+            <th>注册时间</th>
+            <th>邀请码</th>
+            <th class="w-32">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr class="hover">
+            <td class="font-mono text-orange-400">{{ u.uid }}</td>
+            <td class="font-medium">{{ u.username }}</td>
+            <td>{{ u.nickname }}</td>
+            <td>
+              {% if u.tier == "—" %}
+              <span class="badge badge-ghost badge-sm">无</span>
+              {% else %}
+              <span class="badge badge-primary badge-sm">{{ u.tier }}</span>
+              {% endif %}
+            </td>
+            <td class="text-xs opacity-70 font-mono">{{ u.created }}</td>
+            <td class="font-mono text-xs opacity-60">{{ u.invite_code }}</td>
+            <td>
+              <details class="dropdown">
+                <summary class="btn btn-xs btn-ghost">编辑</summary>
+                <form method="post" action="/admin/users/{{ u.id }}/edit"
+                      class="dropdown-content z-[1] menu p-3 shadow bg-base-200 rounded-box w-72 space-y-2">
+                  <input name="uid"      placeholder="UID 7 数字" value="{{ u.uid }}" class="input input-sm input-bordered" maxlength="7">
+                  <input name="username" placeholder="用户名" value="{{ u.username }}" class="input input-sm input-bordered">
+                  <input name="nickname" placeholder="昵称" value="{{ u.nickname }}" class="input input-sm input-bordered">
+                  <select name="tier" class="select select-sm select-bordered">
+                    <option value="">— tier 不变 —</option>
+                    <option value="1day">1day</option>
+                    <option value="3day">3day</option>
+                    <option value="1week">1week</option>
+                    <option value="2week">2week</option>
+                    <option value="1month">1month</option>
+                  </select>
+                  <button class="btn btn-sm btn-primary">保存</button>
+                </form>
+              </details>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

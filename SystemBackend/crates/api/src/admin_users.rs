@@ -1,14 +1,12 @@
-// 管理员用户管控：列出 / 改 UID / 改 Username / 重置密码 / 强制改昵称 / 调整订阅 / 封禁
-//
-// 全部经 admin session（admin.rs 里登录拿到 admin_token）才能调，
-// 这里简化：通过查询参数 admin_pwd 验证（与 config.toml.admin_password 比对）。
-// 生产前应该升级为 admin session 表。
+// 管理员用户管控（SSR + JSON API）。
+// 改 UID / Username / Nickname / Tier；重置密码。
 
 use crate::state::AppState;
+use crate::ui;
 use axum::{
     extract::{State, Query, Path, Json, Form},
     http::StatusCode,
-    response::{IntoResponse, Html, Redirect},
+    response::{IntoResponse, Redirect, Html},
     Router,
     routing::{get, post},
 };
@@ -18,10 +16,7 @@ use uuid::Uuid;
 use launcher_shared::{hashing, uid as shared_uid};
 use askama::Template;
 
-// =====================================================================
-// admin gate (super 简单：query string ?key=ADMIN_PASSWORD)
-// 生产应换 admin session
-// =====================================================================
+// ---------------- gate ----------------
 #[derive(Deserialize)]
 pub struct AdminAuth { pub key: Option<String> }
 
@@ -36,9 +31,7 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-// =====================================================================
-// API: list / patch / reset password
-// =====================================================================
+// ---------------- JSON API ----------------
 #[derive(Serialize)]
 pub struct UserSummary {
     pub id:        String,
@@ -73,12 +66,12 @@ pub async fn list_users(
 
 #[derive(Deserialize)]
 pub struct PatchUser {
-    pub key:       String,         // admin password
+    pub key:       String,
     pub uid:       Option<String>,
     pub username:  Option<String>,
     pub nickname:  Option<String>,
     pub tier:      Option<String>,
-    pub tier_expires_at: Option<i64>,    // unix seconds
+    pub tier_expires_at: Option<i64>,
 }
 
 pub async fn patch_user(
@@ -87,13 +80,11 @@ pub async fn patch_user(
     Json(req): Json<PatchUser>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check(&s, &AdminAuth { key: Some(req.key) })?;
-
     if let Some(ref u) = req.uid {
         if !shared_uid::is_valid(u) {
-            return Err((StatusCode::BAD_REQUEST, "invalid UID format".into()));
+            return Err((StatusCode::BAD_REQUEST, "UID 必须是 7 位数字（不前导 0）".into()));
         }
     }
-
     sqlx::query!(
         r#"UPDATE users SET
             uid = COALESCE($2, uid),
@@ -101,13 +92,11 @@ pub async fn patch_user(
             nickname = COALESCE($4, nickname),
             subscription_tier = COALESCE($5, subscription_tier),
             subscription_expires_at = COALESCE(
-                CASE WHEN $6::BIGINT IS NULL THEN NULL
-                     ELSE to_timestamp($6) END,
+                CASE WHEN $6::BIGINT IS NULL THEN NULL ELSE to_timestamp($6) END,
                 subscription_expires_at)
            WHERE id=$1"#,
         id, req.uid, req.username, req.nickname, req.tier, req.tier_expires_at)
         .execute(&s.db).await.map_err(internal)?;
-
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.patch_user', $2, NULL)",
         "admin", id.to_string())
@@ -132,8 +121,7 @@ pub async fn admin_reset_password(
     sqlx::query!(
         "UPDATE users SET password_hash=$1, password_changed_at=now() WHERE id=$2",
         h, id).execute(&s.db).await.map_err(internal)?;
-    sqlx::query!(
-        "DELETE FROM sessions WHERE user_id=$1", id)
+    sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id)
         .execute(&s.db).await.ok();
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin', 'admin.reset_password', $1, NULL)",
@@ -141,51 +129,43 @@ pub async fn admin_reset_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// =====================================================================
-// SSR: 用户管控页 /admin/users
-// =====================================================================
-#[derive(Template)]
-#[template(source = "<!doctype html><html><head><meta charset=utf-8>\
-<title>Users - Launcher</title><style>\
-body{font-family:'Source Han Sans CN',sans-serif;background:#FAF7F2;color:#1F1E1D;padding:32px;}\
-h1{color:#C96442;margin:0 0 16px 0;}table{width:100%;border-collapse:collapse;background:#FFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04);}\
-th{background:#F3EFE8;text-align:left;padding:12px;font-size:13px;font-weight:600;}\
-td{padding:12px;border-top:1px solid #EDE9E1;font-size:13px;}\
-.tag{background:#C96442;color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;}\
-input,select{padding:6px;border:1px solid #EDE9E1;border-radius:6px;font:inherit;}\
-.btn{background:#C96442;color:#fff;padding:6px 12px;border:none;border-radius:8px;cursor:pointer;font-size:12px;}\
-.muted{color:#6B6A67;font-size:11px;}</style></head>\
-<body><h1>用户管理</h1><p><a href=/admin>← Dashboard</a> · <a href=/admin/rebind>HWID Rebind</a></p>\
-<table><thead><tr><th>UID</th><th>Username</th><th>Nickname</th><th>Tier</th><th>Created</th><th>Actions</th></tr></thead>\
-<tbody>{% for u in users %}<tr>\
-<td><code>{{ u.uid }}</code></td><td>{{ u.username }}</td><td>{{ u.nickname }}</td>\
-<td><span class=tag>{{ u.tier }}</span></td><td class=muted>{{ u.created }}</td>\
-<td><a href=\"/admin/users/{{ u.id }}/edit\">Edit</a> · <a href=\"/admin/users/{{ u.id }}/reset-pw\">Reset PW</a></td>\
-</tr>{% endfor %}</tbody></table></body></html>", ext = "html")]
-struct UsersTpl { users: Vec<UserVm> }
-
-#[derive(Default)]
-struct UserVm {
-    id: String, uid: String, username: String, nickname: String,
-    tier: String, created: String,
+// ---------------- SSR ----------------
+pub struct UserVm {
+    pub id: String, pub uid: String, pub username: String, pub nickname: String,
+    pub tier: String, pub created: String, pub invite_code: String,
 }
 
-async fn users_page(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+#[derive(Template)]
+#[template(path = "users_content.html")]
+pub struct UsersPage {
+    pub title:    String,
+    pub subtitle: Option<String>,
+    pub host:     &'static str,
+    pub route:    &'static str,
+    pub users:    Vec<UserVm>,
+}
+
+async fn users_page(State(s): State<Arc<AppState>>) -> Html<String> {
     let rows = sqlx::query!(
-        r#"SELECT id, uid, username, nickname, subscription_tier, created_at
+        r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used
            FROM users ORDER BY created_at DESC LIMIT 200"#)
         .fetch_all(&s.db).await.unwrap_or_default();
-    let vm = UsersTpl {
-        users: rows.into_iter().map(|r| UserVm {
-            id: r.id.to_string(),
-            uid: r.uid.unwrap_or("—".into()),
-            username: r.username.unwrap_or("—".into()),
-            nickname: r.nickname.unwrap_or("—".into()),
-            tier: r.subscription_tier.unwrap_or("—".into()),
-            created: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
-        }).collect()
-    };
-    Html(vm.render().unwrap_or_default())
+    let users = rows.into_iter().map(|r| UserVm {
+        id: r.id.to_string(),
+        uid: r.uid.unwrap_or("—".into()),
+        username: r.username.unwrap_or("—".into()),
+        nickname: r.nickname.unwrap_or("—".into()),
+        tier: r.subscription_tier.unwrap_or("—".into()),
+        created: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
+        invite_code: r.invite_code_used.unwrap_or("—".into()),
+    }).collect();
+    ui::render(&UsersPage {
+        title: "用户".into(),
+        subtitle: None,
+        host: ui::host(),
+        route: ui::ROUTE_USERS,
+        users,
+    })
 }
 
 #[derive(Deserialize)]
@@ -214,7 +194,6 @@ async fn user_edit_submit(
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
-    // Why: 在 main.rs 顶层 .merge() 进来，所以路径要带 /admin / /api 前缀
     Router::new()
         .route("/admin/users",                  get(users_page))
         .route("/admin/users/:id/edit",         post(user_edit_submit))

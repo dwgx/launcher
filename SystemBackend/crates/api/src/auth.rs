@@ -65,6 +65,34 @@ pub async fn register(
         return Err((StatusCode::CONFLICT, "username taken".into()));
     }
 
+    // 2.5 邀请码强制校验（config.require_invite_code = true 时）
+    let used_invite_code: Option<String> = if s.cfg.require_invite_code {
+        let code = req.invite_code.as_ref()
+            .map(|c| c.trim().to_ascii_uppercase())
+            .filter(|c| !c.is_empty())
+            .ok_or((StatusCode::BAD_REQUEST, "invite_code required".into()))?;
+        // SELECT FOR UPDATE 防并发抢码
+        let row = sqlx::query!(
+            r#"SELECT max_uses, use_count, revoked_at, expires_at
+               FROM invite_codes WHERE code = $1 FOR UPDATE"#, code)
+            .fetch_optional(&s.db).await.map_err(internal)?
+            .ok_or((StatusCode::FORBIDDEN, "invite_code invalid".into()))?;
+        if row.revoked_at.is_some() {
+            return Err((StatusCode::FORBIDDEN, "invite_code revoked".into()));
+        }
+        if let Some(exp) = row.expires_at {
+            if exp < Utc::now() {
+                return Err((StatusCode::FORBIDDEN, "invite_code expired".into()));
+            }
+        }
+        if row.use_count >= row.max_uses {
+            return Err((StatusCode::FORBIDDEN, "invite_code exhausted".into()));
+        }
+        Some(code)
+    } else {
+        req.invite_code.as_ref().map(|c| c.trim().to_ascii_uppercase())
+    };
+
     // 3. 生成唯一 UID（最多重试 5 次）
     let uid = {
         let mut tries = 0;
@@ -91,12 +119,28 @@ pub async fn register(
     let row = sqlx::query!(
         r#"INSERT INTO users
             (username_hash, password_hash, hwid_bound, uid, username, nickname,
-             password_changed_at, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+             invite_code_used, password_changed_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
            RETURNING id"#,
         uname_hash, pw_hash, hwid_salted,
-        uid, req.username, nickname)
+        uid, req.username, nickname, used_invite_code.clone())
         .fetch_one(&s.db).await.map_err(internal)?;
+
+    // 5.5 消费邀请码：use_count++ + 写 invite_code_uses
+    if let Some(code) = &used_invite_code {
+        sqlx::query!(
+            r#"UPDATE invite_codes
+                  SET use_count = use_count + 1,
+                      used_at   = now(),
+                      used_by   = $2
+                  WHERE code = $1"#,
+            code, row.id)
+            .execute(&s.db).await.map_err(internal)?;
+        sqlx::query!(
+            "INSERT INTO invite_code_uses (code, user_id) VALUES ($1, $2)",
+            code, row.id)
+            .execute(&s.db).await.ok();
+    }
 
     // 6. 自动登录（发 session token）
     let now = Utc::now();

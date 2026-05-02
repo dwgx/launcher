@@ -1,23 +1,27 @@
-// 短公开 UID 生成器：8 位 Crockford-base32（避开 I/L/O/U 易混字符）
-//
-// 例：K8RX2QZP / N7M4DB8C
-// 32^8 ≈ 1.1e12，足够。冲突时重试。
+// 7 位数字 UID（不前导 0）：1000000 ~ 9999999，900 万个空间。
+// 用于公开展示，不参与 lookup（lookup 用 users.id UUID）。
 
 use rand::{Rng, rngs::OsRng};
 
-const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
 pub fn generate() -> String {
     let mut rng = OsRng;
-    let mut s = String::with_capacity(8);
-    for _ in 0..8 {
-        let b = ALPHABET[rng.gen_range(0..32)];
-        s.push(b as char);
-    }
-    s
+    let n: u32 = rng.gen_range(1_000_000..10_000_000);
+    n.to_string()
 }
 
 pub fn is_valid(s: &str) -> bool {
-    s.len() == 8 && s.chars().all(|c|
-        c.is_ascii_alphanumeric() && c != 'I' && c != 'L' && c != 'O' && c != 'U')
+    s.len() == 7
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && s.bytes().next() != Some(b'0')
+}
+
+#[cfg(test)]
+mod t {
+    use super::*;
+    #[test] fn generated_is_valid() {
+        for _ in 0..50 { assert!(is_valid(&generate())); }
+    }
+    #[test] fn rejects_short() { assert!(!is_valid("123")); }
+    #[test] fn rejects_zero_prefix() { assert!(!is_valid("0123456")); }
+    #[test] fn rejects_letters() { assert!(!is_valid("abc1234")); }
 }

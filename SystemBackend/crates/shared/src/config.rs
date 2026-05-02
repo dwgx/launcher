@@ -29,10 +29,15 @@ pub struct AppConfig {
     /// TLS 私钥路径（pem）
     #[serde(default)]
     pub tls_key_path: Option<String>,
+
+    /// 是否强制邀请码注册。生产默认 true。
+    #[serde(default = "default_require_invite")]
+    pub require_invite_code: bool,
 }
 
 fn default_argon_mem() -> u32 { 64 * 1024 }
 fn default_argon_iters() -> u32 { 3 }
+fn default_require_invite() -> bool { true }
 
 impl AppConfig {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {

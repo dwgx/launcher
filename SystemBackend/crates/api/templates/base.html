@@ -1,0 +1,90 @@
+{# Launcher Admin layout — Tailwind + DaisyUI CDN, 主题 luxury 配 Claude Desktop 暖色调 #}
+<!doctype html>
+<html lang="zh-CN" data-theme="luxury">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · Launcher Admin</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
+<style>
+  :root {
+    --bg: #1A1816;
+    --surface: #242220;
+    --primary: #C96442;
+  }
+  body { font-family: 'Source Han Sans CN', 'Segoe UI', system-ui, sans-serif; }
+  .nav-active { background: rgba(217,119,87,.18); color: #D97757; font-weight: 600; }
+  /* Tailwind CDN 不支持 @apply，直接写值 */
+  .badge-active   { background: #10b981; color: #fff; }
+  .badge-revoked  { background: #be123c; color: #fff; }
+  .badge-expired  { background: #b45309; color: #fff; }
+  .badge-exhausted{ background: #52525b; color: #fff; }
+</style>
+</head>
+<body class="min-h-screen bg-base-200">
+
+<div class="drawer lg:drawer-open">
+  <input id="drawer" type="checkbox" class="drawer-toggle">
+
+  <div class="drawer-content flex flex-col">
+    {# topbar #}
+    <header class="navbar bg-base-100 border-b border-base-300 px-6 sticky top-0 z-30">
+      <div class="flex-none lg:hidden">
+        <label for="drawer" class="btn btn-square btn-ghost">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+               class="inline-block w-6 h-6 stroke-current"><path stroke-linecap="round"
+               stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </label>
+      </div>
+      <div class="flex-1">
+        <span class="text-lg font-semibold tracking-wide">Launcher</span>
+        <span class="ml-2 badge badge-outline border-orange-500/40 text-orange-400">Admin</span>
+      </div>
+      <div class="flex-none gap-2">
+        <span class="text-xs opacity-60 mr-3">{{ host }}</span>
+        <a href="/admin/logout" class="btn btn-sm btn-ghost">退出</a>
+      </div>
+    </header>
+
+    {# main content #}
+    <main class="flex-1 p-6">
+      <div class="mb-6">
+        <h1 class="text-2xl font-bold">{{ title }}</h1>
+        {% if subtitle.is_some() %}
+          <p class="text-sm opacity-60 mt-1">{{ subtitle.as_ref().unwrap() }}</p>
+        {% endif %}
+      </div>
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer footer-center p-4 text-xs opacity-50 bg-base-100 border-t border-base-300">
+      <p>Launcher v0.1.0 · axum + sqlx + askama · © 2026 dwgx</p>
+    </footer>
+  </div>
+
+  {# sidebar #}
+  <div class="drawer-side z-40">
+    <label for="drawer" class="drawer-overlay"></label>
+    <aside class="bg-base-100 w-64 min-h-full border-r border-base-300 p-4">
+      <div class="flex items-center gap-3 px-2 py-3 mb-4">
+        <div class="w-10 h-10 rounded-full bg-orange-600 grid place-items-center text-white font-bold">L</div>
+        <div>
+          <div class="font-semibold">Launcher</div>
+          <div class="text-xs opacity-60">launcher.admin</div>
+        </div>
+      </div>
+      <ul class="menu menu-md gap-1 [&_li>a]:rounded-lg [&_li>a]:py-2.5">
+        <li><a href="/admin"          class='{% if route == "dashboard" %}nav-active{% endif %}'>▦ <span>仪表盘</span></a></li>
+        <li><a href="/admin/users"    class='{% if route == "users" %}nav-active{% endif %}'>◐ <span>用户</span></a></li>
+        <li><a href="/admin/invites"  class='{% if route == "invites" %}nav-active{% endif %}'>✦ <span>邀请码</span></a></li>
+        <li><a href="/admin/rebind"   class='{% if route == "rebind" %}nav-active{% endif %}'>⟲ <span>HWID 重绑定</span></a></li>
+        <li class="menu-title mt-4 text-xs uppercase opacity-50">参考</li>
+        <li><a href="https://github.com/dwgx/launcher" target="_blank">↗ GitHub repo</a></li>
+      </ul>
+    </aside>
+  </div>
+</div>
+
+</body>
+</html>
