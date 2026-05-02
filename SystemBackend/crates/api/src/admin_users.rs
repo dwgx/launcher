@@ -214,10 +214,11 @@ async fn user_edit_submit(
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
+    // Why: 在 main.rs 顶层 .merge() 进来，所以路径要带 /admin / /api 前缀
     Router::new()
-        .route("/users", get(users_page))
-        .route("/users/:id/edit", post(user_edit_submit))
-        .route("/api/admin/users",          get(list_users))
-        .route("/api/admin/users/:id",      post(patch_user))
+        .route("/admin/users",                  get(users_page))
+        .route("/admin/users/:id/edit",         post(user_edit_submit))
+        .route("/api/admin/users",              get(list_users))
+        .route("/api/admin/users/:id",          post(patch_user))
         .route("/api/admin/users/:id/reset-pw", post(admin_reset_password))
 }
