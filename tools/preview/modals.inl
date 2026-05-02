@@ -1,7 +1,188 @@
-// 各种 modal — CS2 详情 (点 game-card 弹) + History redo (460 wide row-item) + UserMenu status fold.
+// 各种 modal — CS2 详情 (点 game-card 弹) + History redo (460 wide row-item)
+//   + 修改密码 modal (3 field 老/新/确认 → POST /api/profile/password)
 #pragma once
 
 namespace modal {
+
+// ============================================================
+// 修改密码 modal
+// ============================================================
+struct ChangePw {
+    bool open = false;
+    Tween t;
+    InputBox old_pw, new_pw, confirm_pw;
+    int focus = 0;
+    std::wstring error;
+    bool busy = false;
+};
+inline ChangePw& g_pw() { static ChangePw s; return s; }
+
+void openChangePw() {
+    auto& p = g_pw();
+    p.open = true;
+    p.t.start(p.t.value(), 1.0f, 0.28f, 0, curve::easeOutBack);
+    p.old_pw.text.clear();   p.old_pw.cursor = 0;   p.old_pw.clearSel();   p.old_pw.password = true;
+    p.new_pw.text.clear();   p.new_pw.cursor = 0;   p.new_pw.clearSel();   p.new_pw.password = true;
+    p.confirm_pw.text.clear(); p.confirm_pw.cursor = 0; p.confirm_pw.clearSel(); p.confirm_pw.password = true;
+    p.focus = 0;
+    p.error.clear();
+    p.busy = false;
+}
+void closeChangePw() {
+    auto& p = g_pw();
+    p.open = false;
+    p.t.start(p.t.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
+}
+
+void paintChangePwModal(Graphics& g, int Wpx, int Hpx) {
+    auto& p = g_pw();
+    if (p.t.value() < 0.001f && !p.open) return;
+    const Palette& pal = palette();
+    float t = p.t.value();
+    if (t < 0.001f) return;
+
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
+
+    SolidBrush dim(Color((BYTE)(170 * t), 0, 0, 0));
+    g.FillRectangle(&dim, 0, 0, Wpx, Hpx);
+
+    float mw = 420.0f, mh = 380.0f;
+    float mx = (Wpx - mw) / 2.0f;
+    float my = (Hpx - mh) / 2.0f + 16.0f * (1.0f - t);
+
+    drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
+    fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
+
+    drawText_(g, L"修改密码", mx + 28, my + 24, mw - 56, 16.0f,
+              fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, L"修改后所有设备都会自动下线，需重新登录", mx + 28, my + 50, mw - 56,
+              8.5f, fade(pal.text_muted));
+
+    // 关闭 ✕
+    RectF xr(mx + mw - 38, my + 16, 26, 26);
+    bool xhov = inRect(g_mouse, xr);
+    if (xhov) fillRR(g, xr.X, xr.Y, xr.Width, xr.Height, 6.0f, fade(pal.bg));
+    icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18.0f, fade(pal.text_muted));
+    hit(xr, [](){ closeChangePw(); }, true);
+
+    // 3 个 password field
+    auto field = [&](InputBox& box, float fy, const wchar_t* label, int idx) {
+        bool focused = (p.focus == idx);
+        RectF fr(mx + 28, fy, mw - 56, 44);
+        box.bounds = fr;
+        fillRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.bg));
+        strokeRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f,
+                 focused ? fade(pal.primary) : fade(pal.divider),
+                 focused ? 1.4f : 1.0f);
+        if (focused) {
+            Color halo((BYTE)(38 * t), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+            strokeRR(g, fr.X - 2, fr.Y - 2, fr.Width + 4, fr.Height + 4, 12.0f, halo, 4.0f);
+        }
+        // label 浮上 / 居中
+        bool floating = focused || !box.text.empty();
+        float lab_y = floating ? (fr.Y + 6.0f) : (fr.Y + 14.0f);
+        float lab_size = floating ? 8.0f : 11.0f;
+        Color lab_c = floating ? fade(pal.primary) : fade(pal.text_muted);
+        drawText_(g, label, fr.X + 14, lab_y, fr.Width - 28, lab_size, lab_c,
+                  StringAlignmentNear, floating ? FontStyleBold : FontStyleRegular);
+
+        // text + 选区
+        if (!box.text.empty()) {
+            Font* f = fontcache::get(10.0f);
+            // 选区高亮
+            if (focused && box.hasSelection()) {
+                RectF bp, bi;
+                g.MeasureString(box.displaySlice(0, box.selStart()).c_str(), -1, f,
+                                PointF(0, 0), &bp);
+                g.MeasureString(box.displaySlice(box.selStart(), box.selEnd()).c_str(), -1, f,
+                                PointF(0, 0), &bi);
+                Color sb(96, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+                SolidBrush sbR(sb);
+                g.FillRectangle(&sbR, fr.X + 14 + bp.Width, fr.Y + 22, bi.Width, 16.0f);
+            }
+            drawText_(g, box.display().c_str(), fr.X + 14, fr.Y + 22, fr.Width - 28,
+                      10.0f, fade(pal.text));
+        }
+        // caret
+        if (focused && !box.hasSelection()) {
+            Font* f = fontcache::get(10.0f);
+            RectF bb;
+            g.MeasureString(box.displaySlice(0, box.cursor).c_str(), -1, f, PointF(0, 0), &bb);
+            int phase = (int)(g_time_in_stage * 1000) % 1000;
+            if (phase < 500) {
+                Pen pen(fade(pal.primary), 1.5f);
+                float cx_ = fr.X + 14 + bb.Width;
+                g.DrawLine(&pen, cx_, fr.Y + 22, cx_, fr.Y + 38);
+            }
+        }
+        int idx_capt = idx;
+        hit(fr, [idx_capt](){ g_pw().focus = idx_capt; }, true);
+    };
+    field(p.old_pw,     my + 80,  L"旧密码",   0);
+    field(p.new_pw,     my + 138, L"新密码",   1);
+    field(p.confirm_pw, my + 196, L"确认新密码", 2);
+
+    // error
+    if (!p.error.empty()) {
+        Color ebg((BYTE)(36 * t), 0xE3, 0x4B, 0x4B);
+        Color efg((BYTE)(255 * t), 0xFF, 0x8A, 0x80);
+        fillRR(g, mx + 28, my + 250, mw - 56, 28, 8.0f, ebg);
+        drawText_(g, p.error.c_str(), mx + 38, my + 257, mw - 76, 9.0f, efg);
+    }
+
+    // 按钮 — 取消 / 保存
+    float by = my + mh - 56;
+    RectF cb(mx + 28, by, 100, 36);
+    bool ch = inRect(g_mouse, cb);
+    fillRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, ch ? fade(pal.bg) : fade(pal.card));
+    strokeRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, fade(pal.divider));
+    drawText_(g, L"取消", cb.X, cb.Y + 12, cb.Width, 9.5f, fade(pal.text),
+              StringAlignmentCenter, FontStyleBold);
+    hit(cb, [](){ closeChangePw(); }, true);
+
+    RectF sb(mx + mw - 28 - 120, by, 120, 36);
+    bool sh = inRect(g_mouse, sb);
+    Color sbg = p.busy ? fade(Color(255, 0x6B, 0x6A, 0x67))
+                       : (sh ? fade(pal.primary_hover) : fade(pal.primary));
+    fillRR(g, sb.X, sb.Y, sb.Width, sb.Height, 8.0f, sbg);
+    drawText_(g, p.busy ? L"提交中…" : L"保存", sb.X, sb.Y + 12, sb.Width, 9.5f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    if (!p.busy) {
+        hit(sb, [](){
+            auto& pp = g_pw();
+            pp.error.clear();
+            if (pp.new_pw.text.size() < 8) { pp.error = L"新密码至少 8 字"; return; }
+            if (pp.new_pw.text != pp.confirm_pw.text) { pp.error = L"两次密码不一致"; return; }
+            if (g_session_token.empty()) { pp.error = L"未登录，无法修改"; return; }
+            pp.busy = true;
+            // 异步 POST
+            struct A { std::wstring oldp, newp; HWND h; };
+            A* a = new A{pp.old_pw.text, pp.new_pw.text, g_hwnd};
+            CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+                auto* a = (A*)lp;
+                std::string body = std::string("{\"session_token\":\"") + g_session_token
+                    + "\",\"old_password\":\"" + net::jsonEscape(a->oldp)
+                    + "\",\"new_password\":\"" + net::jsonEscape(a->newp) + "\"}";
+                auto r = net::postJson(L"/api/profile/password", body);
+                PostMessageW(a->h, WM_APP + 4, r.ok() ? 1 : 0,
+                             (LPARAM)(intptr_t)(r.status));
+                delete a;
+                return 0;
+            }, a, 0, nullptr);
+        }, true);
+    }
+
+    // 点外 4 环形关闭（避免阻断内部 hit）
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeChangePw(); }, true);
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeChangePw(); }, true);
+    hit(RectF(0, my, mx, mh), [](){ closeChangePw(); }, true);
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeChangePw(); }, true);
+}
+
+// ============================================================
+// CS2 modal
+// ============================================================
+
 
 bool g_cs2_open = false;
 Tween g_cs2_t;

@@ -115,6 +115,76 @@ inline std::vector<std::wstring>& mediaPathStore() {
 const wchar_t* g_active{L"general"};
 InputBox       g_composer;          // 完整 InputBox：选区 + Ctrl+A/C/V/X
 bool           g_picker_open{false};
+
+// 官方频道 slug → backend UUID 映射（启动后由 /api/chat/official 填充）
+inline std::unordered_map<std::wstring, std::string>& slugToUuid() {
+    static std::unordered_map<std::wstring, std::string> m;
+    return m;
+}
+
+// 启动后异步拉取官方频道映射 (用全局命名空间的 g_session_token)
+inline void fetchOfficialChannels(HWND notify_hwnd) {
+    if (::g_session_token.empty()) return;
+    struct A { HWND h; };
+    A* a = new A{notify_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/chat/official?session_token=" + ::g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (r.ok()) {
+            // 解析 [{"id":"uuid","slug":"general",...},{...}]
+            auto& m = slugToUuid();
+            size_t pos = 0;
+            while (true) {
+                pos = r.body.find("\"slug\":\"", pos);
+                if (pos == std::string::npos) break;
+                pos += 8;
+                size_t e = r.body.find('"', pos);
+                std::string slug = r.body.substr(pos, e - pos);
+                size_t ip = r.body.rfind("\"id\":\"", pos);
+                if (ip == std::string::npos) break;
+                ip += 6;
+                size_t ie = r.body.find('"', ip);
+                std::string uuid = r.body.substr(ip, ie - ip);
+                std::wstring wslug(slug.begin(), slug.end());
+                m[wslug] = uuid;
+                pos = e;
+            }
+            PostMessageW(a->h, WM_APP + 11, 1, 0);
+        } else {
+            PostMessageW(a->h, WM_APP + 11, 0, 0);
+        }
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 异步发消息到当前频道（POST /api/chat/send）
+inline void sendTextMessage(HWND notify_hwnd, const std::wstring& text) {
+    if (text.empty()) return;
+    auto& m = slugToUuid();
+    auto it = m.find(g_active);
+    if (it == m.end() || ::g_session_token.empty()) {
+        // 离线模式 — 仅本地显示
+        return;
+    }
+    struct A { std::string uuid, body; HWND h; };
+    A* a = new A;
+    a->uuid = it->second;
+    a->body = std::string("{\"session_token\":\"") + ::g_session_token
+        + "\",\"chat_id\":\"" + it->second
+        + "\",\"msg_type\":\"text\",\"payload\":{\"text\":\""
+        + net::jsonEscape(text) + "\"}}";
+    a->h = notify_hwnd;
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        auto r = net::postJson(L"/api/chat/send", a->body);
+        PostMessageW(a->h, WM_APP + 12, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
 inline std::unordered_map<std::wstring, bool>& groupCollapsed() {
     static std::unordered_map<std::wstring, bool> m;
     return m;
@@ -661,6 +731,7 @@ void paintComposer(Graphics& g, RectF area) {
                    Color(255, 255, 255, 255));
     if (can_send) {
         hit(RectF(sx, sy, send_w, send_w), [](){
+            // 1. 本地立即显示（乐观更新）
             auto& s = streamFor(g_active);
             Msg m; m.kind = MsgKind::Text; m.from = L"me"; m.author = L"";
             m.status = L"online"; m.read = false; m.time = L"now";
@@ -668,6 +739,8 @@ void paintComposer(Graphics& g, RectF area) {
             g_my_msgs.push_back(g_composer.text);
             m.body = g_my_msgs.back().c_str();
             s.push_back(m);
+            // 2. 真发后端（如果有 session）
+            sendTextMessage(g_hwnd, g_composer.text);
             g_composer.text.clear();
             g_composer.cursor = 0;
             g_composer.clearSel();

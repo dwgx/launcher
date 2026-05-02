@@ -1106,7 +1106,11 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
               g_overlay_t.start(0,1,0.25f,0,curve::easeOutCubic);
               g_account_dropdown=false;
               g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
-        { "acc.password", icons::Name::Shield, [](){ }, false },
+        { "acc.password", icons::Name::Shield, [](){
+              modal::openChangePw();
+              g_account_dropdown = false;
+              g_dropdown_t.start(g_dropdown_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
+        }, false },
         { "acc.signout",  icons::Name::Logout, [](){
               // 清除存储的凭据，回到 Auth
               persist::clearCreds();
@@ -1716,7 +1720,7 @@ void paintProfileView(Graphics& g, RectF area) {
     strokeRR(g, pwb.X, pwb.Y + pw_lift, pwb.Width, pwb.Height, 6.0f, fade(pal.divider));
     drawText_(g, W(tr("profile.change_pw")).c_str(), pwb.X, pwb.Y + 8 + pw_lift, pwb.Width, 9.0f,
               fade(pal.text), StringAlignmentCenter, FontStyleBold);
-    hit(pwb, [](){ g_toast.show(L"修改密码功能规划中（需后端校验旧密码）"); }, true);
+    hit(pwb, [](){ modal::openChangePw(); }, true);
 }
 
 // ====================================================================
@@ -2036,6 +2040,7 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
     paintAccountDropdown(g, Wpx);
     registerDropdownDismissHits(Wpx, Hpx);
     modal::paintCS2Modal(g, Wpx, Hpx);
+    modal::paintChangePwModal(g, Wpx, Hpx);
 
     // toast 在最顶层
     if (!g_toast.text.empty() && g_toast.t.value() > 0.001f) {
@@ -2238,6 +2243,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CHAR: {
             wchar_t c = (wchar_t)wp;
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            // 修改密码 modal 输入优先（任何 stage 都能用）
+            if (modal::g_pw().open) {
+                auto& pp = modal::g_pw();
+                InputBox* b = (pp.focus == 0) ? &pp.old_pw
+                            : (pp.focus == 1) ? &pp.new_pw
+                            : &pp.confirm_pw;
+                b->onChar(c, ctrl, hwnd);
+                if (c == L'\r' || c == L'\n') {
+                    // Enter = 推到下个 field 或提交
+                    if (pp.focus < 2) pp.focus++;
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+            }
             if (g_stage == Stage::Auth) {
                 InputBox* box = nullptr;
                 if (g_auth_form.focus == 0)      box = &g_auth_form.username;
@@ -2269,6 +2288,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             g_my_txts.push_back(chatv::g_composer.text);
                             m.body = g_my_txts.back().c_str();
                             s.push_back(m);
+                            chatv::sendTextMessage(hwnd, chatv::g_composer.text);
                             chatv::g_composer.text.clear();
                             chatv::g_composer.cursor = 0;
                             chatv::g_composer.clearSel();
@@ -2282,7 +2302,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN: {
             bool shift_dn = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool ctrl_dn  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            // Auth 表单 Tab 切焦点 + 方向键编辑
+            if (modal::g_pw().open) {
+                auto& pp = modal::g_pw();
+                if (wp == VK_TAB) {
+                    pp.focus = (pp.focus + 1) % 3;
+                    return 0;
+                }
+                InputBox* b = (pp.focus == 0) ? &pp.old_pw
+                            : (pp.focus == 1) ? &pp.new_pw
+                            : &pp.confirm_pw;
+                b->onKey((int)wp, shift_dn, ctrl_dn);
+                if (wp == VK_ESCAPE) modal::closeChangePw();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (g_stage == Stage::Auth) {
                 if (wp == VK_TAB) {
                     g_auth_form.focus = (g_auth_form.focus + 1) %
@@ -2366,21 +2399,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 2: {
-            // 登录线程结果
             g_auth_form.busy = false;
             if (wp == 1) {
                 g_auth_succeeded = true;
                 g_check_anim.start(0.0f, 1.0f, 0.45f, 0, curve::easeOutBack);
                 SetTimer(hwnd, 0xA2, 850, nullptr);
+                // 登录成功后立即拉取频道映射
+                chatv::fetchOfficialChannels(hwnd);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 3: {
-            // 头像上传结果
             if (wp == 1) g_toast.show(L"头像已同步到服务器 ✓");
             else if (g_session_token.empty()) g_toast.show(L"已保存本地，登录后会自动上传");
             else g_toast.show(L"上传失败，已保存本地（下次登录重试）");
+            return 0;
+        }
+        case WM_APP + 4: {
+            auto& pp = modal::g_pw();
+            pp.busy = false;
+            if (wp == 1) {
+                modal::closeChangePw();
+                g_toast.show(L"密码已更新 ✓ 请重新登录");
+                // 强制下线
+                persist::clearCreds();
+                g_session_token.clear();
+            } else {
+                int status = (int)(intptr_t)lp;
+                if (status == 401) pp.error = L"旧密码错误";
+                else pp.error = L"修改失败（网络或后端拒绝）";
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 10: {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 11: {
+            // 拉取 official channels 完成
+            if (wp == 1) g_toast.show(L"频道映射已同步");
+            return 0;
+        }
+        case WM_APP + 12: {
+            // 发消息结果 — 失败时 toast 提醒
+            if (wp != 1) {
+                int status = (int)(intptr_t)lp;
+                if (status == 403) g_toast.show(L"此频道只允许管理员发言");
+                else if (status == 0) g_toast.show(L"网络错误");
+                else { std::wstring msg = L"发送失败 (status " + std::to_wstring(status) + L")";
+                       g_toast.show(msg.c_str()); }
+            }
             return 0;
         }
         case WM_TIMER:
@@ -2552,6 +2622,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
     DragAcceptFiles(g_hwnd, TRUE);   // 接收文件拖拽
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
+    // 已有 session — 立即拉官方频道映射（chat send 用 uuid）
+    if (!g_session_token.empty()) chatv::fetchOfficialChannels(g_hwnd);
 
     // 自动登录 — 注册表里有凭据就直接进 main，跳过 Auth
     std::wstring saved_user, saved_pass;
@@ -2565,6 +2637,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     }
     // session 也直接加载 — 如果存在则后续 API 调用直接用
     persist::loadSession(g_session_token, g_user_id);
+    // 如果有 session，启动后立即拉取官方频道映射（chat send 用 uuid）
+    // 注意：g_hwnd 还没有创建，等创建后调
 
     if (skip_loading && !skip_auth) {
         enterAuthStage();
@@ -2621,6 +2695,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_seg_theme_x.tick(dt); g_seg_theme_w.tick(dt);
         g_toast.tick(dt);
         g_check_anim.tick(dt);
+        modal::g_pw().t.tick(dt);
+        modal::g_pw().old_pw.float_t.tick(dt);
+        modal::g_pw().new_pw.float_t.tick(dt);
+        modal::g_pw().confirm_pw.float_t.tick(dt);
 
         // 入场流程驱动
         auto resize_to_tween = [&]() {

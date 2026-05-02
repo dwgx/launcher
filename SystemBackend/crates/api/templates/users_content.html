@@ -16,6 +16,7 @@
             <th>UID</th>
             <th>用户名</th>
             <th>昵称</th>
+            <th>头衔</th>
             <th>订阅</th>
             <th>注册时间</th>
             <th>邀请码</th>
@@ -28,6 +29,22 @@
             <td class="font-mono text-orange-400">{{ u.uid }}</td>
             <td class="font-medium">{{ u.username }}</td>
             <td>{{ u.nickname }}</td>
+            <td>
+              <div class="flex items-center gap-1.5">
+                {% if u.role == "admin" %}
+                  <span class="badge badge-sm" style="background:#B14444;color:#fff">管理员</span>
+                {% else if u.role == "oldhand" %}
+                  <span class="badge badge-sm" style="background:#2C8A6E;color:#fff">老司机</span>
+                {% else if u.role == "newhand" %}
+                  <span class="badge badge-sm" style="background:#7C9DD9;color:#fff">萌新</span>
+                {% else %}
+                  <span class="badge badge-ghost badge-sm">{{ u.role }}</span>
+                {% endif %}
+                {% if u.role_label != "—" && u.role_label != "" %}
+                <span class="text-xs opacity-60">· {{ u.role_label }}</span>
+                {% endif %}
+              </div>
+            </td>
             <td>
               {% if u.tier == "—" %}
               <span class="badge badge-ghost badge-sm">无</span>
@@ -81,6 +98,19 @@
           <option value="2week">2week</option>
           <option value="1month">1month</option>
         </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">头衔（角色）</span>
+        <select name="role" class="select select-bordered">
+          <option value="">— 不变 (当前: {{ u.role }}) —</option>
+          {% for r in roles %}
+          <option value="{{ r.role }}">{{ r.role }} · {{ r.label_zh }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">中文头衔显示（自定义，留空用预设）</span>
+        <input name="role_label" placeholder="{{ u.role_label }}" value="" class="input input-bordered" maxlength="16">
       </label>
       <div class="modal-action">
         <button type="button" class="btn btn-ghost"

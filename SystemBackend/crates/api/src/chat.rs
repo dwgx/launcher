@@ -123,6 +123,39 @@ pub struct ChatListItem {
     pub unread_count:     i64,
 }
 
+// ---------------- 官方频道列表 (任何登录用户可见) ----------------
+#[derive(Deserialize)]
+pub struct OfficialQ { pub session_token: String }
+
+#[derive(Serialize)]
+pub struct OfficialChan {
+    pub id:           String,
+    pub slug:         String,
+    pub title:        String,
+    pub group_label:  Option<String>,
+    pub write_role:   String,
+}
+
+pub async fn list_official(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<OfficialQ>,
+) -> Result<Json<Vec<OfficialChan>>, (StatusCode, String)> {
+    let _me = auth_user(&s, &q.session_token).await?;
+    let rows = sqlx::query!(
+        r#"SELECT id, slug, title, group_label, write_role
+           FROM chats
+           WHERE kind = 'channel' AND is_official = TRUE
+           ORDER BY group_label NULLS LAST, title"#)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    Ok(Json(rows.into_iter().map(|r| OfficialChan {
+        id: r.id.to_string(),
+        slug: r.slug.unwrap_or_default(),
+        title: r.title.unwrap_or_default(),
+        group_label: r.group_label,
+        write_role: r.write_role,
+    }).collect()))
+}
+
 pub async fn list_chats(
     State(s): State<Arc<AppState>>,
     Query(q): Query<ListChatsQ>,

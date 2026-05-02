@@ -133,6 +133,10 @@ pub async fn admin_reset_password(
 pub struct UserVm {
     pub id: String, pub uid: String, pub username: String, pub nickname: String,
     pub tier: String, pub created: String, pub invite_code: String,
+    pub role: String, pub role_label: String,   // 0009 加的字段
+}
+pub struct RoleVm {
+    pub role: String, pub label_zh: String,
 }
 
 #[derive(Template)]
@@ -143,11 +147,12 @@ pub struct UsersPage {
     pub host:     &'static str,
     pub route:    &'static str,
     pub users:    Vec<UserVm>,
+    pub roles:    Vec<RoleVm>,
 }
 
 async fn users_page(State(s): State<Arc<AppState>>) -> Html<String> {
     let rows = sqlx::query!(
-        r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used
+        r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used, role, role_label
            FROM users ORDER BY created_at DESC LIMIT 200"#)
         .fetch_all(&s.db).await.unwrap_or_default();
     let users = rows.into_iter().map(|r| UserVm {
@@ -158,13 +163,21 @@ async fn users_page(State(s): State<Arc<AppState>>) -> Html<String> {
         tier: r.subscription_tier.unwrap_or("—".into()),
         created: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
         invite_code: r.invite_code_used.unwrap_or("—".into()),
+        role: r.role,
+        role_label: r.role_label.unwrap_or("—".into()),
+    }).collect();
+    let role_rows = sqlx::query!(
+        r#"SELECT role, label_zh FROM user_roles_catalog ORDER BY sort_order"#)
+        .fetch_all(&s.db).await.unwrap_or_default();
+    let roles = role_rows.into_iter().map(|r| RoleVm {
+        role: r.role, label_zh: r.label_zh,
     }).collect();
     ui::render(&UsersPage {
         title: "用户".into(),
         subtitle: None,
         host: ui::host(),
         route: ui::ROUTE_USERS,
-        users,
+        users, roles,
     })
 }
 
@@ -174,6 +187,8 @@ pub struct EditForm {
     pub username: Option<String>,
     pub nickname: Option<String>,
     pub tier: Option<String>,
+    pub role: Option<String>,
+    pub role_label: Option<String>,
 }
 
 async fn user_edit_submit(
@@ -186,10 +201,19 @@ async fn user_edit_submit(
             uid = COALESCE(NULLIF($2,''), uid),
             username = COALESCE(NULLIF($3,''), username),
             nickname = COALESCE(NULLIF($4,''), nickname),
-            subscription_tier = COALESCE(NULLIF($5,''), subscription_tier)
+            subscription_tier = COALESCE(NULLIF($5,''), subscription_tier),
+            role = COALESCE(NULLIF($6,''), role),
+            role_label = COALESCE(NULLIF($7,''), role_label),
+            is_admin = CASE WHEN $6 = 'admin' THEN TRUE
+                            WHEN $6 IS NOT NULL AND $6 != '' THEN FALSE
+                            ELSE is_admin END
            WHERE id=$1"#,
-        id, form.uid, form.username, form.nickname, form.tier)
+        id, form.uid, form.username, form.nickname, form.tier,
+        form.role, form.role_label)
         .execute(&s.db).await;
+    let _ = sqlx::query!(
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.edit_user',$1,NULL)",
+        id.to_string()).execute(&s.db).await;
     Redirect::to("/admin/users")
 }
 
