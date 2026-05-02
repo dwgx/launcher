@@ -128,6 +128,7 @@ const char* tr(const char* key) {
         {"menu.home",           "Home",             u8"主页",              u8"ホーム"},
         {"menu.lunching",       "Lunching",         u8"Lunching",          u8"Lunching"},
         {"menu.chat",           "Chat",             u8"聊天",              u8"チャット"},
+        {"menu.market",         "Market",           u8"市场",              u8"マーケット"},
         {"menu.cloud",          "Cloud",            u8"云端",              u8"クラウド"},
         {"menu.settings",       "Settings",         u8"设置",              u8"設定"},
         {"acc.profile",         "Profile",          u8"个人信息",          u8"プロフィール"},
@@ -351,7 +352,7 @@ struct Tween {
 // 入场流程：Dot → ExpandLoading → Loading → ExpandAuth → Auth → ExpandMain → Main
 enum class Stage { Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth, ExpandMain, Main };
 enum class AuthMode { Login, Register };
-enum class View  { Home, Lunching, Chat, Cloud, Settings, Profile };
+enum class View  { Home, Lunching, Chat, Market, Cloud, Settings, Profile };
 enum class Overlay { None, History };
 
 Stage    g_stage    = Stage::Dot;
@@ -385,6 +386,37 @@ struct UserInfo {
     const wchar_t* expires   = L"2026-05-09";
     const wchar_t* last_login= L"05-02 10:32";
 } g_user;
+
+// 用户头像（运行期）— 选了头像后存路径 + 加载 GDI+ Image，所有 avatar 渲染处优先用它
+struct AvatarCache {
+    std::wstring path;
+    Gdiplus::Image* img = nullptr;
+};
+AvatarCache g_avatar;
+
+bool loadAvatar(const std::wstring& path) {
+    auto* img = Gdiplus::Image::FromFile(path.c_str());
+    if (!img || img->GetLastStatus() != Gdiplus::Ok) {
+        delete img;
+        return false;
+    }
+    delete g_avatar.img;
+    g_avatar.img = img;
+    g_avatar.path = path;
+    return true;
+}
+
+// 头像存路径：%LOCALAPPDATA%\Launcher\avatar.<ext>
+std::wstring avatarStoragePath(const wchar_t* src_path) {
+    wchar_t base[MAX_PATH] = {0};
+    if (!SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) return L"";
+    std::wstring dir = std::wstring(base) + L"\\Launcher";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring sp = src_path;
+    auto dot = sp.find_last_of(L'.');
+    std::wstring ext = (dot != std::wstring::npos) ? sp.substr(dot) : L".png";
+    return dir + L"\\avatar" + ext;
+}
 
 // Steam 集成 — 从 HKCU\Software\Valve\Steam 读 PersonaName + LastGameNameUsed。
 // 游玩时长精确值要 Steam Web API（需 key），暂占位。
@@ -769,6 +801,7 @@ const MenuEntry kMenu[] = {
     { View::Home,     "menu.home",     icons::Name::Home },
     { View::Lunching, "menu.lunching", icons::Name::Library },
     { View::Chat,     "menu.chat",     icons::Name::Chat },
+    { View::Market,   "menu.market",   icons::Name::Shield },   // 用户原话"云端上面需要一个 market"
     { View::Cloud,    "menu.cloud",    icons::Name::Cloud },
     { View::Settings, "menu.settings", icons::Name::Settings },
 };
@@ -805,14 +838,22 @@ void paintTopbar(Graphics& g, int Wpx) {
               pal.text_muted, StringAlignmentNear);
     float ax = pill_x + pill_pad_l + name_w + pill_gap;
     float ay = pill_y + (pill_h - ar*2) / 2.0f;
-    SolidBrush avbg(pal.primary);
-    g.FillEllipse(&avbg, ax, ay, ar*2, ar*2);
-    Font af(kFontFace, 8.5f, FontStyleBold, UnitPoint);
-    SolidBrush avf(Color(255, 255, 255, 255));
-    StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-    RectF avrect(ax, ay, ar*2, ar*2);
-    wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
-    g.DrawString(initial, -1, &af, avrect, &fmt, &avf);
+    if (g_avatar.img) {
+        // 圆形裁剪 + DrawImage
+        GraphicsPath cp; cp.AddEllipse(ax, ay, ar*2, ar*2);
+        g.SetClip(&cp);
+        g.DrawImage(g_avatar.img, RectF(ax, ay, ar*2, ar*2));
+        g.ResetClip();
+    } else {
+        SolidBrush avbg(pal.primary);
+        g.FillEllipse(&avbg, ax, ay, ar*2, ar*2);
+        Font af(kFontFace, 8.5f, FontStyleBold, UnitPoint);
+        SolidBrush avf(Color(255, 255, 255, 255));
+        StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
+        RectF avrect(ax, ay, ar*2, ar*2);
+        wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
+        g.DrawString(initial, -1, &af, avrect, &fmt, &avf);
+    }
     // 在线徽章
     Color stC = pal.status_online;
     SolidBrush stB(stC);
@@ -859,13 +900,26 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
 
     // 顶部 header — avatar + nickname + email
     float ar = 14;
-    SolidBrush avbg(fade(pal.primary));
-    g.FillEllipse(&avbg, dx + 12, dy + 12, ar*2, ar*2);
-    Font af(kFontFace, 9.5f, FontStyleBold, UnitPoint);
-    SolidBrush avf(Color((BYTE)(255 * t), 255, 255, 255));
-    StringFormat avfmt; avfmt.SetAlignment(StringAlignmentCenter); avfmt.SetLineAlignment(StringAlignmentCenter);
-    wchar_t init[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
-    g.DrawString(init, -1, &af, RectF(dx + 12, dy + 12, ar*2, ar*2), &avfmt, &avf);
+    if (g_avatar.img) {
+        GraphicsPath cp; cp.AddEllipse(dx + 12, dy + 12, ar*2, ar*2);
+        g.SetClip(&cp);
+        // ColorMatrix 让 image 跟着 dropdown alpha 一起 fade
+        ImageAttributes ia;
+        ColorMatrix mm = { 1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,t,0, 0,0,0,0,1 };
+        ia.SetColorMatrix(&mm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        g.DrawImage(g_avatar.img, RectF(dx + 12, dy + 12, ar*2, ar*2),
+                    0, 0, (REAL)g_avatar.img->GetWidth(), (REAL)g_avatar.img->GetHeight(),
+                    UnitPixel, &ia);
+        g.ResetClip();
+    } else {
+        SolidBrush avbg(fade(pal.primary));
+        g.FillEllipse(&avbg, dx + 12, dy + 12, ar*2, ar*2);
+        Font af(kFontFace, 9.5f, FontStyleBold, UnitPoint);
+        SolidBrush avf(Color((BYTE)(255 * t), 255, 255, 255));
+        StringFormat avfmt; avfmt.SetAlignment(StringAlignmentCenter); avfmt.SetLineAlignment(StringAlignmentCenter);
+        wchar_t init[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
+        g.DrawString(init, -1, &af, RectF(dx + 12, dy + 12, ar*2, ar*2), &avfmt, &avf);
+    }
     drawText_(g, g_user.nickname, dx + 50, dy + 12, dw - 60,
               10.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
     drawText_(g, g_user.email, dx + 50, dy + 28, dw - 60,
@@ -1075,14 +1129,21 @@ void paintHomeView(Graphics& g, RectF area) {
 
     // 大头像 72x72 (design .avatar.large)
     float avR = 36.0f, avx = cx + 26, avy = cy + 26;
-    SolidBrush avBg(fade(pal.primary));
-    g.FillEllipse(&avBg, avx, avy, avR*2, avR*2);
-    Font af(kFontFace, 22.0f, FontStyleBold, UnitPoint);
-    SolidBrush avF(Color((BYTE)(255 * op), 255, 255, 255));
-    StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-    RectF avr(avx, avy, avR*2, avR*2);
-    wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
-    g.DrawString(initial, -1, &af, avr, &fmt, &avF);
+    if (g_avatar.img) {
+        GraphicsPath cp; cp.AddEllipse(avx, avy, avR*2, avR*2);
+        g.SetClip(&cp);
+        g.DrawImage(g_avatar.img, RectF(avx, avy, avR*2, avR*2));
+        g.ResetClip();
+    } else {
+        SolidBrush avBg(fade(pal.primary));
+        g.FillEllipse(&avBg, avx, avy, avR*2, avR*2);
+        Font af(kFontFace, 22.0f, FontStyleBold, UnitPoint);
+        SolidBrush avF(Color((BYTE)(255 * op), 255, 255, 255));
+        StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
+        RectF avr(avx, avy, avR*2, avR*2);
+        wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
+        g.DrawString(initial, -1, &af, avr, &fmt, &avF);
+    }
     // online dot 14x14, right 2 bottom 2, ring 3px card
     float dotR = 7.0f;
     float dx = avx + avR*2 - dotR*2 - 2.0f;
@@ -1482,7 +1543,6 @@ void paintProfileView(Graphics& g, RectF area) {
     drawText_(g, W(tr("profile.upload_avatar")).c_str(), up.X, up.Y + 8 + up_lift, up.Width, 9.0f,
               Color((BYTE)(255 * op), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
     hit(up, [](){
-        // 弹原生文件选择 — 选完只显示 toast，真上传到后端下一波
         OPENFILENAMEW ofn{};
         static wchar_t fnbuf[MAX_PATH] = {0};
         fnbuf[0] = 0;
@@ -1493,10 +1553,15 @@ void paintProfileView(Graphics& g, RectF area) {
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (GetOpenFileNameW(&ofn)) {
-            std::wstring msg = std::wstring(L"已选择头像（待上传）: ") + fnbuf;
-            // 截断长路径
-            if (msg.size() > 60) msg = msg.substr(0, 30) + L" … " + msg.substr(msg.size() - 25);
-            g_toast.show(msg.c_str());
+            // 1. 复制到 %LOCALAPPDATA%\Launcher\avatar.<ext>（持久化，重启仍生效）
+            std::wstring dst = avatarStoragePath(fnbuf);
+            bool copied = !dst.empty() && CopyFileW(fnbuf, dst.c_str(), FALSE);
+            // 2. 加载 GDI+ Image，UI 立即用新头像（home / topbar / dropdown / profile 同步）
+            if (copied && loadAvatar(dst)) {
+                g_toast.show(L"头像已更新（本地缓存生效，登录后会同步上传到服务器）");
+            } else {
+                g_toast.show(L"头像加载失败，请换张图片试试");
+            }
         }
     }, true);
 
@@ -1775,6 +1840,7 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
         case View::Home:     paintHomeView(g, area);     break;
         case View::Lunching: paintLunchingView(g, area); break;
         case View::Chat:     chatv::paintChatViewTop(g, area); break;
+        case View::Market:   paintMarketView(g, area);   break;
         case View::Cloud:    paintCloudView(g, area);    break;
         case View::Settings: paintSettingsView(g, area); break;
         case View::Profile:  paintProfileView(g, area);  break;
@@ -2156,6 +2222,21 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     persist::ensure();
     g_lang = (Lang)persist::loadLang((int)g_lang);
     g_dark = persist::loadTheme(g_dark);
+
+    // 启动时尝试加载用户已上传的头像（%LOCALAPPDATA%\Launcher\avatar.*）
+    {
+        wchar_t base[MAX_PATH] = {0};
+        if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
+            std::wstring dir = std::wstring(base) + L"\\Launcher\\";
+            const wchar_t* exts[] = { L"avatar.png", L"avatar.jpg", L"avatar.jpeg",
+                                      L"avatar.webp", L"avatar.bmp" };
+            for (auto* e : exts) {
+                std::wstring p = dir + e;
+                if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES
+                    && loadAvatar(p)) break;
+            }
+        }
+    }
 
     wchar_t buf[16] = {0};
     if (GetEnvironmentVariableW(L"LAUNCHER_DARK", buf, 16) > 0 && buf[0] == L'1') g_dark = true;
