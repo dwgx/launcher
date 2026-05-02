@@ -34,7 +34,54 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(dashboard))
         .route("/login", get(login_page).post(login_submit))
+        .route("/rebind", get(rebind_pending_page))
+        .route("/rebind/:id/approve", post(crate::rebind::admin_approve))
+        .route("/rebind/:id/deny",    post(crate::rebind::admin_deny))
         .with_state(state)
+}
+
+#[derive(Template)]
+#[template(source = "<!doctype html><html><head><meta charset=utf-8><title>Rebind - Launcher</title>\
+<style>body{font-family:'Source Han Sans CN',sans-serif;background:#FAF7F2;color:#1F1E1D;padding:32px;}\
+h1{color:#C96442;}.row{background:#FFF;padding:16px;border-radius:12px;margin:8px 0;box-shadow:0 1px 3px rgba(0,0,0,.04);}\
+.btn{background:#C96442;color:#fff;padding:6px 14px;border:none;border-radius:8px;cursor:pointer;}\
+.deny{background:#E34B4B;}.muted{color:#6B6A67;font-size:13px;}</style></head>\
+<body><h1>HWID Rebind Requests</h1><p><a href=/admin>← Back</a></p>\
+{% for r in rows %}<div class=row>\
+<div><b>{{ r.user_id }}</b> · {{ r.submitted_at }}</div>\
+<div class=muted>old: {{ r.old }}<br>new: {{ r.new }}<br>reason: {{ r.reason }}</div>\
+<div class=muted>{{ r.diff }}</div>\
+<form method=post action=/admin/rebind/{{ r.id }}/approve style='display:inline'><button class=btn>Approve</button></form>\
+<form method=post action=/admin/rebind/{{ r.id }}/deny style='display:inline'><button class='btn deny'>Deny</button></form>\
+</div>{% endfor %}</body></html>", ext = "html")]
+struct RebindTpl { rows: Vec<RebindRowVm> }
+
+#[derive(Default)]
+struct RebindRowVm {
+    id: String, user_id: String, submitted_at: String,
+    old: String, new: String, reason: String, diff: String,
+}
+
+async fn rebind_pending_page(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows = sqlx::query!(
+        r#"SELECT id, user_id, submitted_at, old_fingerprint, new_fingerprint,
+                  user_reason, parts_diff
+           FROM hwid_rebind_requests WHERE status='pending'
+           ORDER BY submitted_at DESC LIMIT 100"#)
+        .fetch_all(&s.db).await.unwrap_or_default();
+
+    let vm = RebindTpl {
+        rows: rows.into_iter().map(|r| RebindRowVm {
+            id: r.id.to_string(),
+            user_id: r.user_id.to_string(),
+            submitted_at: r.submitted_at.format("%Y-%m-%d %H:%M").to_string(),
+            old: r.old_fingerprint.unwrap_or_default(),
+            new: r.new_fingerprint,
+            reason: r.user_reason.unwrap_or_default(),
+            diff: r.parts_diff.to_string(),
+        }).collect()
+    };
+    Html(vm.render().unwrap_or_default())
 }
 
 async fn login_page() -> impl IntoResponse {

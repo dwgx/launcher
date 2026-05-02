@@ -1,0 +1,65 @@
+{
+  "app": {
+    "name": "Launcher",
+    "tagline": "Your private game launcher"
+  },
+  "loading": {
+    "connecting": "Connecting...",
+    "syncing":    "Syncing subscriptions...",
+    "ready":      "Ready"
+  },
+  "auth": {
+    "sign_in":    "Sign in",
+    "username":   "Username",
+    "password":   "Password",
+    "remember_me":"Remember me",
+    "submit":     "Continue",
+    "error_invalid": "Wrong username or password"
+  },
+  "home": {
+    "greet":      "Hello, {name}",
+    "subtitle":   "Welcome back",
+    "tier":       "Plan",
+    "expires":    "Expires",
+    "machine":    "Machine",
+    "device_id":  "Device ID",
+    "last_login": "Last sign in"
+  },
+  "menu": {
+    "home":       "Home",
+    "library":    "Game Library",
+    "cloud":      "Cloud",
+    "settings":   "Settings",
+    "logout":     "Sign out"
+  },
+  "library": {
+    "empty":      "No games in your subscription yet",
+    "launch":     "Launch",
+    "verifying":  "Verifying...",
+    "outdated":   "Update available"
+  },
+  "settings": {
+    "appearance": "Appearance",
+    "language":   "Language",
+    "theme":      "Theme",
+    "theme_system":"Match system",
+    "theme_light":"Light",
+    "theme_dark": "Dark",
+    "account":    "Account",
+    "advanced":   "Advanced",
+    "about":      "About"
+  },
+  "tier": {
+    "1day":   "1 day",
+    "3day":   "3 days",
+    "1week":  "1 week",
+    "2week":  "2 weeks",
+    "1month": "1 month"
+  },
+  "cloud": {
+    "title":      "Cloud",
+    "saves":      "Saves",
+    "configs":    "Configs",
+    "no_data":    "Nothing synced yet"
+  }
+}

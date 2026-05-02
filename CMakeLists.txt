@@ -64,6 +64,14 @@ add_executable(launcher WIN32
     src/ui/render/skia_renderer.cpp
     src/ui/render/font_manager.cpp
     src/ui/theme/theme_manager.cpp
+
+    # Anim 框架 — 全 header-only 或单 .cpp
+    src/ui/anim/animator.cpp
+
+    # I18N
+    src/ui/i18n/locale.cpp
+
+    # Components / Views — Phase 1 仅含 spinner + loading；其他骨架在 Phase 2 接 .cpp 时启用
     src/ui/components/spinner.cpp
     src/ui/components/loading_card.cpp
     src/ui/views/loading_view.cpp
@@ -112,6 +120,7 @@ target_link_libraries(launcher PRIVATE
     wbemuuid
     opengl32
     ws2_32
+    tbs              # TPM Base Services for HWID
 )
 
 set_target_properties(launcher PROPERTIES

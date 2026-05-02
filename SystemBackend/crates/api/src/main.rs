@@ -4,6 +4,7 @@ use std::sync::Arc;
 mod auth;
 mod admin;
 mod heartbeat;
+mod rebind;
 mod state;
 mod subscription;
 
@@ -39,9 +40,11 @@ async fn main() -> anyhow::Result<()> {
 fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
     use axum::routing::{post, get};
     axum::Router::new()
-        .route("/auth/login",     post(auth::login))
-        .route("/auth/logout",    post(auth::logout))
-        .route("/heartbeat",      post(heartbeat::heartbeat))
-        .route("/subscription",   get(subscription::list_for_user))
+        .route("/auth/login",          post(auth::login))
+        .route("/auth/logout",         post(auth::logout))
+        .route("/heartbeat",           post(heartbeat::heartbeat))
+        .route("/subscription",        get(subscription::list_for_user))
+        .route("/hwid/rebind/request", post(rebind::submit))
+        .route("/hwid/rebind/list",    get(rebind::list_for_user))
         .with_state(state)
 }

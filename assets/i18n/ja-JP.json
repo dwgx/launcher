@@ -1,0 +1,65 @@
+{
+  "app": {
+    "name": "Launcher",
+    "tagline": "あなた専用のゲームランチャー"
+  },
+  "loading": {
+    "connecting": "接続中…",
+    "syncing":    "サブスクリプションを同期中…",
+    "ready":      "準備完了"
+  },
+  "auth": {
+    "sign_in":    "サインイン",
+    "username":   "ユーザー名",
+    "password":   "パスワード",
+    "remember_me":"ログイン状態を保持",
+    "submit":     "続行",
+    "error_invalid": "ユーザー名またはパスワードが違います"
+  },
+  "home": {
+    "greet":      "こんにちは、{name}",
+    "subtitle":   "おかえりなさい",
+    "tier":       "プラン",
+    "expires":    "期限",
+    "machine":    "本機",
+    "device_id":  "デバイス ID",
+    "last_login": "前回のサインイン"
+  },
+  "menu": {
+    "home":       "ホーム",
+    "library":    "ゲームライブラリ",
+    "cloud":      "クラウド",
+    "settings":   "設定",
+    "logout":     "サインアウト"
+  },
+  "library": {
+    "empty":      "サブスクリプションにまだゲームがありません",
+    "launch":     "起動",
+    "verifying":  "検証中…",
+    "outdated":   "更新があります"
+  },
+  "settings": {
+    "appearance": "外観",
+    "language":   "言語",
+    "theme":      "テーマ",
+    "theme_system":"システムに従う",
+    "theme_light":"ライト",
+    "theme_dark": "ダーク",
+    "account":    "アカウント",
+    "advanced":   "詳細",
+    "about":      "情報"
+  },
+  "tier": {
+    "1day":   "1日",
+    "3day":   "3日",
+    "1week":  "1週間",
+    "2week":  "2週間",
+    "1month": "1ヶ月"
+  },
+  "cloud": {
+    "title":      "クラウド",
+    "saves":      "セーブデータ",
+    "configs":    "設定",
+    "no_data":    "まだ何も同期されていません"
+  }
+}
