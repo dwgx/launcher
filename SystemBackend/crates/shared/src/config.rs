@@ -22,6 +22,13 @@ pub struct AppConfig {
 
     /// 管理后台登录密码（明文留 toml，部署后立刻 chmod 600）
     pub admin_password: String,
+
+    /// TLS 证书路径（fullchain pem）；为空则跑纯 HTTP
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    /// TLS 私钥路径（pem）
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
 }
 
 fn default_argon_mem() -> u32 { 64 * 1024 }

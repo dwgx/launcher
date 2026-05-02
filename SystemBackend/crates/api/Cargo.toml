@@ -36,3 +36,5 @@ askama      = { workspace = true }
 askama_axum = { workspace = true }
 hex         = { workspace = true }
 base64      = { workspace = true }
+axum-server = { workspace = true }
+rustls      = { workspace = true }
