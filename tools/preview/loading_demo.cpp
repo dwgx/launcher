@@ -260,32 +260,25 @@ void readSteamInfo() {
     g_steam.resolved = true;
     HKEY hk;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &hk) == ERROR_SUCCESS) {
-        wchar_t buf[256]; DWORD cb = sizeof(buf);
+        wchar_t buf[256]; DWORD cb;
+        // AutoLoginUser = Steam 登录账号名（可读，例如 "dwgx1337"）
+        cb = sizeof(buf);
+        if (RegQueryValueExW(hk, L"AutoLoginUser", nullptr, nullptr, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
+            g_steam.persona = buf;
+        }
+        // LastGameNameUsed = 上次玩的游戏名（可读，例如 "Counter-Strike 2"）
+        cb = sizeof(buf);
         if (RegQueryValueExW(hk, L"LastGameNameUsed", nullptr, nullptr, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
             g_steam.last_game = buf;
         }
-        cb = sizeof(buf);
-        if (RegQueryValueExW(hk, L"PseudoUUID", nullptr, nullptr, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
-            // PseudoUUID 不是 persona 名 — 只是设备 id
-        }
         RegCloseKey(hk);
     }
-    // PersonaName 在 HKCU\Software\Valve\Steam\ActiveProcess\... 没固定，
-    // 真正在 config/loginusers.vdf 文本里 — 这里用 Last user 的注册表 fallback：
-    HKEY hk2;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &hk2) == ERROR_SUCCESS) {
-        DWORD steam_id = 0; DWORD cb = sizeof(steam_id);
-        RegQueryValueExW(hk2, L"ActiveUser", nullptr, nullptr, (LPBYTE)&steam_id, &cb);
-        if (steam_id) {
-            wchar_t fmt[32]; swprintf_s(fmt, 32, L"steamid:%lu", steam_id);
-            g_steam.persona = fmt;
-        }
-        RegCloseKey(hk2);
+    if (g_steam.persona.empty()) g_steam.persona = L"未登录";
+    // 上次启动时间 / 总时长 — Steam 不在 reg 暴露（在 vdf 文件里），
+    // 显示成"上次玩的游戏"信息更直接：
+    if (g_steam.last_played.empty()) {
+        g_steam.last_played = g_steam.last_game.empty() ? L"—" : g_steam.last_game;
     }
-    // CS2 (730) 启动时间 — Steam 不在 reg 暴露；这里给空，后续真接时改成解析
-    // %SteamPath%\userdata\<id>\config\localconfig.vdf 的 "AppLastPlayed"
-    if (g_steam.persona.empty()) g_steam.persona = L"未登录 Steam";
-    if (g_steam.last_played.empty()) g_steam.last_played = L"—";
     if (g_steam.playtime_label.empty()) g_steam.playtime_label = L"—";
 }
 
@@ -558,14 +551,14 @@ void paintTopbar(Graphics& g, int Wpx) {
     Pen ring(pal.bg, 2.0f);
     g.DrawEllipse(&ring, ax + ar*2 - 7.0f, ay + ar*2 - 7.0f, 7.0f, 7.0f);
 
-    // hover 触发下拉
+    // 点击 trigger 切换 dropdown（不再 hover 自动展开 — 之前会"收不回去"）
     RectF avHit(pill_x, ty, pill_w + 16.0f, kTopbarH);
-    bool hovering = inRect(g_mouse, avHit);
-    if (hovering && !g_account_dropdown) {
-        g_account_dropdown = true;
-        g_dropdown_t.start(0, 1, 0.18f, 0, curve::easeOutBack);
-    }
-    hit(avHit, [](){}, true);
+    hit(avHit, [](){
+        g_account_dropdown = !g_account_dropdown;
+        g_dropdown_t.start(g_dropdown_t.value(),
+                           g_account_dropdown ? 1.0f : 0.0f,
+                           0.18f, 0, curve::easeOutBack);
+    }, true);
 }
 
 void paintAccountDropdown(Graphics& g, int Wpx) {
@@ -705,20 +698,27 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     g.ResetTransform();
 }
 
-// 鼠标离开下拉 + topbar 区域 → 自动关闭
-void updateDropdownHover(int Wpx) {
-    if (!g_account_dropdown) return;
+// 点击 dropdown 之外（且不在 trigger）→ 关闭
+void registerDropdownDismissHits(int Wpx, int Hpx) {
+    if (!g_account_dropdown && g_dropdown_t.value() < 0.001f) return;
     float dw = 240.0f;
     float dh = 240.0f + g_status_fold_t.value() * 124.0f;
-    RectF avHit((REAL)Wpx - 90.0f, 0, 90.0f, kTopbarH);
-    RectF dropdown(Wpx - 6.0f - dw, kTopbarH, dw + 6.0f, dh + 12.0f);
-    if (!inRect(g_mouse, avHit) && !inRect(g_mouse, dropdown)) {
+    float dx = Wpx - 6.0f - dw;
+    float dy = kTopbarH;
+    auto dismiss = [](){
         g_account_dropdown = false;
         g_status_fold_open = false;
         g_dropdown_t.start(g_dropdown_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
         g_status_fold_t.start(g_status_fold_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
-    }
+    };
+    // 4 环形 hit 避开 dropdown 本身 + topbar trigger 区
+    hit(RectF(0, 0, dx, kTopbarH), dismiss, true);                          // topbar 左侧
+    hit(RectF(0, kTopbarH, dx, Hpx - kTopbarH), dismiss, true);             // dropdown 左侧 + 下
+    hit(RectF(dx + dw, kTopbarH, Wpx - (dx + dw), Hpx - kTopbarH), dismiss, true);  // dropdown 右侧
+    hit(RectF(dx, dy + dh, dw, Hpx - (dy + dh)), dismiss, true);            // dropdown 下方
 }
+// 兼容旧名字
+void updateDropdownHover(int Wpx) { (void)Wpx; }
 
 void paintSidebar(Graphics& g, int Hpx) {
     const Palette& pal = palette();
@@ -1344,7 +1344,7 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
         modal::paintHistoryModalNew(g, Wpx, Hpx);
     }
     paintAccountDropdown(g, Wpx);
-    updateDropdownHover(Wpx);
+    registerDropdownDismissHits(Wpx, Hpx);
     modal::paintCS2Modal(g, Wpx, Hpx);
 }
 
@@ -1441,6 +1441,18 @@ void trayRemove() {
 void hideToTray(HWND hwnd) {
     trayAdd(hwnd);
     ShowWindow(hwnd, SW_HIDE);
+    // Win11 默认把第三方托盘 icon 收进 ↑ 弹出层，弹一个 balloon 让用户找得到
+    static bool first = true;
+    if (first) {
+        first = false;
+        NOTIFYICONDATAW info = g_nid;
+        info.uFlags = NIF_INFO;
+        wcscpy_s(info.szInfoTitle, L"Launcher");
+        wcscpy_s(info.szInfo, L"已最小化到托盘 — 双击图标恢复 / 右键退出（Win11 在 ↑ 内可找到）");
+        info.dwInfoFlags = NIIF_INFO;
+        info.uTimeout = 4000;
+        Shell_NotifyIconW(NIM_MODIFY, &info);
+    }
 }
 void showFromTray(HWND hwnd) {
     ShowWindow(hwnd, SW_SHOW);

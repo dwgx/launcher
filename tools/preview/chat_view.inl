@@ -14,14 +14,14 @@ struct Channel {
     bool is_market{false};
 };
 
-// 官方频道 — 没有 touhou/vrchat（按用户要求剔除）
+// 官方频道 — 没有 touhou/vrchat（按用户要求剔除）。unread 置 0，等真消息流接通
 const Channel kChannels[] = {
-    { L"announcements", L"announcements", L"IMPORTANT", 2, false },
+    { L"announcements", L"announcements", L"IMPORTANT", 0, false },
     { L"rules",         L"rules",         L"IMPORTANT", 0, false },
-    { L"general",       L"general",       L"GENERAL",   3, false },
+    { L"general",       L"general",       L"GENERAL",   0, false },
     { L"random",        L"random",        L"GENERAL",   0, false },
-    { L"helpdesk",      L"helpdesk",      L"GENERAL",   1, false },
-    { L"cs2",           L"cs2",           L"GAMES",    12, false },
+    { L"helpdesk",      L"helpdesk",      L"GENERAL",   0, false },
+    { L"cs2",           L"cs2",           L"GAMES",     0, false },
     { L"market",        L"market",        L"SHOP",      0, true  },
     { L"trades",        L"trades",        L"SHOP",      0, false },
 };

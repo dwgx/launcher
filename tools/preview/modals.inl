@@ -141,13 +141,13 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
     drawText_(g, L"Valve · Source 2 引擎",
               bx, by + 28, mw - 56, 9.0f, fade(pal.text_muted));
 
-    // 三段 stat — 真值从 Steam reg 读
+    // 三段 stat — 真值从 Steam HKCU reg 读
     float sty = by + 60;
     struct Stat { const wchar_t* k; std::wstring v; };
     Stat stats[] = {
-        { L"上次玩",   g_steam.last_played },
-        { L"总时长",   g_steam.playtime_label },
-        { L"Steam",   g_steam.persona },
+        { L"Steam 账号", g_steam.persona },
+        { L"最近玩的",   g_steam.last_played },
+        { L"总时长",     g_steam.playtime_label },
     };
     float sw = (mw - 56) / 3;
     for (int i = 0; i < 3; ++i) {
@@ -212,10 +212,12 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
             nullptr, nullptr, SW_SHOWNORMAL);
     });
 
-    // 点 modal 外关闭
-    hit(RectF(0, 0, (REAL)Wpx, (REAL)Hpx), [Wpx, Hpx, mx, my, mw, mh](){
-        if (!inRect(g_mouse, RectF(mx, my, mw, mh))) closeCS2();
-    }, true);
+    // 点 modal 外关闭 — 拆成 modal 外的 4 个环形 hit（不覆盖 modal 内部，
+    // 否则会阻断 ✕ / 启动 / play 等按钮的点击）
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeCS2(); }, true);                                 // 上
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeCS2(); }, true);              // 下
+    hit(RectF(0, my, mx, mh), [](){ closeCS2(); }, true);                                       // 左
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeCS2(); }, true);                    // 右
 }
 
 // ============================================================
@@ -355,13 +357,15 @@ void paintHistoryModalNew(Graphics& g, int Wpx, int Hpx) {
         g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
     }, true);
 
-    // 点外部关闭
-    hit(RectF(0, 0, (REAL)Wpx, (REAL)Hpx), [mx, my, mw, mh](){
-        if (!inRect(g_mouse, RectF(mx, my, mw, mh))) {
-            g_overlay = Overlay::None;
-            g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
-        }
-    }, true);
+    // 点外部关闭 — 4 环形 hit（避开 modal 内部，否则会阻断 ✕ / 关闭 / 翻页按钮）
+    auto closeModal = [](){
+        g_overlay = Overlay::None;
+        g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
+    };
+    hit(RectF(0, 0, (REAL)Wpx, my), closeModal, true);                              // 上
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), closeModal, true);            // 下
+    hit(RectF(0, my, mx, mh), closeModal, true);                                    // 左
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), closeModal, true);                  // 右
 }
 
 }  // namespace modal
