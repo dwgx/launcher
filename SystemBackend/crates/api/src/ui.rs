@@ -7,6 +7,7 @@ pub const ROUTE_DASHBOARD: &str = "dashboard";
 pub const ROUTE_USERS:     &str = "users";
 pub const ROUTE_INVITES:   &str = "invites";
 pub const ROUTE_REBIND:    &str = "rebind";
+pub const ROUTE_CHANNELS:  &str = "channels";
 
 pub fn host() -> &'static str { "154.40.36.22:1337" }
 

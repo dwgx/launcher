@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="card-title text-base">官方频道</h2>
+      <span class="badge badge-outline">{{ channels.len() }}</span>
+    </div>
+    <div class="text-xs opacity-60 mb-3">
+      客户端 chat list 写死按 slug 加载这些频道。改名只改显示标题，slug 不变 ⇒ 客户端不受影响。
+      清空 = 软删 (deleted_at) 该频道全部消息。
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="table table-zebra table-sm">
+        <thead>
+          <tr>
+            <th>分组</th>
+            <th>Slug</th>
+            <th>显示标题</th>
+            <th>消息数</th>
+            <th>最后活动</th>
+            <th>类型</th>
+            <th class="w-24"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in channels %}
+          <tr class="hover">
+            <td><span class="badge badge-outline badge-sm uppercase">{{ c.group_label }}</span></td>
+            <td><code class="font-mono text-orange-300 text-sm">{{ c.slug }}</code></td>
+            <td class="font-medium">{{ c.title }}</td>
+            <td class="font-mono opacity-80">{{ c.message_count }}</td>
+            <td class="text-xs opacity-60 font-mono">{{ c.last_at }}</td>
+            <td>
+              {% if c.is_official %}
+                <span class="badge badge-active badge-sm">官方</span>
+              {% else %}
+                <span class="badge badge-outline badge-sm">普通</span>
+              {% endif %}
+            </td>
+            <td>
+              <details class="dropdown dropdown-end">
+                <summary class="btn btn-xs btn-ghost">操作 ▾</summary>
+                <ul class="dropdown-content menu bg-base-200 rounded-box w-44 p-1 shadow border border-base-300/60 z-10">
+                  <li>
+                    <a onclick="document.getElementById('rename-{{ c.id }}').showModal()">
+                      <span>✎</span> 改名
+                    </a>
+                  </li>
+                  <li>
+                    <a class="text-rose-400" onclick="document.getElementById('clear-{{ c.id }}').showModal()">
+                      <span>⌫</span> 清空消息
+                    </a>
+                  </li>
+                </ul>
+              </details>
+
+              <dialog id="rename-{{ c.id }}" class="modal">
+                <div class="modal-box max-w-md">
+                  <h3 class="font-semibold text-base mb-1">重命名频道</h3>
+                  <p class="text-xs opacity-60 mb-4">slug <code class="font-mono">{{ c.slug }}</code> 不变；只改显示标题。</p>
+                  <form method="post" action="/admin/channels/{{ c.id }}/rename" class="space-y-3">
+                    <label class="form-control">
+                      <span class="label-text text-xs">新标题</span>
+                      <input name="title" value="{{ c.title }}" class="input input-bordered input-sm" required maxlength="64">
+                    </label>
+                    <div class="flex justify-end gap-2 mt-4">
+                      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('rename-{{ c.id }}').close()">取消</button>
+                      <button class="btn btn-primary btn-sm">保存</button>
+                    </div>
+                  </form>
+                </div>
+                <form method="dialog" class="modal-backdrop"><button>close</button></form>
+              </dialog>
+
+              <dialog id="clear-{{ c.id }}" class="modal">
+                <div class="modal-box max-w-md">
+                  <h3 class="font-semibold text-base mb-1">清空 #{{ c.title }} 全部消息？</h3>
+                  <p class="text-xs opacity-60 mb-4">软删除（deleted_at = now()），可在 audit_log 看记录。当前共 <span class="font-mono text-orange-300">{{ c.message_count }}</span> 条。</p>
+                  <form method="post" action="/admin/channels/{{ c.id }}/clear" class="flex justify-end gap-2">
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('clear-{{ c.id }}').close()">取消</button>
+                    <button class="btn btn-sm" style="background:#B14444;color:#fff;border:0;">确认清空</button>
+                  </form>
+                </div>
+                <form method="dialog" class="modal-backdrop"><button>close</button></form>
+              </dialog>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if channels.is_empty() %}
+          <tr><td colspan="7" class="text-center opacity-40 py-6">没有频道</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

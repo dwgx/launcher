@@ -33,11 +33,23 @@ pub struct AppConfig {
     /// 是否强制邀请码注册。生产默认 true。
     #[serde(default = "default_require_invite")]
     pub require_invite_code: bool,
+
+    /// chat 上传 / media — 控制能发多大文件。
+    /// 默认 image=8MB image=8MB image=8MB / video=32MB / generic=100MB（旧值）。
+    #[serde(default = "default_image_max")]
+    pub media_image_max_bytes: u64,
+    #[serde(default = "default_video_max")]
+    pub media_video_max_bytes: u64,
+    #[serde(default = "default_generic_max")]
+    pub media_generic_max_bytes: u64,
 }
 
 fn default_argon_mem() -> u32 { 64 * 1024 }
 fn default_argon_iters() -> u32 { 3 }
 fn default_require_invite() -> bool { true }
+fn default_image_max() -> u64 { 8 * 1024 * 1024 }
+fn default_video_max() -> u64 { 32 * 1024 * 1024 }
+fn default_generic_max() -> u64 { 100 * 1024 * 1024 }
 
 impl AppConfig {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {

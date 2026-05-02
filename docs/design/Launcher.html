@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Launcher</title>
+<link rel="stylesheet" href="styles.css" />
+<!-- Fonts: Space Grotesk (Latin) + Noto Sans SC (CN) + BIZ UDPGothic (JP UD).
+     This mirrors the SkFontMgr fallback chain in font_manager.cpp. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=BIZ+UDPGothic:wght@400;700&family=Source+Serif+4:ital,wght@0,500;0,700;1,500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<style>
+  /* override fontstack now Google webfont is loaded */
+  body { font-family: "Space Grotesk", "Noto Sans SC", "BIZ UDPGothic", "PingFang SC", "Microsoft YaHei UI", sans-serif; }
+  [data-cjk="zh"] { font-family: "Noto Sans SC", "Space Grotesk", "BIZ UDPGothic", "PingFang SC", sans-serif; }
+  [data-cjk="ja"] { font-family: "BIZ UDPGothic", "Noto Sans SC", "Space Grotesk", sans-serif; }
+  .mono, .field input.mono, .val.mono, .when { font-family: "DM Mono", "DejaVu Sans Mono", "JetBrains Mono", "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body data-cjk="zh">
+<div id="root"></div>
+
+<script type="application/json" id="i18n-en">{
+  "app":{"name":"Launcher","tagline":"Your private game launcher"},
+  "loading":{"connecting":"Connecting...","syncing":"Syncing subscriptions...","ready":"Ready"},
+  "auth":{"sign_in":"Sign in","register":"Register","username":"Username","password":"Password","remember_me":"Remember me","submit":"Continue","error_invalid":"Wrong username or password","forgot":"Forgot password?"},
+  "home":{"greet":"Hello, {name}","subtitle":"Welcome back","tier":"Plan","expires":"Expires","machine":"Machine","device_id":"Device ID","last_login":"Last sign in"},
+  "menu":{"home":"Home","library":"Library","chat":"Chat","cloud":"Cloud","settings":"Settings","logout":"Sign out","notifications":"Notifications"},
+  "library":{"empty":"No games in your subscription yet","launch":"Launch","verifying":"Verifying...","outdated":"Update available","count":"games"},
+  "settings":{"appearance":"Appearance","language":"Language","theme":"Theme","theme_system":"System","theme_light":"Light","theme_dark":"Dark","account":"Account","advanced":"Advanced","about":"About"},
+  "tier":{"1day":"1 day","3day":"3 days","1week":"1 week","2week":"2 weeks","1month":"1 month"},
+  "cloud":{"title":"Cloud","saves":"Saves","configs":"Configs","no_data":"Nothing synced yet"},
+  "history":{"label":"History","title":"Sign-in history","sub":"Last 5 sessions","records":"records"},
+  "chat":{"search":"Search","placeholder":"Write a message…","members":"members"},
+  "common":{"close":"Close"}
+}</script>
+
+<script type="application/json" id="i18n-zh">{
+  "app":{"name":"启动器","tagline":"你的私人游戏启动器"},
+  "loading":{"connecting":"连接中…","syncing":"同步订阅…","ready":"就绪"},
+  "auth":{"sign_in":"登录","register":"注册","username":"用户名","password":"密码","remember_me":"记住我","submit":"继续","error_invalid":"用户名或密码错误","forgot":"忘记密码？"},
+  "home":{"greet":"你好，{name}","subtitle":"欢迎回来","tier":"档位","expires":"到期","machine":"本机","device_id":"设备","last_login":"上次登录"},
+  "menu":{"home":"主页","library":"游戏库","chat":"聊天","cloud":"云端","settings":"设置","logout":"退出登录","notifications":"通知"},
+  "library":{"empty":"你的订阅里暂时没有游戏","launch":"启动","verifying":"校验中…","outdated":"有新版本","count":"个游戏"},
+  "settings":{"appearance":"外观","language":"语言","theme":"主题","theme_system":"跟随系统","theme_light":"亮色","theme_dark":"暗色","account":"账号","advanced":"高级","about":"关于"},
+  "tier":{"1day":"1 天","3day":"3 天","1week":"1 周","2week":"2 周","1month":"1 个月"},
+  "cloud":{"title":"云端","saves":"存档","configs":"配置","no_data":"尚未同步任何内容"},
+  "history":{"label":"历史","title":"登录历史","sub":"最近 5 次登录记录","records":"条记录"},
+  "chat":{"search":"搜索","placeholder":"写点什么…","members":"成员"},
+  "common":{"close":"关闭"}
+}</script>
+
+<script type="application/json" id="i18n-ja">{
+  "app":{"name":"Launcher","tagline":"あなた専用のゲームランチャー"},
+  "loading":{"connecting":"接続中…","syncing":"サブスクリプションを同期中…","ready":"準備完了"},
+  "auth":{"sign_in":"サインイン","register":"登録","username":"ユーザー名","password":"パスワード","remember_me":"ログイン状態を保持","submit":"続行","error_invalid":"ユーザー名またはパスワードが違います","forgot":"パスワードを忘れた？"},
+  "home":{"greet":"こんにちは、{name}","subtitle":"おかえりなさい","tier":"プラン","expires":"期限","machine":"本機","device_id":"デバイス ID","last_login":"前回のサインイン"},
+  "menu":{"home":"ホーム","library":"ライブラリ","chat":"チャット","cloud":"クラウド","settings":"設定","logout":"サインアウト","notifications":"通知"},
+  "library":{"empty":"サブスクリプションにまだゲームがありません","launch":"起動","verifying":"検証中…","outdated":"更新があります","count":"件"},
+  "settings":{"appearance":"外観","language":"言語","theme":"テーマ","theme_system":"システムに従う","theme_light":"ライト","theme_dark":"ダーク","account":"アカウント","advanced":"詳細","about":"情報"},
+  "tier":{"1day":"1日","3day":"3日","1week":"1週間","2week":"2週間","1month":"1ヶ月"},
+  "cloud":{"title":"クラウド","saves":"セーブデータ","configs":"設定","no_data":"まだ何も同期されていません"},
+  "history":{"label":"履歴","title":"ログイン履歴","sub":"直近 5 回","records":"件の記録"},
+  "chat":{"search":"検索","placeholder":"メッセージを入力…","members":"メンバー"},
+  "common":{"close":"閉じる"}
+}</script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="components.jsx"></script>
+<script type="text/babel" src="views.jsx"></script>
+
+<script type="text/babel" data-presets="env,react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+const TWEAKS_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "lang": "zh-CN",
+  "theme": "dark",
+  "username": "dwgx",
+  "view": "chat",
+  "loggedIn": true,
+  "status": "online"
+}/*EDITMODE-END*/;
+
+function loadDict(id) {
+  try { return JSON.parse(document.getElementById(id).textContent); } catch (e) { return {}; }
+}
+const DICTS = {
+  "en":    loadDict("i18n-en"),
+  "zh-CN": loadDict("i18n-zh"),
+  "ja-JP": loadDict("i18n-ja"),
+};
+
+function makeT(lang) {
+  const dict = DICTS[lang] || DICTS["zh-CN"];
+  return (key, fallback="") => {
+    const parts = key.split(".");
+    let v = dict;
+    for (const p of parts) { v = v && v[p]; }
+    if (typeof v === "string") return v;
+    return fallback || key;
+  };
+}
+
+const App = () => {
+  const [tweaks, setTweak] = useTweaks(TWEAKS_DEFAULTS);
+  const lang = tweaks.lang;
+  const theme = tweaks.theme;
+  const t = useMemo(() => makeT(lang), [lang]);
+  const [view, setView] = useState(tweaks.view || "home");
+  const [loggedIn, setLoggedIn] = useState(tweaks.loggedIn !== false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [booting, setBooting] = useState(false);
+  const status = tweaks.status || "online";
+  const setStatus = (s) => setTweak({ status: s });
+
+  // Apply theme
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "system") {
+      const mq = window.matchMedia("(prefers-color-scheme: light)");
+      root.dataset.theme = mq.matches ? "light" : "dark";
+    } else {
+      root.dataset.theme = theme;
+    }
+  }, [theme]);
+
+  // Lang -> CJK class on body for font fallback
+  useEffect(() => {
+    document.body.dataset.cjk = lang === "ja-JP" ? "ja" : (lang === "en" ? "en" : "zh");
+    document.documentElement.lang = lang;
+  }, [lang]);
+
+  // Sync tweak->local view
+  useEffect(() => { if (tweaks.view && tweaks.view !== view) setView(tweaks.view); }, [tweaks.view]);
+  useEffect(() => { if (tweaks.loggedIn !== loggedIn) setLoggedIn(tweaks.loggedIn !== false); }, [tweaks.loggedIn]);
+
+  const user = {
+    name: tweaks.username || "dwgx",
+    email: "dwgx1337@outlook.com",
+    tier_key: "1week",
+    expires: "2026-05-09",
+    device_id_short: "f8a1c2d4...e5b6",
+    last_login: "05-02 10:32",
+  };
+
+  const sessions = [
+    { device: "Windows · ThinkBook", ip: "118.112.34.6",  location: "成都, 中国",  when: "05-02 10:32" },
+    { device: "Windows · ThinkBook", ip: "118.112.34.6",  location: "成都, 中国",  when: "05-01 22:08" },
+    { device: "Windows · Office",    ip: "203.45.67.89",  location: "北京, 中国",  when: "04-29 14:22" },
+    { device: "Windows · ThinkBook", ip: "118.112.34.6",  location: "成都, 中国",  when: "04-28 09:15" },
+    { device: "macOS · MBP",         ip: "192.168.1.87",  location: "本地",        when: "04-25 18:51" },
+  ];
+
+  const games = [
+    { id:"cs2", name:"Counter-Strike 2", version:"1.40.1.5", tint:"#F5A524" },
+  ];
+
+  const handleNav = (id) => {
+    if (id === "logout") {
+      setBooting(true);
+      setTimeout(() => { setLoggedIn(false); setBooting(false); setTweak({ loggedIn: false }); }, 600);
+      return;
+    }
+    setView(id); setTweak({ view: id });
+  };
+  const handleSubmit = () => {
+    setBooting(true);
+    setTimeout(() => { setLoggedIn(true); setBooting(false); setTweak({ loggedIn: true }); }, 900);
+  };
+
+  // Render
+  if (booting) return <LoadingView />;
+  if (!loggedIn) return <LoginView t={t} onSubmit={handleSubmit} />;
+
+  return (
+    <div className="window">
+      <Topbar title={t("app.name")} user={user} status={status} setStatus={setStatus}
+              lang={lang} t={t}
+              onLogout={() => handleNav("logout")}
+              onShowHistory={() => setShowHistory(true)}
+              onNavSettings={() => handleNav("settings")} />
+      <Sidebar active={view} onNav={handleNav} t={t} />
+      <main className="main">
+        {view === "home"     && <HomeView user={user} status={status} lang={lang} t={t} onShowHistory={()=>setShowHistory(true)} />}
+        {view === "library"  && <LibraryView items={games} t={t} />}
+        {view === "chat"     && <ChatView t={t} status={status} name={user.name} />}
+        {view === "cloud"    && <CloudView t={t} />}
+        {view === "settings" && (
+          <SettingsView t={t} lang={lang} setLang={(v)=>setTweak({lang:v})}
+                        theme={theme} setTheme={(v)=>setTweak({theme:v})} />
+        )}
+        {showHistory && <HistoryModal sessions={sessions} t={t} onClose={()=>setShowHistory(false)} />}
+      </main>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection title="View">
+          <TweakSelect tweakKey="view" label="Active view"
+            options={[
+              {value:"home",label:"Home"},
+              {value:"library",label:"Library"},
+              {value:"chat",label:"Chat"},
+              {value:"cloud",label:"Cloud"},
+              {value:"settings",label:"Settings"},
+            ]} />
+          <TweakToggle tweakKey="loggedIn" label="Logged in" />
+          <TweakSelect tweakKey="status" label="Status"
+            options={[
+              {value:"online",label:"Online"},
+              {value:"busy",label:"Busy"},
+              {value:"away",label:"Away"},
+              {value:"sleep",label:"Sleeping"},
+              {value:"offline",label:"Offline"},
+            ]} />
+        </TweakSection>
+        <TweakSection title="Locale & theme">
+          <TweakRadio tweakKey="lang" label="Language"
+            options={[{value:"en",label:"EN"},{value:"zh-CN",label:"中"},{value:"ja-JP",label:"日"}]} />
+          <TweakRadio tweakKey="theme" label="Theme"
+            options={[{value:"dark",label:"Dark"},{value:"light",label:"Light"},{value:"system",label:"System"}]} />
+        </TweakSection>
+        <TweakSection title="Identity">
+          <TweakText tweakKey="username" label="Username" />
+        </TweakSection>
+      </TweaksPanel>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

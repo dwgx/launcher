@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 mod auth;
 mod admin;
+mod admin_channels;
 mod admin_invites;
 mod admin_users;
 mod chat;
@@ -44,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/admin", admin::routes(state.clone()))
         .merge(admin_users::routes())
         .merge(admin_invites::routes())
+        .merge(admin_channels::routes())
         .merge(rebind::admin_routes())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         // multipart 上限 100MB（媒体上传）

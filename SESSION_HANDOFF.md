@@ -4,8 +4,8 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-02 22:10**
-最后 commit：**`54a8a22`** feat(preview): 全面对齐 Claude Design styles.css
+最后更新：**2026-05-02 22:42**
+最后 commit：**待提交** feat: Chat + Market + Picker + CS2 modal + admin channels + media size config
 GitHub：https://github.com/dwgx/launcher (private, master)
 
 ---
@@ -25,7 +25,7 @@ GitHub：https://github.com/dwgx/launcher (private, master)
 | admin 密码 | 在 config.toml `admin_password=` ，凭据零明文不贴这里 |
 | 部署源 | `/opt/systembackend/build_src/SystemBackend/` (cargo build 在这) |
 
-### 已应用 migrations（17 张表）
+### 已应用 migrations
 
 ```
 0001_init           users / sessions / subscriptions / audit_log / heartbeats
@@ -33,7 +33,6 @@ GitHub：https://github.com/dwgx/launcher (private, master)
 0003_user_profile   users.uid (7位数字) / username / nickname / avatar /
                     password_changed_at + login_history + rate_limits + user_avatar_meta
 0004_invite_codes   invite_codes / invite_code_uses + users.invite_code_used
-                    (bootstrap LAUNCHER1 已被 alice 注册时用掉)
 0005_chat           chats(dm/group/channel) / chat_dm_index / chat_members /
                     messages(text/image/video/gif/sticker/pack_share/system, soft delete) /
                     message_reactions / media_files(sha256) /
@@ -41,6 +40,9 @@ GitHub：https://github.com/dwgx/launcher (private, master)
                     bump_chat_last_message 触发器
 0006_market         market_categories(5 预置) / market_listings / market_orders /
                     market_reviews / credit_ledger + users.credit_balance
+0007_official_channels  chats.slug / is_official / group_label + 8 官方频道写入
+                        (announcements/rules/general/random/helpdesk/cs2/market/trades)
+                        — 不要 touhou/vrchat
 ```
 
 ### API（全部 /api 前缀，session_token 鉴权）
@@ -61,7 +63,8 @@ market         GET /market/{categories, listings, listings/:id, orders/mine},
                POST /market/{listing/create, purchase, review, admin/grant_credit}
 ws             WS /ws/chat?session_token= (broadcast hub, 多设备 fanout)
 admin SSR      /, /admin (Tailwind+DaisyUI launcher dark theme):
-               /admin/{login, users, invites, rebind} + dialog modal 编辑 / 重置密码
+               /admin/{login, users, invites, rebind, channels} + dialog modal 编辑 / 重置密码
+               /admin/channels：列出全部 channels + DaisyUI dropdown 行操作 (rename / clear)
 ```
 
 ### 已知账号（数据库里）
@@ -92,17 +95,30 @@ Main         topbar 48 + sidebar 200 + 5 view
 ### View（已实现）
 
 - **Home**：profile-card grid 86/1fr，72×72 头像 + 14×14 online dot 3px ring，name 18 bold + email + Online，4 行 meta + history-link 链接
-- **Lunching**：240×140 game-card，linear-gradient `#2c2825→#1f1c19` 底 + radial primary 30%/20% 蒙版（**只一个 CS2 卡**）
+- **Lunching**：240×140 game-card，**真 CS2 fastly steam 缩略图**（assets/images/games/cs2_header.jpg）+ 渐变蒙版让文字可读；fallback 渐变（无图时）。点击弹出 **CS2 详情 Modal** (Steam 商店链接 + 启动按钮 + steam:// 协议)
+- **Chat**（**新**）：Discord 风 240/1fr，server head + chan-group fold (▾) + chat-row + bubble。
+    - 8 官方频道写死（剔除 touhou/vrchat）
+    - bubble: text / sticker / gif / link card (Steam URL 自动渲染) / video (▶ 缩略+时长) / system pill / day-divider / typing 三点弹动 / 引用气泡 (3px 主色竖条 + 缩略原文 — Discord 风)
+    - tail-stack：连续同作者尾部圆角拉直
+    - composer：emoji/sticker/gif/attach 4 图标 + textarea + send btn (右下 38 圆 + glow)
+    - Picker 320×360 三 tab (Emoji 8 列 / Sticker 8 列 / GIF 2 列渐变占位)，emoji 插入 draft、sticker/gif 直接发
+    - 头像左键 → 在自己 draft 插入 @作者 (用户要求的"右键艾特")
+    - 搜索 + more 行操作（design icon-btn 34）
+- **Market**（**新**）：在 SHOP/market 频道里，单列卡 + search 38 + sort（热度/最新/价格）+ 5/page 分页。**卖 CS2 .cfg 参数 / 灵敏度 / autoexec / crosshair / 代练**（按用户要求"出售 cfg 参数"）。10 条 sample 含 NiKo crosshair / s1mple cfg / Faceit 代练 等
 - **Cloud**：占位空状态卡
-- **Settings**：seg control（card 容器 padding 4 + active=page-bg 凸起），三段 Language/Theme/About
+- **Settings**：seg control，三段 Language/Theme/About
 - **Profile**：3 字段 UID/Username/Nickname（前两锁），上传头像/改密按钮
 
 ### 全局特性
 
 - **全局可拖动**：WM_NCHITTEST 默认 HTCAPTION，g_hits 区域返 HTCLIENT
 - **自绘 InputBox**：替换 Win32 EDIT，WM_CHAR + caret blink + password mode
-- **头像 hover 下拉**：scale-up from 右上原点 + auto-hide
-- **History overlay**：modal 半透明遮罩 + 5 行登录记录（**未对齐 design 460 wide**）
+- **floating label tween**（**修**）：现在用 `Tween float_t` 在 0..1 平滑插值 size + position + color（之前是单帧切换）
+- **头像 hover 下拉**：scale-up from 右上原点 + auto-hide。
+    - **新**：5 状态折叠菜单 (online/busy/away/sleep/offline) — 用户要求的"在线情况折叠菜单"
+    - 4 行操作 (profile/history/password/signout)，每行 Claude SVG icon
+- **Claude 审美 SVG icon**（**新**）：`icons.inl` 提供 30+ 图标用 GraphicsPath 路径手画 (Home/Library/Cloud/Chat/Settings/Logout/Logo/Eye/EyeOff/X/History/Search/Send/Phone/Video/More/Smile/Paperclip/Check/Check2/User/Moon/Shield/Bell/Reply/At/Link/Play/Trash/Edit/Plus/Hash)。stroke=1.7 + LineCap=Round 跟 design 一致
+- **History overlay**（**修**）：460 wide design 规格 + row-item 排版 + 5/page 分页 + ‹ › 翻页 + 关闭按钮 (Ghost btn) — 全部 13 条记录
 
 ---
 

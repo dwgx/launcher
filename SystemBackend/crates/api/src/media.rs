@@ -20,7 +20,20 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 const MEDIA_ROOT: &str = "/opt/systembackend/media";
-const MAX_BYTES: usize = 100 * 1024 * 1024;   // 100MB / file（大视频走 chunked，TODO）
+
+fn category_for(mime: &str) -> &'static str {
+    if mime.starts_with("image/") { "image" }
+    else if mime.starts_with("video/") { "video" }
+    else { "generic" }
+}
+
+fn max_bytes_for(state: &AppState, mime: &str) -> u64 {
+    match category_for(mime) {
+        "image" => state.cfg.media_image_max_bytes,
+        "video" => state.cfg.media_video_max_bytes,
+        _       => state.cfg.media_generic_max_bytes,
+    }
+}
 
 fn ext_for(mime: &str) -> &'static str {
     match mime {
@@ -81,10 +94,12 @@ pub async fn upload(
     let token = token.ok_or((StatusCode::BAD_REQUEST, "session_token missing".into()))?;
     let uid = auth_user(&s, &token).await?;
     let bytes = file_bytes.ok_or((StatusCode::BAD_REQUEST, "file missing".into()))?;
-    if bytes.len() > MAX_BYTES {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, format!("max {} bytes", MAX_BYTES)));
-    }
     let mime = file_mime.unwrap_or_else(|| "application/octet-stream".into());
+    let limit = max_bytes_for(&s, &mime);
+    if (bytes.len() as u64) > limit {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("{} max {} bytes", category_for(&mime), limit)));
+    }
 
     // 计算 sha256
     let mut hasher = Sha256::new();

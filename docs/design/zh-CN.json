@@ -1,0 +1,65 @@
+{
+  "app": {
+    "name": "Launcher",
+    "tagline": "你的私人游戏启动器"
+  },
+  "loading": {
+    "connecting": "连接中…",
+    "syncing":    "同步订阅…",
+    "ready":      "就绪"
+  },
+  "auth": {
+    "sign_in":    "登录",
+    "username":   "用户名",
+    "password":   "密码",
+    "remember_me":"记住我",
+    "submit":     "继续",
+    "error_invalid": "用户名或密码错误"
+  },
+  "home": {
+    "greet":      "你好，{name}",
+    "subtitle":   "欢迎回来",
+    "tier":       "订阅档位",
+    "expires":    "到期时间",
+    "machine":    "本机",
+    "device_id":  "设备 ID",
+    "last_login": "上次登录"
+  },
+  "menu": {
+    "home":       "主页",
+    "library":    "游戏库",
+    "cloud":      "云端",
+    "settings":   "设置",
+    "logout":     "退出登录"
+  },
+  "library": {
+    "empty":      "你的订阅里暂时没有游戏",
+    "launch":     "启动",
+    "verifying":  "校验中…",
+    "outdated":   "有新版本"
+  },
+  "settings": {
+    "appearance": "外观",
+    "language":   "语言",
+    "theme":      "主题",
+    "theme_system":"跟随系统",
+    "theme_light":"亮色",
+    "theme_dark": "暗色",
+    "account":    "账号",
+    "advanced":   "高级",
+    "about":      "关于"
+  },
+  "tier": {
+    "1day":   "1 天",
+    "3day":   "3 天",
+    "1week":  "1 周",
+    "2week":  "2 周",
+    "1month": "1 个月"
+  },
+  "cloud": {
+    "title":      "云端",
+    "saves":      "存档",
+    "configs":    "配置",
+    "no_data":    "尚未同步任何内容"
+  }
+}

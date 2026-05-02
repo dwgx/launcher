@@ -17,6 +17,7 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <vector>
 #include <string>
 #include <functional>
@@ -24,9 +25,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 using namespace Gdiplus;
 
@@ -114,6 +117,7 @@ const char* tr(const char* key) {
         {"home.history",        "History",          u8"历史",              u8"履歴"},
         {"menu.home",           "Home",             u8"主页",              u8"ホーム"},
         {"menu.lunching",       "Lunching",         u8"Lunching",          u8"Lunching"},
+        {"menu.chat",           "Chat",             u8"聊天",              u8"チャット"},
         {"menu.cloud",          "Cloud",            u8"云端",              u8"クラウド"},
         {"menu.settings",       "Settings",         u8"设置",              u8"設定"},
         {"acc.profile",         "Profile",          u8"个人信息",          u8"プロフィール"},
@@ -204,7 +208,7 @@ struct Tween {
 // 入场流程：Dot → ExpandLoading → Loading → ExpandAuth → Auth → ExpandMain → Main
 enum class Stage { Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth, ExpandMain, Main };
 enum class AuthMode { Login, Register };
-enum class View  { Home, Lunching, Cloud, Settings, Profile };
+enum class View  { Home, Lunching, Chat, Cloud, Settings, Profile };
 enum class Overlay { None, History };
 
 Stage    g_stage    = Stage::Dot;
@@ -238,6 +242,29 @@ struct UserInfo {
     const wchar_t* last_login= L"05-02 10:32";
 } g_user;
 
+enum class UserStatus { Online, Busy, Away, Sleep, Offline };
+UserStatus g_status = UserStatus::Online;
+bool g_status_fold_open = false;
+Tween g_status_fold_t;
+const wchar_t* statusKey(UserStatus s) {
+    switch (s) {
+    case UserStatus::Online:  return L"online";
+    case UserStatus::Busy:    return L"busy";
+    case UserStatus::Away:    return L"away";
+    case UserStatus::Sleep:   return L"sleep";
+    default:                  return L"offline";
+    }
+}
+const wchar_t* statusLabel(UserStatus s, Lang lang) {
+    static const wchar_t* zh[] = { L"在线", L"繁忙", L"离开", L"睡眠", L"离线" };
+    static const wchar_t* en[] = { L"Online", L"Busy", L"Away", L"Sleeping", L"Offline" };
+    static const wchar_t* ja[] = { L"オンライン", L"取り込み中", L"離席中", L"おやすみ", L"オフライン" };
+    int i = (int)s;
+    if (lang == Lang::En) return en[i];
+    if (lang == Lang::JaJP) return ja[i];
+    return zh[i];
+}
+
 // ====================================================================
 // 自绘 Input (替代 Win32 EDIT)
 // ====================================================================
@@ -246,6 +273,8 @@ struct InputBox {
     int  cursor = 0;
     bool password = false;
     RectF bounds{};   // 由 paint 时设置, hit 用
+    // floating label tween — 0 = resting (label 居中), 1 = floating (label top)
+    Tween float_t;
 
     void onChar(wchar_t c) {
         if (c == 0x08) { // backspace
@@ -391,10 +420,17 @@ void paintLoading(Graphics& g, int Wpx, int Hpx) {
 const float kSidebarW = 200.0f;
 const float kTopbarH  = 48.0f;
 
+// 包含子模块（依赖 palette / Color / Tween / drawText_ / fillRR / hit / g_mouse）
+#include "icons.inl"
+#include "modals.inl"
+#include "market_view.inl"
+#include "chat_view.inl"
+
 struct MenuEntry { View view; const char* key; const wchar_t* glyph; };
 const MenuEntry kMenu[] = {
     { View::Home,     "menu.home",     L"◉" },
     { View::Lunching, "menu.lunching", L"⚡" },
+    { View::Chat,     "menu.chat",     L"✉" },
     { View::Cloud,    "menu.cloud",    L"☁" },
     { View::Settings, "menu.settings", L"⚙" },
 };
@@ -461,55 +497,131 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     const Palette& pal = palette();
 
     float t = g_dropdown_t.value();
-    float dw = 168.0f, dh = 196.0f;
+    float dw = 240.0f;
+    float fold_extra = g_status_fold_t.value() * 124.0f;   // 5 * 24 + 4
+    float dh = 240.0f + fold_extra;
     float dx = Wpx - 6.0f - dw;
     float dy = kTopbarH + 4.0f - 6.0f * (1.0f - t);
-    float scale = 0.94f + 0.06f * t;   // 从右上头像向下展开
+    float scale = 0.94f + 0.06f * t;
     BYTE a = (BYTE)(255 * t);
     if (a == 0) return;
 
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
 
-    // scale 相对于 transform-origin 右上角
     float ox = dx + dw, oy = dy;
     g.TranslateTransform(ox, oy);
     g.ScaleTransform(scale, scale);
     g.TranslateTransform(-ox, -oy);
 
     Color cardC(a, pal.card.GetR(), pal.card.GetG(), pal.card.GetB());
-    drawShadow(g, dx, dy, dw, dh, 10.0f, fade(pal.shadow_card_hover), 6.0f, 4);
-    fillRR(g, dx, dy, dw, dh, 10.0f, cardC);
+    drawShadow(g, dx, dy, dw, dh, 12.0f, fade(pal.shadow_card_hover), 6.0f, 4);
+    fillRR(g, dx, dy, dw, dh, 12.0f, cardC);
+    strokeRR(g, dx, dy, dw, dh, 12.0f, fade(pal.divider));
 
-    // 顶部 user 简介
-    drawText_(g, g_user.nickname, dx + 12, dy + 10, dw - 24,
-              11.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    wchar_t uid_line[64]; swprintf_s(uid_line, 64, L"UID  %ls", g_user.uid);
-    drawText_(g, uid_line, dx + 12, dy + 28, dw - 24,
+    // 顶部 header — avatar + nickname + email
+    float ar = 14;
+    SolidBrush avbg(fade(pal.primary));
+    g.FillEllipse(&avbg, dx + 12, dy + 12, ar*2, ar*2);
+    Font af(kFontFace, 9.5f, FontStyleBold, UnitPoint);
+    SolidBrush avf(Color((BYTE)(255 * t), 255, 255, 255));
+    StringFormat avfmt; avfmt.SetAlignment(StringAlignmentCenter); avfmt.SetLineAlignment(StringAlignmentCenter);
+    wchar_t init[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
+    g.DrawString(init, -1, &af, RectF(dx + 12, dy + 12, ar*2, ar*2), &avfmt, &avf);
+    drawText_(g, g_user.nickname, dx + 50, dy + 12, dw - 60,
+              10.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, g_user.email, dx + 50, dy + 28, dw - 60,
               7.5f, fade(pal.text_muted));
 
     Pen sep(fade(pal.divider), 1.0f);
     g.DrawLine(&sep, dx + 8, dy + 50, dx + dw - 8, dy + 50);
 
+    // status fold trigger
+    float iy = dy + 58;
+    RectF strigger(dx + 6, iy, dw - 12, 30);
+    bool shov = inRect(g_mouse, strigger);
+    if (shov) {
+        Color hc((BYTE)(20 * t), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+        fillRR(g, strigger.X, strigger.Y, strigger.Width, strigger.Height, 6, hc);
+    }
+    // status dot
+    SolidBrush sd(fade(chatv::statusColor(pal, statusKey(g_status))));
+    g.FillEllipse(&sd, dx + 14.0f, iy + 12.0f, 8.0f, 8.0f);
+    drawText_(g, statusLabel(g_status, g_lang), dx + 30, iy + 8, dw - 60,
+              9.0f, fade(pal.text));
+    drawText_(g, g_status_fold_open ? L"▴" : L"▾", dx + dw - 22, iy + 8, 14,
+              8.0f, fade(pal.text_muted));
+    hit(strigger, [](){
+        g_status_fold_open = !g_status_fold_open;
+        g_status_fold_t.start(g_status_fold_t.value(), g_status_fold_open ? 1.0f : 0.0f,
+                              0.22f, 0, curve::easeOutCubic);
+    }, true);
+    iy += 32;
+
+    // status fold body
+    if (g_status_fold_t.value() > 0.001f) {
+        float ft = g_status_fold_t.value();
+        UserStatus statuses[] = { UserStatus::Online, UserStatus::Busy, UserStatus::Away, UserStatus::Sleep, UserStatus::Offline };
+        for (auto s : statuses) {
+            if (s == g_status) continue;
+            float row_y = iy;
+            RectF r(dx + 14, row_y, dw - 28, 24 * ft);
+            if (r.Height < 4) continue;
+            bool hov = inRect(g_mouse, r);
+            if (hov) {
+                Color hc((BYTE)(20 * t * ft), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+                fillRR(g, r.X, r.Y, r.Width, r.Height, 4, hc);
+            }
+            SolidBrush dot(Color((BYTE)(t * ft * 255),
+                                 chatv::statusColor(pal, statusKey(s)).GetR(),
+                                 chatv::statusColor(pal, statusKey(s)).GetG(),
+                                 chatv::statusColor(pal, statusKey(s)).GetB()));
+            g.FillEllipse(&dot, dx + 18.0f, row_y + 8.0f * ft, 6.0f, 6.0f);
+            Color tx_c((BYTE)(t * ft * pal.text.GetA()), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+            drawText_(g, statusLabel(s, g_lang), dx + 32, row_y + 4 * ft, dw - 60,
+                      8.5f, tx_c);
+            UserStatus target = s;
+            hit(r, [target](){
+                g_status = target;
+                g_status_fold_open = false;
+                g_status_fold_t.start(g_status_fold_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+            }, true);
+            iy += 24 * ft;
+        }
+        // 底部 sep
+        if (ft > 0.5f) {
+            Pen ssep(fade(pal.divider), 1.0f);
+            g.DrawLine(&ssep, dx + 8, iy + 4, dx + dw - 8, iy + 4);
+        }
+        iy += 8;
+    }
+
     // 菜单条目
-    struct Item { const char* key; const wchar_t* glyph; std::function<void()> click; };
+    struct Item { const char* key; icons::Name icon; std::function<void()> click; bool danger; };
     Item items[] = {
-        { "acc.profile",  L"◐", [](){ switchView(View::Profile); g_account_dropdown=false; g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); } },
-        { "acc.history",  L"⏱", [](){ g_overlay = Overlay::History; g_overlay_t.start(0,1,0.25f,0,curve::easeOutCubic); g_account_dropdown=false; g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); } },
-        { "acc.password", L"⚿", [](){ } },
-        { "acc.signout",  L"⏻", [](){ } },
+        { "acc.profile",  icons::Name::User, [](){
+              switchView(View::Profile); g_account_dropdown=false;
+              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
+        { "acc.history",  icons::Name::History, [](){
+              g_overlay = Overlay::History;
+              g_overlay_t.start(0,1,0.25f,0,curve::easeOutCubic);
+              g_account_dropdown=false;
+              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
+        { "acc.password", icons::Name::Shield, [](){ }, false },
+        { "acc.signout",  icons::Name::Logout, [](){ }, true },
     };
-    float iy = dy + 60;
     for (auto& it : items) {
-        RectF r(dx + 6, iy, dw - 12, 28);
+        RectF r(dx + 6, iy, dw - 12, 30);
         bool hover = inRect(g_mouse, r);
         if (hover) {
-            Color hc((BYTE)(40 * t), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
-            fillRR(g, r.X, r.Y, r.Width, r.Height, 6.0f, hc);
+            Color hc(it.danger ? (BYTE)(28 * t) : (BYTE)(20 * t),
+                     it.danger ? 0xE3 : pal.text.GetR(),
+                     it.danger ? 0x4B : pal.text.GetG(),
+                     it.danger ? 0x4B : pal.text.GetB());
+            fillRR(g, r.X, r.Y, r.Width, r.Height, 6, hc);
         }
-        Color tc = fade(pal.text);
-        if (strcmp(it.key, "acc.signout") == 0) tc = fade(Color(255, 0xE3, 0x4B, 0x4B));
-        drawText_(g, it.glyph, r.X + 10, r.Y + 7, 14, 9.5f, tc);
-        drawText_(g, W(tr(it.key)).c_str(), r.X + 30, r.Y + 7, r.Width - 36, 8.5f, tc);
+        Color tc = it.danger ? fade(Color(255, 0xE3, 0x4B, 0x4B)) : fade(pal.text);
+        icons::drawSvg(g, it.icon, r.X + 10, r.Y + 7, 16, tc);
+        drawText_(g, W(tr(it.key)).c_str(), r.X + 32, r.Y + 8, r.Width - 40, 9.0f, tc);
         hit(r, it.click, true);
         iy += 32;
     }
@@ -520,11 +632,15 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
 // 鼠标离开下拉 + topbar 区域 → 自动关闭
 void updateDropdownHover(int Wpx) {
     if (!g_account_dropdown) return;
-    RectF avHit((REAL)Wpx - 70.0f, 0, 70.0f, kTopbarH);
-    RectF dropdown(Wpx - 6.0f - 168.0f, kTopbarH + 4.0f, 168.0f, 196.0f);
+    float dw = 240.0f;
+    float dh = 240.0f + g_status_fold_t.value() * 124.0f;
+    RectF avHit((REAL)Wpx - 90.0f, 0, 90.0f, kTopbarH);
+    RectF dropdown(Wpx - 6.0f - dw, kTopbarH, dw + 6.0f, dh + 12.0f);
     if (!inRect(g_mouse, avHit) && !inRect(g_mouse, dropdown)) {
         g_account_dropdown = false;
+        g_status_fold_open = false;
         g_dropdown_t.start(g_dropdown_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
+        g_status_fold_t.start(g_status_fold_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
     }
 }
 
@@ -687,30 +803,58 @@ void paintLunchingView(Graphics& g, RectF area) {
     drawShadow(g, gx, gy - lift, 240, 140, 12.0f,
                hover ? fade(pal.shadow_card_hover) : fade(pal.shadow_card),
                hover ? 8.0f : 2.0f, hover ? 4 : 3);
-    // gradient base 135deg #2c2825 → #1f1c19
-    LinearGradientBrush base(
-        PointF(gx, gy - lift), PointF(gx + 240, gy - lift + 140),
-        Color((BYTE)(255 * op), 0x2C, 0x28, 0x25),
-        Color((BYTE)(255 * op), 0x1F, 0x1C, 0x19));
-    GraphicsPath card; buildRoundRect(card, gx, gy - lift, 240, 140, 12.0f);
-    g.FillPath(&base, &card);
-    // radial primary cover at 30% 20%
-    GraphicsPath cover; cover.AddEllipse(gx - 80.0f, gy - lift - 100.0f, 280.0f, 280.0f);
-    PathGradientBrush rad(&cover);
-    Color radCenter((BYTE)(140 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    Color radEdge(0, 0, 0, 0);
-    rad.SetCenterColor(radCenter);
-    int n = 1;
-    rad.SetSurroundColors(&radEdge, &n);
-    g.SetClip(&card);
-    g.FillPath(&rad, &cover);
-    g.ResetClip();
 
-    // CS yellow accent
-    Font cf(kFontFace, 22.0f, FontStyleBold, UnitPoint);
-    SolidBrush csB(Color((BYTE)(220 * op), 0xF5, 0xC4, 0x4C));
-    StringFormat csF; csF.SetAlignment(StringAlignmentNear);
-    g.DrawString(L"CS", -1, &cf, RectF(gx + 14, gy - lift + 12, 60, 30), &csF, &csB);
+    GraphicsPath card; buildRoundRect(card, gx, gy - lift, 240, 140, 12.0f);
+    modal::ensureCS2Thumb();
+    if (modal::g_cs2_thumb) {
+        // 真缩略图 cover (Steam fastly)
+        g.SetClip(&card);
+        float iw = (float)modal::g_cs2_thumb->GetWidth();
+        float ih = (float)modal::g_cs2_thumb->GetHeight();
+        float scale = std::max(240.0f / iw, 140.0f / ih);
+        float dw = iw * scale, dh = ih * scale;
+        float dx = gx + (240 - dw) / 2;
+        float dy = gy - lift + (140 - dh) / 2;
+        ImageAttributes attr;
+        ColorMatrix mat = {
+            1,0,0,0,0,
+            0,1,0,0,0,
+            0,0,1,0,0,
+            0,0,0, op,0,
+            0,0,0,0,1
+        };
+        attr.SetColorMatrix(&mat, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        g.DrawImage(modal::g_cs2_thumb, RectF(dx, dy, dw, dh), 0, 0, iw, ih, UnitPixel, &attr);
+        g.ResetClip();
+        // 底部黑色渐变蒙版让文字可读
+        g.SetClip(&card);
+        LinearGradientBrush vmask(PointF(gx, gy - lift + 70), PointF(gx, gy - lift + 140),
+                                  Color(0, 0, 0, 0),
+                                  Color((BYTE)(180 * op), 0, 0, 0));
+        g.FillRectangle(&vmask, gx, gy - lift + 70, 240.0f, 70.0f);
+        g.ResetClip();
+    } else {
+        // fallback：渐变 + 主色 radial
+        LinearGradientBrush base(
+            PointF(gx, gy - lift), PointF(gx + 240, gy - lift + 140),
+            Color((BYTE)(255 * op), 0x2C, 0x28, 0x25),
+            Color((BYTE)(255 * op), 0x1F, 0x1C, 0x19));
+        g.FillPath(&base, &card);
+        GraphicsPath cover; cover.AddEllipse(gx - 80.0f, gy - lift - 100.0f, 280.0f, 280.0f);
+        PathGradientBrush rad(&cover);
+        Color radCenter((BYTE)(140 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+        Color radEdge(0, 0, 0, 0);
+        rad.SetCenterColor(radCenter);
+        int n = 1;
+        rad.SetSurroundColors(&radEdge, &n);
+        g.SetClip(&card);
+        g.FillPath(&rad, &cover);
+        g.ResetClip();
+        Font cf(kFontFace, 22.0f, FontStyleBold, UnitPoint);
+        SolidBrush csB(Color((BYTE)(220 * op), 0xF5, 0xC4, 0x4C));
+        StringFormat csF; csF.SetAlignment(StringAlignmentNear);
+        g.DrawString(L"CS", -1, &cf, RectF(gx + 14, gy - lift + 12, 60, 30), &csF, &csB);
+    }
 
     // meta abs bottom-left
     drawText_(g, L"Counter-Strike 2", gx + 14, gy - lift + 96, 240 - 28,
@@ -719,7 +863,7 @@ void paintLunchingView(Graphics& g, RectF area) {
     drawText_(g, L"v1.40.1.5", gx + 14, gy - lift + 116, 240 - 28,
               8.5f, fade(pal.text_muted));
 
-    hit(RectF(gx, gy - lift, 240, 140), [](){ /* launch */ }, true);
+    hit(RectF(gx, gy - lift, 240, 140), [](){ modal::openCS2(); }, true);
 
     // Launch hint on hover
     if (hover) {
@@ -978,15 +1122,21 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
     drawText_(g, W(tr(reg ? "auth.register.sub" : "auth.login.sub")).c_str(),
               cx + 30, cy + 60, 320, 9.5f, fade(pal.text_muted));
 
-    // floating-label field 48px high
+    // floating-label field 48px high — 真用 tween 平滑过渡
     auto drawField = [&](InputBox& box, float ix, float iy, float iw, float ih,
-                          const char* labelKey, int idx, float* anim_t) {
+                          const char* labelKey, int idx, float* /*unused*/) {
         box.bounds = RectF(ix, iy, iw, ih);
         bool focused = (g_auth_form.focus == idx);
         bool filled = !box.text.empty();
         bool floating = focused || filled;
-        // 简单插值（稳态）
-        *anim_t = floating ? 1.0f : 0.0f;
+        // 启动 tween（仅在状态切换时）
+        float target = floating ? 1.0f : 0.0f;
+        if (!box.float_t.started) {
+            box.float_t.start(target, target, 0.001f, 0, curve::easeOutCubic);
+        } else if (std::abs(box.float_t.to - target) > 0.001f) {
+            box.float_t.start(box.float_t.value(), target, 0.22f, 0, curve::easeOutCubic);
+        }
+        float anim_v = box.float_t.value();
 
         // bg = bg(page-bg), border = divider/primary
         fillRR(g, ix, iy, iw, ih, 10.0f, fade(pal.bg));
@@ -998,16 +1148,19 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
             strokeRR(g, ix - 2, iy - 2, iw + 4, ih + 4, 12.0f, halo, 4.0f);
         }
 
-        // floating label
+        // floating label — 用 anim_v 在 0..1 平滑插值
         // floating: top 13 / 11px primary bold
         // resting: vert center / 14px muted
         std::wstring labelStr = W(tr(labelKey));
-        float t = *anim_t;
-        float lab_size = 11.5f - 3.5f * (1.0f - t);
-        float lab_y = iy + 5.0f + (ih * 0.5f - 5.0f - 5.0f) * (1.0f - t);
-        Color lab_c = floating ? fade(pal.primary) : fade(pal.text_muted);
+        float lab_size = 11.5f - 3.5f * (1.0f - anim_v);
+        float lab_y = iy + 5.0f + (ih * 0.5f - 5.0f - 5.0f) * (1.0f - anim_v);
+        // 颜色平滑插值（muted → primary）
+        BYTE lab_r = (BYTE)(pal.text_muted.GetR() + (pal.primary.GetR() - pal.text_muted.GetR()) * anim_v);
+        BYTE lab_g = (BYTE)(pal.text_muted.GetG() + (pal.primary.GetG() - pal.text_muted.GetG()) * anim_v);
+        BYTE lab_b = (BYTE)(pal.text_muted.GetB() + (pal.primary.GetB() - pal.text_muted.GetB()) * anim_v);
+        Color lab_c((BYTE)(255 * op), lab_r, lab_g, lab_b);
         drawText_(g, labelStr.c_str(), ix + 14.0f, lab_y, iw - 28.0f, lab_size, lab_c,
-                  StringAlignmentNear, floating ? FontStyleBold : FontStyleRegular);
+                  StringAlignmentNear, anim_v > 0.5f ? FontStyleBold : FontStyleRegular);
 
         // text input area (在 label 下方 / 整个高度)
         std::wstring txt = box.display();
@@ -1105,16 +1258,18 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
     switch (g_view) {
         case View::Home:     paintHomeView(g, area);     break;
         case View::Lunching: paintLunchingView(g, area); break;
+        case View::Chat:     chatv::paintChatViewTop(g, area); break;
         case View::Cloud:    paintCloudView(g, area);    break;
         case View::Settings: paintSettingsView(g, area); break;
         case View::Profile:  paintProfileView(g, area);  break;
     }
 
     if (g_overlay == Overlay::History || g_overlay_t.value() > 0.001f) {
-        paintHistoryOverlay(g, Wpx, Hpx);
+        modal::paintHistoryModalNew(g, Wpx, Hpx);
     }
     paintAccountDropdown(g, Wpx);
     updateDropdownHover(Wpx);
+    modal::paintCS2Modal(g, Wpx, Hpx);
 }
 
 // ====================================================================
@@ -1223,6 +1378,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 else if (g_auth_form.focus == 2) g_auth_form.invite.onChar(c);
                 if (c == L'\r' || c == L'\n')   PostMessageW(hwnd, WM_APP + 1, 0, 0);
                 InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (g_stage == Stage::Main && g_view == View::Chat && chatv::g_focus_composer) {
+                wchar_t c = (wchar_t)wp;
+                if (c == 0x08) {
+                    // backspace
+                    if (chatv::g_draft_caret > 0 && !chatv::g_draft.empty()) {
+                        chatv::g_draft.erase(chatv::g_draft_caret - 1, 1);
+                        chatv::g_draft_caret--;
+                    }
+                } else if (c == L'\r' || c == L'\n') {
+                    // 发送
+                    if (!chatv::g_draft.empty()) {
+                        auto& s = chatv::streamFor(chatv::g_active);
+                        chatv::Msg m; m.kind = chatv::MsgKind::Text;
+                        m.from = L"me"; m.author = L""; m.status = L"online";
+                        m.read = false; m.time = L"now";
+                        static std::vector<std::wstring> g_my_txts;
+                        g_my_txts.push_back(chatv::g_draft);
+                        m.body = g_my_txts.back().c_str();
+                        s.push_back(m);
+                        chatv::g_draft.clear();
+                        chatv::g_draft_caret = 0;
+                    }
+                } else if (c >= 0x20) {
+                    chatv::g_draft.insert(chatv::g_draft_caret, 1, c);
+                    chatv::g_draft_caret++;
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
         case WM_KEYDOWN:
@@ -1261,8 +1443,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_topbar_y.elapsed = 999;
                 }
             }
-            else if (wp >= '1' && wp <= '4') {
-                static View vs[] = { View::Home, View::Lunching, View::Cloud, View::Settings };
+            else if (wp >= '1' && wp <= '5') {
+                static View vs[] = { View::Home, View::Lunching, View::Chat, View::Cloud, View::Settings };
                 switchView(vs[wp - '1']);
             }
             else if (wp == 'P' || wp == 'p') switchView(View::Profile);
@@ -1342,6 +1524,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         else if (buf[0] == L'c') g_view = View::Cloud;
         else if (buf[0] == L's') g_view = View::Settings;
         else if (buf[0] == L'p') g_view = View::Profile;
+        else if (buf[0] == L't') g_view = View::Chat;
+        else if (buf[0] == L'm') {
+            g_view = View::Chat;
+            chatv::g_active = L"market";
+        }
     }
     bool overlayHistory = false;
     if (GetEnvironmentVariableW(L"LAUNCHER_OVERLAY", buf, 16) > 0 && buf[0] == L'h') overlayHistory = true;
@@ -1417,6 +1604,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_overlay_t.tick(dt);
         g_auth_card_op.tick(dt); g_auth_card_y.tick(dt);
         g_dot_size.tick(dt);   g_dot_alpha.tick(dt);
+        g_status_fold_t.tick(dt);
+        modal::g_cs2_t.tick(dt);
+        chatv::g_picker_t.tick(dt);
+        chatv::g_typing_t += dt;
+        g_auth_form.username.float_t.tick(dt);
+        g_auth_form.password.float_t.tick(dt);
+        g_auth_form.invite.float_t.tick(dt);
 
         // 入场流程驱动
         auto resize_to_tween = [&]() {
