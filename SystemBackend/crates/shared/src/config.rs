@@ -42,6 +42,10 @@ pub struct AppConfig {
     pub media_video_max_bytes: u64,
     #[serde(default = "default_generic_max")]
     pub media_generic_max_bytes: u64,
+
+    /// 每用户表情包上限（默认 50；admin 改 config 可放宽）
+    #[serde(default = "default_sticker_per_user")]
+    pub sticker_per_user_limit: i64,
 }
 
 fn default_argon_mem() -> u32 { 64 * 1024 }
@@ -50,6 +54,7 @@ fn default_require_invite() -> bool { true }
 fn default_image_max() -> u64 { 8 * 1024 * 1024 }
 fn default_video_max() -> u64 { 32 * 1024 * 1024 }
 fn default_generic_max() -> u64 { 100 * 1024 * 1024 }
+fn default_sticker_per_user() -> i64 { 50 }
 
 impl AppConfig {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {

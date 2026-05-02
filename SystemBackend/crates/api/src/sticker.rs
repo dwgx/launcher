@@ -40,6 +40,17 @@ pub async fn create_sticker(
     Json(req): Json<CreateStickerReq>,
 ) -> Result<Json<StickerOut>, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
+
+    // 50/user 限制（admin 可在 config.toml 改 sticker_per_user_limit）
+    let my_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM stickers WHERE creator_id = $1", me)
+        .fetch_one(&s.db).await.map_err(internal)?
+        .unwrap_or(0);
+    if my_count >= s.cfg.sticker_per_user_limit {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("表情包已达上限 {}/{}", my_count, s.cfg.sticker_per_user_limit)));
+    }
+
     let media = sqlx::query!(
         "SELECT sha256, mime FROM media_files WHERE id = $1", req.media_id)
         .fetch_optional(&s.db).await.map_err(internal)?

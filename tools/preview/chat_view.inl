@@ -684,17 +684,64 @@ const wchar_t* kEmoji[] = {
     L"💀",L"👻",L"🤖",L"👍",L"👎",L"👏",L"🙏",L"💪",
     L"🔥",L"💯",L"🎮",L"🍣",L"🌸",L"⭐",L"🚀",L"💖",
 };
-const wchar_t* kSticker[] = { L"🎮",L"🔥",L"💀",L"🎉",L"💯",L"✨",L"🚀",L"⭐",L"🌸",L"💖",L"👏",L"🙏" };
-const wchar_t* kGif[] = {
-    L"杏仁糖蹦迪",L"柴犬狂笑",L"恭喜发财",L"姐姐看我",L"摔倒猫猫",
-    L"王境泽真香",L"贴贴.gif",L"老板说的对"
-};
+
+// 用户自己导入的表情包（路径列表 — 已加入 mediaCache，可 DrawImage）
+inline std::vector<std::wstring>& userPack() {
+    static std::vector<std::wstring> v; return v;
+}
+
+// 用 SHBrowseForFolder 选文件夹，扫描里面的图片/GIF 加进 userPack（最多 50 张，符合"每人 50 张"约束）
+void importEmojiFolder() {
+    // BROWSEINFO 选文件夹
+    BROWSEINFOW bi{};
+    bi.hwndOwner = g_hwnd;
+    bi.lpszTitle = L"选择表情包文件夹（自动扫描其中的 .gif / .png / .jpg / .webp）";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+    wchar_t folder[MAX_PATH];
+    if (!SHGetPathFromIDListW(pidl, folder)) { CoTaskMemFree(pidl); return; }
+    CoTaskMemFree(pidl);
+
+    // 枚举目录
+    std::wstring pat = std::wstring(folder) + L"\\*";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    int added = 0;
+    constexpr int kMax = 50;   // 用户原话"每个人只能 50 张"
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring name = fd.cFileName;
+        auto dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos) continue;
+        std::wstring ext = name.substr(dot);
+        for (auto& c : ext) c = (wchar_t)towlower(c);
+        if (ext != L".gif" && ext != L".png" && ext != L".jpg" && ext != L".jpeg"
+            && ext != L".webp" && ext != L".bmp") continue;
+        if ((int)userPack().size() >= kMax) break;
+        std::wstring full = std::wstring(folder) + L"\\" + name;
+        // 去重
+        bool dup = false;
+        for (auto& p : userPack()) if (p == full) { dup = true; break; }
+        if (dup) continue;
+        if (loadMedia(full)) {
+            userPack().push_back(full);
+            ++added;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    extern struct Toast g_toast_global;
+    wchar_t msg[128];
+    swprintf_s(msg, 128, L"已导入 %d 张表情包（共 %zu/%d）", added, userPack().size(), kMax);
+    ::g_toast.show(msg);
+}
 
 void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
     if (g_picker_t.value() < 0.001f && !g_picker_open) return;
     const Palette& pal = palette();
     float t = g_picker_t.value();
-    float pw = 320, ph = 360;
+    float pw = 340, ph = 380;
     float px = anchor_x;
     float py = anchor_y - ph - 8;
     BYTE a = (BYTE)(255 * t);
@@ -702,99 +749,88 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
 
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
     Color cardC(a, pal.card.GetR(), pal.card.GetG(), pal.card.GetB());
-    drawShadow(g, px, py, pw, ph, 12, fade(pal.shadow_card_hover), 6, 5);
+    drawShadow(g, px, py, pw, ph, 12, fade(pal.shadow_card), 4, 2);
     fillRR(g, px, py, pw, ph, 12, cardC);
     strokeRR(g, px, py, pw, ph, 12, fade(pal.divider));
 
-    // tabs
-    const wchar_t* tabs[] = { L"Emoji", L"贴纸", L"GIF" };
-    float tx = px + 10;
-    for (int i = 0; i < 3; ++i) {
-        float tw = 56;
-        bool on = (i == g_picker_tab);
-        RectF tr(tx, py + 8, tw, 26);
-        if (on) {
-            Color on_bg(28, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-            fillRR(g, tr.X, tr.Y, tw, 26, 6, on_bg);
-        }
-        drawText_(g, tabs[i], tr.X, tr.Y + 6, tw, 9.0f,
-                  on ? fade(pal.primary) : fade(pal.text_muted),
-                  StringAlignmentCenter, FontStyleBold);
-        int idx = i;
-        hit(tr, [idx](){ g_picker_tab = idx; }, true);
-        tx += tw + 4;
-    }
+    // 顶部：标题"表情包" + 导入按钮（不再有 GIF/贴纸 tab，按用户要求统一）
+    drawText_(g, L"表情包", px + 14, py + 12, 100, 11.0f, fade(pal.text),
+              StringAlignmentNear, FontStyleBold);
+    // 导入按钮（右上）
+    RectF imp(px + pw - 78, py + 10, 64, 26);
+    bool ihov = inRect(g_mouse, imp);
+    fillRR(g, imp.X, imp.Y, imp.Width, imp.Height, 6, fade(ihov ? pal.primary_hover : pal.primary));
+    drawText_(g, L"导入", imp.X, imp.Y + 7, imp.Width, 9.0f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    hit(imp, [](){ importEmojiFolder(); }, true);
+
     Pen sep(fade(pal.divider), 1.0f);
-    g.DrawLine(&sep, px + 10, py + 38, px + pw - 10, py + 38);
+    g.DrawLine(&sep, px + 12, py + 44, px + pw - 12, py + 44);
 
-    // search box
-    fillRR(g, px + 10, py + 46, pw - 20, 30, 8, fade(pal.bg));
-    strokeRR(g, px + 10, py + 46, pw - 20, 30, 8, fade(pal.divider));
-    drawText_(g, L"搜索…", px + 22, py + 54, pw - 40, 9.0f, fade(pal.text_muted));
+    // 区段 1: 用户导入的表情（从文件夹）
+    drawText_(g, L"我的表情", px + 14, py + 52, 200, 8.0f,
+              fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
 
-    // grid
-    float gx = px + 10, gy = py + 88;
-    if (g_picker_tab == 2) {
-        // GIF — 2 col 4:3
-        int n = (int)(sizeof(kGif) / sizeof(kGif[0]));
-        float cell_w = (pw - 28) / 2;
-        float cell_h = cell_w * 0.75f;
-        for (int i = 0; i < n; ++i) {
-            int row = i / 2, col = i % 2;
-            float cx = gx + col * (cell_w + 8);
-            float cy = gy + row * (cell_h + 8);
-            LinearGradientBrush lg(PointF(cx, cy), PointF(cx + cell_w, cy + cell_h),
-                                   Color((BYTE)(255 * t), 0x7C, 0x9D, 0xD9),
-                                   fade(pal.primary));
-            GraphicsPath gp; buildRoundRect(gp, cx, cy, cell_w, cell_h, 8);
-            g.FillPath(&lg, &gp);
-            drawText_(g, kGif[i], cx, cy + cell_h / 2 - 6, cell_w, 8.5f,
-                      fade(Color(255, 255, 255, 255)), StringAlignmentCenter, FontStyleBold);
-            const wchar_t* label = kGif[i];
-            hit(RectF(cx, cy, cell_w, cell_h), [label]() {
-                auto& s = streamFor(g_active);
-                static std::vector<std::wstring> g_my_gifs;
-                Msg m; m.kind = MsgKind::Gif; m.from = L"me"; m.status = L"online";
-                m.read = false; m.time = L"now";
-                g_my_gifs.push_back(label);
-                m.body = g_my_gifs.back().c_str();
-                s.push_back(m);
+    float gy = py + 70;
+    auto& pack = userPack();
+    if (pack.empty()) {
+        drawText_(g, L"点右上角『导入』选择本地文件夹（GIF/PNG/JPG）",
+                  px + 14, py + 76, pw - 28, 8.5f, fade(pal.text_muted));
+        gy = py + 110;
+    } else {
+        const float cell = (pw - 28) / 6;   // 6 列
+        int n = (int)pack.size();
+        for (int i = 0; i < n && i < 24; ++i) {
+            int row = i / 6, col = i % 6;
+            float cx = px + 14 + col * (cell + 2);
+            float cy = gy + row * (cell + 2);
+            bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
+            if (hov) fillRR(g, cx, cy, cell, cell, 6, fade(pal.bg));
+            const Media* m = loadMedia(pack[i]);
+            if (m && m->img) {
+                GraphicsPath cp; buildRoundRect(cp, cx + 2, cy + 2, cell - 4, cell - 4, 6);
+                g.SetClip(&cp);
+                g.DrawImage(m->img, RectF(cx + 2, cy + 2, cell - 4, cell - 4));
+                g.ResetClip();
+            }
+            std::wstring path = pack[i];
+            hit(RectF(cx, cy, cell, cell), [path]() {
+                appendMedia(path);
                 g_picker_open = false;
                 g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
             }, true);
         }
-    } else {
-        // emoji / sticker — 8 col grid
-        const wchar_t** items = (g_picker_tab == 1) ? kSticker : kEmoji;
-        int n = (g_picker_tab == 1) ? (int)(sizeof(kSticker)/sizeof(kSticker[0]))
-                                     : (int)(sizeof(kEmoji)/sizeof(kEmoji[0]));
-        float cell = (pw - 28) / 8;
+        int rows = (std::min(n, 24) + 5) / 6;
+        gy += rows * (cell + 2) + 10;
+    }
+    // 分隔线
+    g.DrawLine(&sep, px + 12, gy - 4, px + pw - 12, gy - 4);
+    drawText_(g, L"系统 emoji", px + 14, gy + 2, 200, 8.0f,
+              fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
+    gy += 22;
+
+    // 区段 2: 系统 emoji 8 列 grid（Segoe UI Emoji 渲染）
+    {
+        int n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
+        const float cell = (pw - 28) / 8;
+        // 限制可见行数避免溢出 picker
+        int max_rows = (int)((py + ph - gy - 12) / cell);
+        int max_n = std::max(0, max_rows * 8);
+        n = std::min(n, max_n);
+        Font ef(L"Segoe UI Emoji", cell * 0.55f, FontStyleRegular, UnitPixel);
+        SolidBrush eb(fade(pal.text));
+        StringFormat efmt; efmt.SetAlignment(StringAlignmentCenter); efmt.SetLineAlignment(StringAlignmentCenter);
         for (int i = 0; i < n; ++i) {
             int row = i / 8, col = i % 8;
-            float cx = gx + col * cell;
+            float cx = px + 14 + col * cell;
             float cy = gy + row * cell;
             bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
             if (hov) fillRR(g, cx, cy, cell, cell, 6, fade(pal.bg));
-            // 用 Segoe UI Emoji 才能渲染彩色 emoji（kFontFace=YaHei UI 渲染成 □）
-            Font f(L"Segoe UI Emoji", cell * 0.5f, FontStyleRegular, UnitPixel);
-            SolidBrush b(fade(pal.text));
-            StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-            g.DrawString(items[i], -1, &f, RectF(cx, cy, cell, cell), &fmt, &b);
-            const wchar_t* val = items[i];
-            int tab = g_picker_tab;
-            hit(RectF(cx, cy, cell, cell), [val, tab]() {
-                if (tab == 1) {
-                    // 贴纸 → 直接发
-                    auto& s = streamFor(g_active);
-                    Msg m; m.kind = MsgKind::Sticker; m.from = L"me"; m.status = L"online";
-                    m.read = false; m.body = val; m.time = L"now";
-                    s.push_back(m);
-                    g_picker_open = false;
-                    g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
-                } else {
-                    g_composer.replaceSelection(val);
-                    g_focus_composer = true;
-                }
+            g.DrawString(kEmoji[i], -1, &ef, RectF(cx, cy, cell, cell), &efmt, &eb);
+            const wchar_t* val = kEmoji[i];
+            hit(RectF(cx, cy, cell, cell), [val]() {
+                g_composer.replaceSelection(val);
+                g_focus_composer = true;
             }, true);
         }
     }

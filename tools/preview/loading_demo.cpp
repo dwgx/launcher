@@ -20,6 +20,7 @@
 #include <shellapi.h>
 #include <wincrypt.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include <vector>
 #include <string>
 #include <functional>
@@ -38,6 +39,7 @@
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
 
 using namespace Gdiplus;
 
@@ -1137,6 +1139,95 @@ void paintHomeView(Graphics& g, RectF area) {
             }, true);
         }
         ry += 22.0f;
+    }
+
+    // ========== 额外信息行：系统时间 / 电脑名 / 订阅 ==========
+    // profile-card 之下 grid 3 列小卡片
+    float xy = cy + ch + 16;
+    float xh = 88;
+    float gap = 14;
+    float xw = (cw - gap * 2) / 3;
+
+    // 取系统时间（每帧重新格式化，1s 粒度足够）
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t time_buf[32];
+    swprintf_s(time_buf, 32, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+    wchar_t date_buf[32];
+    swprintf_s(date_buf, 32, L"%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+
+    // 电脑名
+    static wchar_t pc_name[64] = {0};
+    if (pc_name[0] == 0) {
+        DWORD sz = 64;
+        if (!GetComputerNameW(pc_name, &sz)) wcscpy_s(pc_name, L"PC");
+    }
+
+    auto stat_card = [&](float x_, const wchar_t* label, const wchar_t* val, const wchar_t* hint) {
+        drawShadow(g, x_, xy, xw, xh, 12.0f, fade(pal.shadow_card), 4.0f, 1);
+        fillRR(g, x_, xy, xw, xh, 12.0f, fade(pal.card));
+        drawText_(g, label, x_ + 18, xy + 14, xw - 36, 8.0f, fade(pal.text_muted),
+                  StringAlignmentNear, FontStyleBold);
+        drawText_(g, val, x_ + 18, xy + 32, xw - 36, 16.0f, fade(pal.text),
+                  StringAlignmentNear, FontStyleBold);
+        if (hint && hint[0]) {
+            drawText_(g, hint, x_ + 18, xy + xh - 22, xw - 36, 8.0f, fade(pal.text_muted));
+        }
+    };
+    stat_card(cx, L"当前时间", time_buf, date_buf);
+    stat_card(cx + xw + gap, L"本机", pc_name, L"Windows · 当前会话");
+    // 订阅卡 — 主色高亮
+    {
+        float x_ = cx + (xw + gap) * 2;
+        drawShadow(g, x_, xy, xw, xh, 12.0f,
+                   Color((BYTE)(40 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB()),
+                   4.0f, 1);
+        // 主色渐变背景
+        LinearGradientBrush bg2(PointF(x_, xy), PointF(x_ + xw, xy + xh),
+                                fade(pal.primary), Color((BYTE)(255 * op), 0xC9, 0x64, 0x42));
+        GraphicsPath cp; buildRoundRect(cp, x_, xy, xw, xh, 12.0f);
+        g.FillPath(&bg2, &cp);
+        drawText_(g, L"订阅", x_ + 18, xy + 14, xw - 36, 8.0f,
+                  Color((BYTE)(220 * op), 255, 255, 255),
+                  StringAlignmentNear, FontStyleBold);
+        drawText_(g, W(tr("tier.1week")).c_str(), x_ + 18, xy + 32, xw - 36, 16.0f,
+                  Color((BYTE)(255 * op), 255, 255, 255),
+                  StringAlignmentNear, FontStyleBold);
+        wchar_t exp[64]; swprintf_s(exp, 64, L"到期 %ls", g_user.expires);
+        drawText_(g, exp, x_ + 18, xy + xh - 22, xw - 36, 8.0f,
+                  Color((BYTE)(220 * op), 255, 255, 255));
+    }
+
+    // 个人标签（chips）
+    float ty2 = xy + xh + 16;
+    drawText_(g, L"我的标签", cx, ty2, 200, 9.0f, fade(pal.text_muted),
+              StringAlignmentNear, FontStyleBold);
+    static const wchar_t* kTags[] = { L"CS2", L"Premier 18k", L"东京机房", L"私服管理员", L"+ 添加" };
+    float tag_x = cx;
+    float tag_y = ty2 + 22;
+    for (int i = 0; i < (int)(sizeof(kTags)/sizeof(kTags[0])); ++i) {
+        bool is_add = (i == (int)(sizeof(kTags)/sizeof(kTags[0])) - 1);
+        float tw = measureText(g, kTags[i], 8.5f).Width + 24;
+        bool thov = inRect(g_mouse, RectF(tag_x, tag_y, tw, 26));
+        Color tagBg = is_add
+            ? fade(Color(0, 0, 0, 0))
+            : fade(Color((BYTE)(36), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB()));
+        if (!is_add) {
+            fillRR(g, tag_x, tag_y, tw, 26, 13.0f, tagBg);
+        } else {
+            strokeRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.divider));
+        }
+        if (thov && is_add) {
+            fillRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.bg));
+        }
+        drawText_(g, kTags[i], tag_x, tag_y + 7, tw, 8.5f,
+                  is_add ? fade(pal.text_muted) : fade(pal.primary),
+                  StringAlignmentCenter, FontStyleBold);
+        if (is_add) {
+            hit(RectF(tag_x, tag_y, tw, 26), [](){
+                g_toast.show(L"标签自定义功能规划中（接后端 user_tags）");
+            }, true);
+        }
+        tag_x += tw + 8;
     }
 }
 
