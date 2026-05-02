@@ -197,14 +197,27 @@ struct Tween {
 // =====================================================================
 // 状态
 // =====================================================================
-enum class Stage { Loading, Expanding, Main };
+enum class Stage { Loading, Expanding, Auth, Main };
+enum class AuthMode { Login, Register };
 enum class View  { Home, Lunching, Cloud, Settings, Profile };
 enum class Overlay { None, History, EditNickname, ChangePassword };
 
-Stage   g_stage = Stage::Loading;
+Stage    g_stage    = Stage::Loading;
+AuthMode g_auth_mode = AuthMode::Login;
 View    g_view  = View::Home;
 View    g_view_prev = View::Home;
 Overlay g_overlay = Overlay::None;
+
+// Auth 表单状态
+struct AuthForm {
+    HWND  edit_username = nullptr;
+    HWND  edit_password = nullptr;
+    HWND  edit_invite   = nullptr;
+    HFONT font          = nullptr;
+    std::wstring error_msg;
+    bool  busy = false;        // 提交中（disable 按钮）
+} g_auth;
+Tween g_auth_card_y, g_auth_card_op;   // Auth 入场动画
 bool    g_account_dropdown = false;     // 头像下拉是否打开
 
 Tween g_card_scale, g_card_opacity, g_card_fade_out;
@@ -928,14 +941,171 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
 }
 
 // =====================================================================
+// Auth view (登录 / 注册)
+// =====================================================================
+const int IDC_USERNAME    = 1001;
+const int IDC_PASSWORD    = 1002;
+const int IDC_INVITE      = 1003;
+
+void createAuthControls(HWND parent) {
+    LOGFONTW lf{};
+    lf.lfHeight = -16;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    g_auth.font = CreateFontIndirectW(&lf);
+    auto mk = [&](int id) {
+        HWND h = CreateWindowExW(0, L"EDIT", L"",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            0, 0, 320, 36, parent, (HMENU)(INT_PTR)id, GetModuleHandle(nullptr), nullptr);
+        SendMessageW(h, WM_SETFONT, (WPARAM)g_auth.font, TRUE);
+        return h;
+    };
+    g_auth.edit_username = mk(IDC_USERNAME);
+    g_auth.edit_password = mk(IDC_PASSWORD);
+    SendMessageW(g_auth.edit_password, EM_SETPASSWORDCHAR, (WPARAM)L'*', 0);
+    g_auth.edit_invite   = mk(IDC_INVITE);
+}
+
+void layoutAuthControls(int Wpx, int Hpx, bool register_mode) {
+    // 卡片 380×（420 or 480），居中
+    const int cw = 380;
+    const int ch = register_mode ? 480 : 420;
+    const int cx = (Wpx - cw) / 2;
+    const int cy = (Hpx - ch) / 2;
+
+    const int ix = cx + 32, iw = cw - 64, ih = 36;
+    int row_y = cy + 130;          // 第一行 input 顶部 y
+    SetWindowPos(g_auth.edit_username, nullptr, ix, row_y, iw, ih, SWP_NOZORDER);
+    row_y += 76;
+    SetWindowPos(g_auth.edit_password, nullptr, ix, row_y, iw, ih, SWP_NOZORDER);
+    row_y += 76;
+    if (register_mode) {
+        SetWindowPos(g_auth.edit_invite, nullptr, ix, row_y, iw, ih, SWP_NOZORDER);
+    }
+}
+
+void showAuthControls(bool register_mode) {
+    ShowWindow(g_auth.edit_username, SW_SHOW);
+    ShowWindow(g_auth.edit_password, SW_SHOW);
+    ShowWindow(g_auth.edit_invite,   register_mode ? SW_SHOW : SW_HIDE);
+    SetFocus(g_auth.edit_username);
+}
+
+void paintAuthView(Graphics& g, int Wpx, int Hpx) {
+    g_hits.clear();
+    const Palette& pal = palette();
+    SolidBrush bg(pal.bg);
+    g.FillRectangle(&bg, 0, 0, Wpx, Hpx);
+
+    bool reg = (g_auth_mode == AuthMode::Register);
+    const float cw = 380.0f;
+    const float ch = reg ? 480.0f : 420.0f;
+    const float cx = (Wpx - cw) / 2.0f;
+    const float cy = (Hpx - ch) / 2.0f + g_auth_card_y.value();
+    float op = g_auth_card_op.value();
+    if (op <= 0.001f) return;
+
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * op), c.GetR(), c.GetG(), c.GetB()); };
+
+    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card_hover), 8.0f, 5);
+    fillRR(g, cx, cy, cw, ch, 16.0f, fade(pal.card));
+
+    // logo + title
+    float lr = 22.0f;
+    float lx = cx + 32, ly = cy + 32;
+    SolidBrush lbg(fade(pal.primary));
+    g.FillEllipse(&lbg, lx, ly, lr*2, lr*2);
+    Font lf(L"Segoe UI", 16.0f, FontStyleBold, UnitPoint);
+    SolidBrush lf_b(Color((BYTE)(255 * op), 255, 255, 255));
+    StringFormat lfmt; lfmt.SetAlignment(StringAlignmentCenter); lfmt.SetLineAlignment(StringAlignmentCenter);
+    RectF lr_rect(lx, ly, lr*2, lr*2);
+    g.DrawString(L"L", -1, &lf, lr_rect, &lfmt, &lf_b);
+
+    drawText_(g, reg ? L"创建账号" : L"登录到 Launcher", lx + lr*2 + 14, cy + 32, 220,
+              16.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, reg ? L"用邀请码注册新账号" : L"输入用户名和密码继续",
+              lx + lr*2 + 14, cy + 56, 220, 9.0f, fade(pal.text_muted));
+
+    // labels
+    drawText_(g, L"用户名", cx + 32, cy + 110, 200, 8.5f, fade(pal.text_muted));
+    drawText_(g, L"密码",   cx + 32, cy + 186, 200, 8.5f, fade(pal.text_muted));
+    if (reg) drawText_(g, L"邀请码", cx + 32, cy + 262, 200, 8.5f, fade(pal.text_muted));
+
+    // Submit button
+    float by = reg ? cy + 350.0f : cy + 274.0f;
+    RectF btn(cx + 32, by, cw - 64, 42);
+    bool bhov = inRect(g_mouse, btn);
+    Color bbg = g_auth.busy
+        ? fade(Color(255, 0x6B, 0x6A, 0x67))
+        : (bhov ? fade(pal.primary_hover) : fade(pal.primary));
+    fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 8.0f, bbg);
+    drawText_(g, g_auth.busy ? L"正在连接…"
+                              : (reg ? L"创建账号" : L"登录"),
+              btn.X, btn.Y + 13, btn.Width, 11.0f,
+              Color((BYTE)(255 * op), 255, 255, 255),
+              StringAlignmentCenter, FontStyleBold);
+
+    // Error
+    if (!g_auth.error_msg.empty()) {
+        Color err((BYTE)(255 * op), 0xE0, 0x5A, 0x5A);
+        drawText_(g, g_auth.error_msg.c_str(),
+                  cx + 32, by + 50, cw - 64, 9.0f, err);
+    }
+
+    // Switch link
+    drawText_(g, reg ? L"已有账号？" : L"还没有账号？",
+              cx + 32, by + 78, 130, 9.0f, fade(pal.text_muted));
+    RectF link(cx + 130, by + 78, 200, 18);
+    bool lhov = inRect(g_mouse, link);
+    drawText_(g, reg ? L"去登录" : L"去注册",
+              link.X, link.Y, link.Width, 9.0f,
+              lhov ? fade(pal.primary_hover) : fade(pal.primary),
+              StringAlignmentNear, FontStyleBold);
+    hit(link, [](){
+        g_auth_mode = (g_auth_mode == AuthMode::Login) ? AuthMode::Register : AuthMode::Login;
+        g_auth.error_msg.clear();
+        bool reg2 = (g_auth_mode == AuthMode::Register);
+        ShowWindow(g_auth.edit_invite, reg2 ? SW_SHOW : SW_HIDE);
+        // 重新动画入场
+        g_auth_card_op.start(0.6f, 1.0f, 0.18f, 0.0f, curve::easeOutCubic);
+    });
+
+    // 服务器标记
+    drawText_(g, L"服务器: 154.40.36.22:1337 · TLS",
+              cx + 32, cy + ch - 36.0f, cw - 64, 8.0f,
+              fade(pal.text_faint), StringAlignmentCenter);
+
+    // Submit hit area
+    if (!g_auth.busy) {
+        hit(btn, [](){ PostMessageW(g_hwnd, WM_APP + 1, 0, 0); });
+    }
+}
+
+// =====================================================================
 // Stage 切换
 // =====================================================================
+void hideAuthControls() {
+    if (g_auth.edit_username) ShowWindow(g_auth.edit_username, SW_HIDE);
+    if (g_auth.edit_password) ShowWindow(g_auth.edit_password, SW_HIDE);
+    if (g_auth.edit_invite)   ShowWindow(g_auth.edit_invite,   SW_HIDE);
+}
+
+void layoutAuthControls(int Wpx, int Hpx, bool register_mode);
+void showAuthControls(bool register_mode);
+
 void enterMainStage() {
     g_stage = Stage::Main;
     g_time_in_stage = 0.0f;
+    hideAuthControls();
     g_sidebar_x.start(0, 1, 0.45f, 0.05f, curve::easeOutQuint);
     g_topbar_y.start(0, 1, 0.40f, 0.10f, curve::easeOutCubic);
     g_main_opacity.start(0, 1, 0.50f, 0.20f, curve::easeOutQuint);
+}
+void enterAuthStage() {
+    g_stage = Stage::Auth;
+    g_time_in_stage = 0.0f;
+    g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
+    g_auth_card_y.start(16, 0, 0.45f, 0.05f, curve::easeOutQuint);
+    showAuthControls(g_auth_mode == AuthMode::Register);
 }
 void enterExpandingStage() {
     g_stage = Stage::Expanding;
@@ -1026,11 +1196,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.SetCompositingQuality(CompositingQualityHighQuality);
             if (g_stage == Stage::Loading)        paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::Expanding) paintLoading(g, Wpx, Hpx);
+            else if (g_stage == Stage::Auth)      paintAuthView(g, Wpx, Hpx);
             else                                   paintMain(g, Wpx, Hpx);
             BitBlt(hdc, 0, 0, Wpx, Hpx, mem, 0, 0, SRCCOPY);
             SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem);
             EndPaint(hwnd, &ps);
             return 0;
+        }
+        case WM_SIZE:
+            if (g_stage == Stage::Auth) {
+                layoutAuthControls(LOWORD(lp), HIWORD(lp), g_auth_mode == AuthMode::Register);
+            }
+            break;
+        case WM_APP + 1: {
+            // Submit auth form: 取 EDIT 文字; 简化版: 不做真 HTTP, 假装成功后切到 Main
+            wchar_t un[128] = {0}, pw[128] = {0}, iv[32] = {0};
+            GetWindowTextW(g_auth.edit_username, un, 128);
+            GetWindowTextW(g_auth.edit_password, pw, 128);
+            GetWindowTextW(g_auth.edit_invite,   iv, 32);
+            std::wstring user(un), pass(pw), invite(iv);
+            g_auth.error_msg.clear();
+            if (user.size() < 3) { g_auth.error_msg = L"用户名至少 3 字"; }
+            else if (pass.size() < 8) { g_auth.error_msg = L"密码至少 8 字"; }
+            else if (g_auth_mode == AuthMode::Register && invite.empty()) {
+                g_auth.error_msg = L"注册需要邀请码";
+            } else {
+                g_auth.busy = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                // Demo: 600ms 后假装成功, 切到 Main; 真工程在 Skia client 走 WinHTTP/libcurl
+                SetTimer(hwnd, 0xA1, 600, nullptr);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_TIMER:
+            if (wp == 0xA1) {
+                KillTimer(hwnd, 0xA1);
+                g_auth.busy = false;
+                enterMainStage();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case WM_CTLCOLOREDIT: {
+            // EDIT 控件配色：暗色卡片底, 亮色文字
+            HDC h = (HDC)wp;
+            const Palette& pal = palette();
+            SetTextColor(h, RGB(pal.text.GetR(), pal.text.GetG(), pal.text.GetB()));
+            SetBkColor(h, RGB(pal.surface.GetR(), pal.surface.GetG(), pal.surface.GetB()));
+            static HBRUSH br = nullptr;
+            if (br) DeleteObject(br);
+            br = CreateSolidBrush(RGB(pal.surface.GetR(), pal.surface.GetG(), pal.surface.GetB()));
+            return (LRESULT)br;
         }
         case WM_RBUTTONUP:  PostQuitMessage(0); return 0;
         case WM_DESTROY:    PostQuitMessage(0); return 0;
@@ -1088,9 +1304,19 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
     DWM_WINDOW_CORNER_PREFERENCE pref = DWMWCP_ROUND;
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
+    createAuthControls(g_hwnd);     // 提前建好，需要时 ShowWindow
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
 
-    if (skip_loading) {
+    // skip_loading 走老路（直接 main，跳过 auth）方便截图
+    bool skip_auth = (GetEnvironmentVariableW(L"LAUNCHER_SKIP_AUTH", buf, 16) > 0 && buf[0] == L'1');
+    if (GetEnvironmentVariableW(L"LAUNCHER_AUTH_REGISTER", buf, 16) > 0 && buf[0] == L'1') {
+        g_auth_mode = AuthMode::Register;
+    }
+    if (skip_loading && !skip_auth) {
+        // 直接进 Auth 阶段，1100x720 已就位
+        enterAuthStage();
+        layoutAuthControls(1100, 720, g_auth_mode == AuthMode::Register);
+    } else if (skip_loading) {
         enterMainStage();
         g_main_opacity.elapsed = 999;
         g_sidebar_x.elapsed = 999;
@@ -1130,6 +1356,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_view_fade.tick(dt);
         g_dropdown_t.tick(dt);
         g_overlay_t.tick(dt);
+        g_auth_card_op.tick(dt); g_auth_card_y.tick(dt);
 
         if (g_stage == Stage::Loading && g_time_in_stage > 1.6f) {
             enterExpandingStage();
@@ -1138,7 +1365,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             int h = (int)g_window_h.value();
             int x = (sw - w) / 2, y = (sh - h) / 2;
             SetWindowPos(g_hwnd, nullptr, x, y, w, h, SWP_NOZORDER);
-            if (g_window_w.done()) enterMainStage();
+            if (g_window_w.done()) {
+                enterAuthStage();
+                layoutAuthControls(w, h, g_auth_mode == AuthMode::Register);
+            }
         }
 
         InvalidateRect(g_hwnd, nullptr, FALSE);

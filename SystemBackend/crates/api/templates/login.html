@@ -1,30 +1,66 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="luxury">
+<html lang="zh-CN" data-theme="launcher">
 <head>
 <meta charset="utf-8">
 <title>登录 · Launcher Admin</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
+<style>
+  [data-theme="launcher"] {
+    color-scheme: dark;
+    --b1: 26 14% 11%; --b2: 26 13% 14%; --b3: 26 12% 19%;
+    --bc: 36 28% 92%; --p: 18 56% 53%; --pf: 18 56% 47%; --pc: 0 0% 100%;
+    --rounded-box: 0.85rem; --rounded-btn: 0.55rem;
+  }
+  body {
+    font-family: 'Source Han Sans CN', 'Segoe UI', system-ui, sans-serif;
+    background:
+      radial-gradient(900px 500px at 80% -10%, rgba(217,119,87,.10), transparent 60%),
+      radial-gradient(700px 400px at -10% 110%, rgba(217,119,87,.06), transparent 50%),
+      hsl(var(--b1));
+    background-attachment: fixed;
+  }
+  .card.bg-base-100 {
+    background: hsl(var(--b2) / 0.85);
+    border: 1px solid hsl(var(--b3) / 0.6);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.04) inset, 0 24px 60px -28px rgba(0,0,0,.7);
+  }
+  .input { background: hsl(var(--b1) / 0.7); }
+  .input:focus {
+    outline: none; border-color: hsl(var(--p));
+    box-shadow: 0 0 0 3px hsl(var(--p) / 0.18);
+  }
+  .btn-primary {
+    background: linear-gradient(180deg, #D97757, #C96442);
+    border: 1px solid hsl(18 56% 35%);
+  }
+  .btn-primary:hover { background: linear-gradient(180deg, #E0846A, #D27050); }
+</style>
 </head>
-<body class="min-h-screen bg-base-200 grid place-items-center">
-<div class="card bg-base-100 shadow-2xl w-96">
-  <div class="card-body">
-    <div class="flex items-center gap-3 mb-2">
-      <div class="w-12 h-12 rounded-full bg-orange-600 grid place-items-center text-white text-2xl font-bold">L</div>
+<body class="min-h-screen grid place-items-center px-4">
+<div class="card w-full max-w-sm bg-base-100">
+  <div class="card-body p-8">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-orange-500 to-orange-700 grid place-items-center text-white text-2xl font-bold shadow-lg shadow-orange-900/40">L</div>
       <div>
-        <h1 class="text-xl font-semibold">Launcher Admin</h1>
-        <p class="text-xs opacity-60">private launcher control panel</p>
+        <h1 class="text-xl font-semibold tracking-tight">Launcher Admin</h1>
+        <p class="text-xs opacity-50">private launcher control panel</p>
       </div>
     </div>
-    <form method="post" action="/admin/login" class="space-y-3 mt-4">
-      <input name="password" type="password" placeholder="管理员密码"
-             class="input input-bordered w-full" autofocus>
+    <form method="post" action="/admin/login" class="space-y-3 mt-6">
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70 mb-1">管理员密码</span>
+        <input name="password" type="password" placeholder="••••••••"
+               class="input input-bordered w-full" autofocus>
+      </label>
       {% if error %}
-      <div class="text-xs text-rose-500">{{ error_msg }}</div>
+      <div class="text-xs text-rose-400 px-1">⚠ {{ error_msg }}</div>
       {% endif %}
-      <button class="btn btn-primary w-full">登录</button>
+      <button class="btn btn-primary w-full mt-2">登录</button>
     </form>
-    <p class="text-xs opacity-50 mt-4 text-center">© 2026 dwgx · Launcher v0.1.0</p>
+    <div class="divider text-xs opacity-40 my-6">私有面板，仅限授权访问</div>
+    <p class="text-xs opacity-40 text-center font-mono">154.40.36.22:1337 · v0.1.0</p>
   </div>
 </div>
 </body>

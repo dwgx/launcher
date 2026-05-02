@@ -1,6 +1,6 @@
-{# Launcher Admin layout — Tailwind + DaisyUI CDN, 主题 luxury 配 Claude Desktop 暖色调 #}
+{# Launcher Admin layout — Tailwind + DaisyUI CDN, 自定义 'launcher' theme = Claude Desktop 暖色 dark #}
 <!doctype html>
-<html lang="zh-CN" data-theme="luxury">
+<html lang="zh-CN" data-theme="launcher">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,28 +8,107 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
 <style>
-  :root {
-    --bg: #1A1816;
-    --surface: #242220;
-    --primary: #C96442;
+  /* Why: luxury 太死黑 + 金色装饰太重；自定义 hsl 让背景偏暖,
+     卡片 / sidebar 之间有温柔的层级差，配 Claude Desktop 同源橙主色 */
+  [data-theme="launcher"] {
+    color-scheme: dark;
+    --b1: 26 14% 11%;          /* base-100  主背景 #1F1B17 */
+    --b2: 26 13% 14%;          /* base-200  surface 略亮 */
+    --b3: 26 12% 19%;          /* base-300  divider/border */
+    --bc: 36 28% 92%;           /* base-content 文字 #F2EBDD 暖白 */
+    --p:  18 56% 53%;           /* primary  #C96442 */
+    --pf: 18 56% 47%;           /* primary-focus */
+    --pc: 0  0%  100%;          /* primary-content (white) */
+    --s:  18 30% 55%;
+    --sc: 0  0%  100%;
+    --a:  152 30% 50%;
+    --ac: 0  0%  100%;
+    --n:  26 13% 16%;
+    --nc: 36 28% 90%;
+    --in: 198 80% 60%;
+    --su: 152 56% 45%;
+    --wa: 38  76% 55%;
+    --er: 0   76% 60%;
+    --rounded-box: 0.85rem;
+    --rounded-btn: 0.55rem;
+    --rounded-badge: 0.4rem;
   }
-  body { font-family: 'Source Han Sans CN', 'Segoe UI', system-ui, sans-serif; }
-  .nav-active { background: rgba(217,119,87,.18); color: #D97757; font-weight: 600; }
-  /* Tailwind CDN 不支持 @apply，直接写值 */
-  .badge-active   { background: #10b981; color: #fff; }
-  .badge-revoked  { background: #be123c; color: #fff; }
-  .badge-expired  { background: #b45309; color: #fff; }
-  .badge-exhausted{ background: #52525b; color: #fff; }
+  body {
+    font-family: 'Source Han Sans CN', 'BIZ UDPGothic', 'Segoe UI', system-ui, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 90% -10%, rgba(217,119,87,.06), transparent 60%),
+      radial-gradient(800px 400px at -10% 110%, rgba(217,119,87,.04), transparent 50%),
+      hsl(var(--b1));
+    background-attachment: fixed;
+  }
+  /* sidebar item active 态 */
+  .nav-active {
+    background: linear-gradient(90deg, rgba(217,119,87,.18), rgba(217,119,87,.08) 70%, transparent);
+    color: #E5A07F !important;
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 #D97757;
+  }
+  /* 卡片质感：subtle 边 + 半透明 + 阴影 */
+  .card { backdrop-filter: blur(6px); }
+  .card.bg-base-100 {
+    background: hsl(var(--b2) / 0.85);
+    border: 1px solid hsl(var(--b3) / 0.6);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 12px 32px -16px rgba(0,0,0,.5);
+  }
+  .stats { background: transparent; box-shadow: none; }
+  .stats > .stat {
+    background: hsl(var(--b2) / 0.85);
+    border: 1px solid hsl(var(--b3) / 0.6);
+    border-radius: var(--rounded-box);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 8px 24px -16px rgba(0,0,0,.5);
+  }
+  /* 表头单色淡橙 */
+  table thead th {
+    background: hsl(18 56% 53% / 0.07) !important;
+    color: hsl(36 28% 90%);
+    font-weight: 600;
+    border-bottom: 1px solid hsl(var(--b3));
+  }
+  /* 表格行 hover 主色微亮 */
+  table tbody tr:hover { background: hsl(18 56% 53% / 0.05); }
+  /* badge 状态色（不依赖 daisyUI 的 success/error，直接写） */
+  .badge-active   { background: #2C8A6E; color: #fff; }
+  .badge-revoked  { background: #B14444; color: #fff; }
+  .badge-expired  { background: #B47533; color: #fff; }
+  .badge-exhausted{ background: #5A554F; color: #fff; }
+  /* navbar / footer 透明感 */
+  .navbar.bg-base-100 {
+    background: hsl(var(--b1) / 0.85);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid hsl(var(--b3) / 0.7);
+  }
+  aside {
+    background: hsl(var(--b1) / 0.95) !important;
+    backdrop-filter: blur(8px);
+  }
+  /* 按钮主色用渐变 */
+  .btn-primary {
+    background: linear-gradient(180deg, #D97757, #C96442);
+    border: 1px solid hsl(18 56% 35%);
+  }
+  .btn-primary:hover {
+    background: linear-gradient(180deg, #E0846A, #D27050);
+  }
+  .input, .select { background: hsl(var(--b1) / 0.7); }
+  .input:focus, .select:focus {
+    outline: none;
+    border-color: hsl(var(--p));
+    box-shadow: 0 0 0 3px hsl(var(--p) / 0.18);
+  }
 </style>
 </head>
-<body class="min-h-screen bg-base-200">
+<body class="min-h-screen">
 
 <div class="drawer lg:drawer-open">
   <input id="drawer" type="checkbox" class="drawer-toggle">
 
   <div class="drawer-content flex flex-col">
-    {# topbar #}
-    <header class="navbar bg-base-100 border-b border-base-300 px-6 sticky top-0 z-30">
+    <header class="navbar px-6 sticky top-0 z-30">
       <div class="flex-none lg:hidden">
         <label for="drawer" class="btn btn-square btn-ghost">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
@@ -37,20 +116,23 @@
                stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </label>
       </div>
-      <div class="flex-1">
+      <div class="flex-1 flex items-center gap-2">
         <span class="text-lg font-semibold tracking-wide">Launcher</span>
-        <span class="ml-2 badge badge-outline border-orange-500/40 text-orange-400">Admin</span>
+        <span class="text-xs px-2 py-0.5 rounded-md border border-orange-500/30 text-orange-300">Admin</span>
       </div>
-      <div class="flex-none gap-2">
-        <span class="text-xs opacity-60 mr-3">{{ host }}</span>
+      <div class="flex-none gap-3 items-center text-xs">
+        <span class="opacity-50 font-mono">{{ host }}</span>
+        <span class="inline-flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+          <span class="opacity-70">在线</span>
+        </span>
         <a href="/admin/logout" class="btn btn-sm btn-ghost">退出</a>
       </div>
     </header>
 
-    {# main content #}
-    <main class="flex-1 p-6">
+    <main class="flex-1 p-6 lg:p-8">
       <div class="mb-6">
-        <h1 class="text-2xl font-bold">{{ title }}</h1>
+        <h1 class="text-3xl font-bold tracking-tight">{{ title }}</h1>
         {% if subtitle.is_some() %}
           <p class="text-sm opacity-60 mt-1">{{ subtitle.as_ref().unwrap() }}</p>
         {% endif %}
@@ -58,29 +140,29 @@
       {% block content %}{% endblock %}
     </main>
 
-    <footer class="footer footer-center p-4 text-xs opacity-50 bg-base-100 border-t border-base-300">
-      <p>Launcher v0.1.0 · axum + sqlx + askama · © 2026 dwgx</p>
+    <footer class="footer footer-center p-4 text-xs opacity-50 border-t border-base-300/40">
+      <p>Launcher v0.1.0 · axum + sqlx + askama + Tailwind/DaisyUI · © 2026 dwgx</p>
     </footer>
   </div>
 
-  {# sidebar #}
   <div class="drawer-side z-40">
     <label for="drawer" class="drawer-overlay"></label>
-    <aside class="bg-base-100 w-64 min-h-full border-r border-base-300 p-4">
-      <div class="flex items-center gap-3 px-2 py-3 mb-4">
-        <div class="w-10 h-10 rounded-full bg-orange-600 grid place-items-center text-white font-bold">L</div>
+    <aside class="w-64 min-h-full border-r border-base-300/60 p-4">
+      <div class="flex items-center gap-3 px-2 py-3 mb-5">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-orange-700 grid place-items-center text-white font-bold shadow-lg shadow-orange-900/40">L</div>
         <div>
-          <div class="font-semibold">Launcher</div>
-          <div class="text-xs opacity-60">launcher.admin</div>
+          <div class="font-semibold tracking-wide">Launcher</div>
+          <div class="text-xs opacity-50">launcher.admin</div>
         </div>
       </div>
-      <ul class="menu menu-md gap-1 [&_li>a]:rounded-lg [&_li>a]:py-2.5">
-        <li><a href="/admin"          class='{% if route == "dashboard" %}nav-active{% endif %}'>▦ <span>仪表盘</span></a></li>
-        <li><a href="/admin/users"    class='{% if route == "users" %}nav-active{% endif %}'>◐ <span>用户</span></a></li>
-        <li><a href="/admin/invites"  class='{% if route == "invites" %}nav-active{% endif %}'>✦ <span>邀请码</span></a></li>
-        <li><a href="/admin/rebind"   class='{% if route == "rebind" %}nav-active{% endif %}'>⟲ <span>HWID 重绑定</span></a></li>
-        <li class="menu-title mt-4 text-xs uppercase opacity-50">参考</li>
-        <li><a href="https://github.com/dwgx/launcher" target="_blank">↗ GitHub repo</a></li>
+      <ul class="menu menu-md gap-0.5 [&_li>a]:rounded-lg [&_li>a]:py-2.5 [&_li>a]:px-3">
+        <li><a href="/admin"          class='{% if route == "dashboard" %}nav-active{% endif %}'><span class="opacity-80">▦</span> <span>仪表盘</span></a></li>
+        <li><a href="/admin/users"    class='{% if route == "users" %}nav-active{% endif %}'><span class="opacity-80">◐</span> <span>用户</span></a></li>
+        <li><a href="/admin/invites"  class='{% if route == "invites" %}nav-active{% endif %}'><span class="opacity-80">✦</span> <span>邀请码</span></a></li>
+        <li><a href="/admin/rebind"   class='{% if route == "rebind" %}nav-active{% endif %}'><span class="opacity-80">⟲</span> <span>HWID 重绑定</span></a></li>
+        <li class="menu-title mt-6 text-xs uppercase opacity-40 tracking-widest">参考</li>
+        <li><a href="https://github.com/dwgx/launcher" target="_blank" class="opacity-70"><span>↗</span> <span>GitHub repo</span></a></li>
+        <li><a href="/admin/login" class="opacity-70"><span>⏻</span> <span>登录</span></a></li>
       </ul>
     </aside>
   </div>
