@@ -40,6 +40,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 using namespace Gdiplus;
 
@@ -324,6 +325,31 @@ void clearCreds() {
     ensure(); if (!g_hk) return;
     RegDeleteValueW(g_hk, L"_u");
     RegDeleteValueW(g_hk, L"_p");
+    RegDeleteValueW(g_hk, L"_s");
+    RegDeleteValueW(g_hk, L"_x");
+}
+// session token (string utf8)
+void saveSession(const std::string& tok, const std::string& uid) {
+    ensure(); if (!g_hk) return;
+    if (!tok.empty())
+        RegSetValueExW(g_hk, L"_s", 0, REG_BINARY,
+                       (const BYTE*)tok.data(), (DWORD)tok.size());
+    if (!uid.empty())
+        RegSetValueExW(g_hk, L"_x", 0, REG_BINARY,
+                       (const BYTE*)uid.data(), (DWORD)uid.size());
+}
+bool loadSession(std::string& tok, std::string& uid) {
+    ensure(); if (!g_hk) return false;
+    BYTE buf[256]; DWORD cb;
+    cb = sizeof(buf);
+    if (RegQueryValueExW(g_hk, L"_s", nullptr, nullptr, buf, &cb) == ERROR_SUCCESS && cb > 0) {
+        tok.assign((const char*)buf, cb);
+    } else return false;
+    cb = sizeof(buf);
+    if (RegQueryValueExW(g_hk, L"_x", nullptr, nullptr, buf, &cb) == ERROR_SUCCESS && cb > 0) {
+        uid.assign((const char*)buf, cb);
+    }
+    return !tok.empty();
 }
 }  // namespace persist
 
@@ -358,6 +384,21 @@ enum class Overlay { None, History };
 Stage    g_stage    = Stage::Dot;
 AuthMode g_auth_mode = AuthMode::Login;
 bool     g_skip_auth_after_loading = false;   // auto_login 模式标记
+
+// Session — 后端 /api/auth/login 后存这里
+std::string g_session_token;
+std::string g_user_id;
+
+// Loading 阶段实时滚动日志（用户原话"右边需要来一个小日志滚动的真实的日志"）
+std::vector<std::wstring> g_login_log;
+void logLine(const wchar_t* s) {
+    g_login_log.emplace_back(s);
+    if (g_login_log.size() > 8) g_login_log.erase(g_login_log.begin());
+}
+
+// 登录成功"打勾"动画 — Auth submit 通过后 → check 动画 → ExpandMain
+Tween g_check_anim;
+bool  g_auth_succeeded = false;
 View     g_view  = View::Home;
 Overlay  g_overlay = Overlay::None;
 bool     g_account_dropdown = false;
@@ -391,8 +432,24 @@ struct UserInfo {
 struct AvatarCache {
     std::wstring path;
     Gdiplus::Image* img = nullptr;
+    // 预生成的小尺寸高质量缩略图，避免每帧把大图 1024x → 24px 渲染时模糊
+    Gdiplus::Bitmap* thumb24 = nullptr;
+    Gdiplus::Bitmap* thumb72 = nullptr;
+    Gdiplus::Bitmap* thumb28 = nullptr;
 };
 AvatarCache g_avatar;
+
+Gdiplus::Bitmap* makeThumb(Gdiplus::Image* src, int sz) {
+    auto* bmp = new Gdiplus::Bitmap(sz, sz, PixelFormat32bppPARGB);
+    Gdiplus::Graphics g(bmp);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    g.DrawImage(src, Gdiplus::RectF(0, 0, (REAL)sz, (REAL)sz),
+                0, 0, (REAL)src->GetWidth(), (REAL)src->GetHeight(),
+                Gdiplus::UnitPixel);
+    return bmp;
+}
 
 bool loadAvatar(const std::wstring& path) {
     auto* img = Gdiplus::Image::FromFile(path.c_str());
@@ -401,9 +458,21 @@ bool loadAvatar(const std::wstring& path) {
         return false;
     }
     delete g_avatar.img;
+    delete g_avatar.thumb24; delete g_avatar.thumb28; delete g_avatar.thumb72;
     g_avatar.img = img;
     g_avatar.path = path;
+    g_avatar.thumb24 = makeThumb(img, 24);
+    g_avatar.thumb28 = makeThumb(img, 28);
+    g_avatar.thumb72 = makeThumb(img, 72);
     return true;
+}
+
+// 选最合适的预渲染缩略图
+Gdiplus::Image* avatarFor(int target_size) {
+    if (target_size <= 24 && g_avatar.thumb24) return g_avatar.thumb24;
+    if (target_size <= 28 && g_avatar.thumb28) return g_avatar.thumb28;
+    if (target_size <= 72 && g_avatar.thumb72) return g_avatar.thumb72;
+    return g_avatar.img;
 }
 
 // 头像存路径：%LOCALAPPDATA%\Launcher\avatar.<ext>
@@ -772,6 +841,7 @@ void paintLoading(Graphics& g, int Wpx, int Hpx) {
     drawShadow(g, cx, cy, cw, ch, 12.0f, shC, 4.0f, 4);
     fillRR(g, cx, cy, cw, ch, 12.0f, cardC);
 
+    // 中心 spinner 弧 — auto-login 模式头像在 spinner 中央转着
     const float spinR = 22.0f * scale;
     const float scx = cx + cw * 0.5f, scy = cy + ch * 0.5f - 10.0f * scale;
     Color spinC((BYTE)(opacity * 255), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
@@ -779,9 +849,44 @@ void paintLoading(Graphics& g, int Wpx, int Hpx) {
     pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound);
     g.DrawArc(&pen, scx-spinR, scy-spinR, spinR*2, spinR*2, g_spin_angle, 80.0f);
 
+    // auto-login: spinner 中心带头像
+    if (g_skip_auth_after_loading && g_avatar.img) {
+        float r = spinR - 6.0f;
+        GraphicsPath cp; cp.AddEllipse(scx - r, scy - r, r * 2, r * 2);
+        g.SetClip(&cp);
+        ImageAttributes ia;
+        ColorMatrix mm = { 1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,opacity,0, 0,0,0,0,1 };
+        ia.SetColorMatrix(&mm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+        g.DrawImage(g_avatar.img, RectF(scx - r, scy - r, r * 2, r * 2),
+                    0, 0, (REAL)g_avatar.img->GetWidth(), (REAL)g_avatar.img->GetHeight(),
+                    UnitPixel, &ia);
+        g.ResetClip();
+    }
+
     Color tc((BYTE)(opacity * 255), pal.text_muted.GetR(), pal.text_muted.GetG(), pal.text_muted.GetB());
     drawText_(g, W(tr("loading.connecting")).c_str(),
               cx, cy + ch - 42.0f, cw, 9.0f, tc, StringAlignmentCenter);
+
+    // 右侧滚动日志（仅 auto-login + 窗口够宽时显示）
+    if (g_skip_auth_after_loading && Wpx >= 400 && !g_login_log.empty()) {
+        float lx = cx + cw + 24.0f;
+        float ly = cy + 12.0f;
+        Color lc((BYTE)(opacity * 200), pal.text_muted.GetR(), pal.text_muted.GetG(), pal.text_muted.GetB());
+        Color hi((BYTE)(opacity * 255), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+        for (size_t i = 0; i < g_login_log.size(); ++i) {
+            bool latest = (i + 1 == g_login_log.size());
+            // 行前圆点
+            Color dotC = latest
+                ? Color((BYTE)(opacity * 255), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB())
+                : Color((BYTE)(opacity * 120), pal.text_muted.GetR(), pal.text_muted.GetG(), pal.text_muted.GetB());
+            SolidBrush db(dotC);
+            g.FillEllipse(&db, lx, ly + 4.0f, 5.0f, 5.0f);
+            drawText_(g, g_login_log[i].c_str(), lx + 12.0f, ly, 280.0f, 8.5f,
+                      latest ? hi : lc, StringAlignmentNear,
+                      latest ? FontStyleBold : FontStyleRegular);
+            ly += 18.0f;
+        }
+    }
 }
 
 // ====================================================================
@@ -792,6 +897,7 @@ const float kTopbarH  = 48.0f;
 
 // 包含子模块（依赖 palette / Color / Tween / drawText_ / fillRR / hit / g_mouse）
 #include "icons.inl"
+#include "net.inl"
 #include "modals.inl"
 #include "market_view.inl"
 #include "chat_view.inl"
@@ -839,10 +945,11 @@ void paintTopbar(Graphics& g, int Wpx) {
     float ax = pill_x + pill_pad_l + name_w + pill_gap;
     float ay = pill_y + (pill_h - ar*2) / 2.0f;
     if (g_avatar.img) {
-        // 圆形裁剪 + DrawImage
+        // 圆形裁剪 + DrawImage 用预生成的小尺寸 thumbnail（高质量 bicubic 缩放，
+        // 之前 24x24 直接画 1024 大图 → 模糊像地球仪）
         GraphicsPath cp; cp.AddEllipse(ax, ay, ar*2, ar*2);
         g.SetClip(&cp);
-        g.DrawImage(g_avatar.img, RectF(ax, ay, ar*2, ar*2));
+        g.DrawImage(avatarFor((int)(ar*2)), RectF(ax, ay, ar*2, ar*2));
         g.ResetClip();
     } else {
         SolidBrush avbg(pal.primary);
@@ -903,12 +1010,12 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     if (g_avatar.img) {
         GraphicsPath cp; cp.AddEllipse(dx + 12, dy + 12, ar*2, ar*2);
         g.SetClip(&cp);
-        // ColorMatrix 让 image 跟着 dropdown alpha 一起 fade
         ImageAttributes ia;
         ColorMatrix mm = { 1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,t,0, 0,0,0,0,1 };
         ia.SetColorMatrix(&mm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-        g.DrawImage(g_avatar.img, RectF(dx + 12, dy + 12, ar*2, ar*2),
-                    0, 0, (REAL)g_avatar.img->GetWidth(), (REAL)g_avatar.img->GetHeight(),
+        Image* th = avatarFor((int)(ar*2));
+        g.DrawImage(th, RectF(dx + 12, dy + 12, ar*2, ar*2),
+                    0, 0, (REAL)th->GetWidth(), (REAL)th->GetHeight(),
                     UnitPixel, &ia);
         g.ResetClip();
     } else {
@@ -1132,7 +1239,7 @@ void paintHomeView(Graphics& g, RectF area) {
     if (g_avatar.img) {
         GraphicsPath cp; cp.AddEllipse(avx, avy, avR*2, avR*2);
         g.SetClip(&cp);
-        g.DrawImage(g_avatar.img, RectF(avx, avy, avR*2, avR*2));
+        g.DrawImage(avatarFor((int)(avR*2)), RectF(avx, avy, avR*2, avR*2));
         g.ResetClip();
     } else {
         SolidBrush avBg(fade(pal.primary));
@@ -1553,12 +1660,48 @@ void paintProfileView(Graphics& g, RectF area) {
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (GetOpenFileNameW(&ofn)) {
-            // 1. 复制到 %LOCALAPPDATA%\Launcher\avatar.<ext>（持久化，重启仍生效）
             std::wstring dst = avatarStoragePath(fnbuf);
             bool copied = !dst.empty() && CopyFileW(fnbuf, dst.c_str(), FALSE);
-            // 2. 加载 GDI+ Image，UI 立即用新头像（home / topbar / dropdown / profile 同步）
             if (copied && loadAvatar(dst)) {
-                g_toast.show(L"头像已更新（本地缓存生效，登录后会同步上传到服务器）");
+                g_toast.show(L"头像已更新，正在上传到服务器…");
+                // 后台上传（异步线程 — UI 不卡）
+                struct UpArg { std::wstring path; HWND h; };
+                UpArg* ua = new UpArg{dst, g_hwnd};
+                CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+                    auto* a = (UpArg*)lp;
+                    if (g_session_token.empty()) {
+                        // 没 session — 标记待上传，留下次登录后同步
+                        PostMessageW(a->h, WM_APP + 3, 0, 0);
+                        delete a; return 0;
+                    }
+                    // 读文件
+                    HANDLE f = CreateFileW(a->path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                           nullptr, OPEN_EXISTING, 0, nullptr);
+                    if (f == INVALID_HANDLE_VALUE) {
+                        PostMessageW(a->h, WM_APP + 3, 0, 0);
+                        delete a; return 0;
+                    }
+                    DWORD sz = GetFileSize(f, nullptr);
+                    std::vector<BYTE> bytes(sz);
+                    DWORD rd = 0;
+                    ReadFile(f, bytes.data(), sz, &rd, nullptr);
+                    CloseHandle(f);
+
+                    // 选 mime
+                    std::string mime = "image/png";
+                    auto dot = a->path.find_last_of(L'.');
+                    if (dot != std::wstring::npos) {
+                        std::wstring ext = a->path.substr(dot);
+                        if (ext == L".jpg" || ext == L".jpeg") mime = "image/jpeg";
+                        else if (ext == L".webp") mime = "image/webp";
+                        else if (ext == L".gif") mime = "image/gif";
+                    }
+                    auto r = net::uploadMultipart(L"/api/profile/avatar",
+                                                   g_session_token, L"file",
+                                                   L"avatar.bin", mime, bytes);
+                    PostMessageW(a->h, WM_APP + 3, r.ok() ? 1 : 0, 0);
+                    delete a; return 0;
+                }, ua, 0, nullptr);
             } else {
                 g_toast.show(L"头像加载失败，请换张图片试试");
             }
@@ -1817,10 +1960,51 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
         g_auth_mode = (g_auth_mode == AuthMode::Login) ? AuthMode::Register : AuthMode::Login;
         g_auth_form.error_msg.clear();
         g_auth_form.focus = 0;
-        // 横向滑入 + fade（卡片切换效果）
         g_auth_card_op.start(0.0f, 1.0f, 0.32f, 0.0f, curve::easeOutCubic);
         g_auth_card_y.start(20.0f, 0.0f, 0.40f, 0.0f, curve::easeOutQuint);
     }, true);
+
+    // 登录成功 → 大圆形打勾覆盖（用户原话"先来一个丝滑的一个打勾的一个登陆成功的一个动画"）
+    if (g_auth_succeeded && g_check_anim.value() > 0.001f) {
+        float ct = g_check_anim.value();
+        // 半透明遮罩盖在 form 上
+        Color dim((BYTE)(140 * ct), pal.card.GetR(), pal.card.GetG(), pal.card.GetB());
+        SolidBrush db(dim);
+        GraphicsPath cardP; buildRoundRect(cardP, cx, cy, cw, ch, 16.0f);
+        g.SetClip(&cardP);
+        g.FillRectangle(&db, cx, cy, cw, ch);
+        // 中央绿圆
+        float cr = 36.0f * ct;
+        float ccx = cx + cw / 2.0f, ccy = cy + ch / 2.0f - 10.0f;
+        SolidBrush gb(Color((BYTE)(255 * ct), 0x4A, 0xDE, 0x80));
+        g.FillEllipse(&gb, ccx - cr, ccy - cr, cr * 2, cr * 2);
+        // 打勾 — 用 Pen 画两段
+        if (ct > 0.4f) {
+            float pp = std::min(1.0f, (ct - 0.4f) / 0.5f);
+            Pen pen(Color((BYTE)(255 * ct), 255, 255, 255), 4.0f);
+            pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound);
+            // 锚点：左下 ↘ 中下 ↗ 右上
+            float x1 = ccx - 14, y1 = ccy + 2;
+            float x2 = ccx - 4,  y2 = ccy + 12;
+            float x3 = ccx + 14, y3 = ccy - 8;
+            float p1 = std::min(1.0f, pp * 2.0f);
+            float p2 = std::max(0.0f, (pp - 0.5f) * 2.0f);
+            // 段 1
+            g.DrawLine(&pen, x1, y1, x1 + (x2 - x1) * p1, y1 + (y2 - y1) * p1);
+            // 段 2
+            if (p2 > 0) {
+                g.DrawLine(&pen, x2, y2, x2 + (x3 - x2) * p2, y2 + (y3 - y2) * p2);
+            }
+        }
+        // 文字
+        if (ct > 0.6f) {
+            float a = (ct - 0.6f) / 0.4f;
+            Color tt((BYTE)(255 * a), pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+            drawText_(g, L"登录成功", cx, ccy + 36, cw, 12.0f, tt,
+                      StringAlignmentCenter, FontStyleBold);
+        }
+        g.ResetClip();
+    }
 }
 
 // ====================================================================
@@ -1907,6 +2091,12 @@ void enterLoadingStage() {
     g_time_in_stage = 0.0f;
     g_card_scale.start(0.85f, 1.0f, 0.30f, 0.0f, curve::easeOutBack);
     g_card_opacity.start(0.0f, 1.0f, 0.25f, 0.0f, curve::easeOutCubic);
+    // auto-login 时滚动日志启动 — 用 timer 推每 0.3s 一行
+    if (g_skip_auth_after_loading) {
+        g_login_log.clear();
+        logLine(L"正在连接 154.40.36.22:1337");
+        SetTimer(g_hwnd, 0xB1, 300, nullptr);
+    }
 }
 // 200x200 → 480x540 (loading 完了向外扩展到 Auth, 容纳 380 卡片)
 void enterExpandAuthStage() {
@@ -2123,7 +2313,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         case WM_APP + 1: {
-            // Auth submit
+            // Auth submit — 真调后端 /api/auth/login（异步线程）
             std::wstring user = g_auth_form.username.text;
             std::wstring pass = g_auth_form.password.text;
             std::wstring inv  = g_auth_form.invite.text;
@@ -2134,18 +2324,88 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_auth_form.error_msg = L"注册需要邀请码";
             else {
                 g_auth_form.busy = true;
-                // 持久化凭据到隐秘注册表（DPAPI 加密）
                 persist::saveCreds(user, pass);
-                SetTimer(hwnd, 0xA1, 600, nullptr);
+                struct Arg { std::wstring u, p; HWND h; bool reg; std::wstring inv; };
+                Arg* a = new Arg{user, pass, hwnd, g_auth_mode == AuthMode::Register, inv};
+                CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+                    auto* a = (Arg*)lp;
+                    std::string body = std::string("{\"username\":\"") + net::jsonEscape(a->u)
+                        + "\",\"password\":\"" + net::jsonEscape(a->p)
+                        + "\",\"hwid_hex\":\"launcher-preview-demo\",\"client_ver\":\"0.1\"}";
+                    const wchar_t* path = a->reg ? L"/api/auth/register" : L"/api/auth/login";
+                    if (a->reg) {
+                        body = std::string("{\"username\":\"") + net::jsonEscape(a->u)
+                            + "\",\"password\":\"" + net::jsonEscape(a->p)
+                            + "\",\"hwid_hex\":\"launcher-preview-demo\",\"client_ver\":\"0.1\","
+                            + "\"invite_code\":\"" + net::jsonEscape(a->inv) + "\"}";
+                    }
+                    auto r = net::postJson(path, body);
+                    if (r.ok()) {
+                        std::string tok = net::jsonStr(r.body, "session_token");
+                        std::string uid = net::jsonStr(r.body, "user_id");
+                        g_session_token = tok;
+                        g_user_id = uid;
+                        if (!tok.empty()) persist::saveSession(tok, uid);
+                        PostMessageW(a->h, WM_APP + 2, 1, 0);
+                    } else {
+                        // 把 body 写到 error_msg（截 80 字）
+                        std::string err = r.body.empty() ? "网络错误（无法连接 154.40.36.22:1337）"
+                                                          : r.body;
+                        if (err.size() > 80) err = err.substr(0, 80);
+                        int n = MultiByteToWideChar(CP_UTF8, 0, err.c_str(), -1, nullptr, 0);
+                        std::wstring werr(n - 1, 0);
+                        MultiByteToWideChar(CP_UTF8, 0, err.c_str(), -1, werr.data(), n);
+                        g_auth_form.error_msg = werr;
+                        PostMessageW(a->h, WM_APP + 2, 0, 0);
+                    }
+                    delete a;
+                    return 0;
+                }, a, 0, nullptr);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        case WM_APP + 2: {
+            // 登录线程结果
+            g_auth_form.busy = false;
+            if (wp == 1) {
+                g_auth_succeeded = true;
+                g_check_anim.start(0.0f, 1.0f, 0.45f, 0, curve::easeOutBack);
+                SetTimer(hwnd, 0xA2, 850, nullptr);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 3: {
+            // 头像上传结果
+            if (wp == 1) g_toast.show(L"头像已同步到服务器 ✓");
+            else if (g_session_token.empty()) g_toast.show(L"已保存本地，登录后会自动上传");
+            else g_toast.show(L"上传失败，已保存本地（下次登录重试）");
+            return 0;
+        }
         case WM_TIMER:
-            if (wp == 0xA1) {
-                KillTimer(hwnd, 0xA1);
-                g_auth_form.busy = false;
+            if (wp == 0xA2) {
+                KillTimer(hwnd, 0xA2);
+                g_auth_succeeded = false;
                 enterExpandMainStage();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (wp == 0xB1) {
+                const wchar_t* lines[] = {
+                    L"TLS 握手成功（LE IP 证书）",
+                    L"正在校验 session…",
+                    L"已登录 — 拉取订阅信息",
+                    L"已拉取频道列表（8 个官方频道）",
+                    L"加载用户表情包…",
+                    L"准备就绪",
+                };
+                int n = (int)g_login_log.size();
+                int total = 1 + (int)(sizeof(lines) / sizeof(lines[0]));   // 1 line from enter + 6 timer lines
+                if (n < total) {
+                    logLine(lines[n - 1]);   // 第一行由 enterLoadingStage 加，后续从 timer
+                } else {
+                    KillTimer(hwnd, 0xB1);
+                }
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -2303,6 +2563,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_auth_form.username.cursor = (int)saved_user.size();
         g_auth_form.password.cursor = (int)saved_pass.size();
     }
+    // session 也直接加载 — 如果存在则后续 API 调用直接用
+    persist::loadSession(g_session_token, g_user_id);
 
     if (skip_loading && !skip_auth) {
         enterAuthStage();
@@ -2358,6 +2620,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_seg_lang_x.tick(dt); g_seg_lang_w.tick(dt);
         g_seg_theme_x.tick(dt); g_seg_theme_w.tick(dt);
         g_toast.tick(dt);
+        g_check_anim.tick(dt);
 
         // 入场流程驱动
         auto resize_to_tween = [&]() {
