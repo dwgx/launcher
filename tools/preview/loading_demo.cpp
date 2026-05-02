@@ -898,6 +898,7 @@ const float kTopbarH  = 48.0f;
 // 包含子模块（依赖 palette / Color / Tween / drawText_ / fillRR / hit / g_mouse）
 #include "icons.inl"
 #include "net.inl"
+#include "transitions.inl"
 #include "modals.inl"
 #include "market_view.inl"
 #include "chat_view.inl"
@@ -2443,13 +2444,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 12: {
-            // 发消息结果 — 失败时 toast 提醒
             if (wp != 1) {
                 int status = (int)(intptr_t)lp;
                 if (status == 403) g_toast.show(L"此频道只允许管理员发言");
                 else if (status == 0) g_toast.show(L"网络错误");
                 else { std::wstring msg = L"发送失败 (status " + std::to_wstring(status) + L")";
                        g_toast.show(msg.c_str()); }
+            }
+            return 0;
+        }
+        case WM_APP + 13: {
+            // sticker upload 结果（不弹成功 toast — 默默同步；失败时根据 status 处理）
+            if (wp != 1) {
+                int status = (int)(intptr_t)lp;
+                if (status == 413) g_toast.show(L"表情包已达 50 张上限");
             }
             return 0;
         }

@@ -763,6 +763,58 @@ inline std::vector<std::wstring>& userPack() {
     static std::vector<std::wstring> v; return v;
 }
 
+// 异步上传一个表情文件 → /api/media/upload → /api/sticker
+// session_token 空时跳过（只本地缓存）
+inline void uploadStickerAsync(const std::wstring& path) {
+    if (::g_session_token.empty()) return;
+    struct A { std::wstring path; HWND h; };
+    A* a = new A{path, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        HANDLE f = CreateFileW(a->path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { delete a; return 0; }
+        DWORD sz = GetFileSize(f, nullptr);
+        std::vector<BYTE> bytes(sz);
+        DWORD rd = 0;
+        ReadFile(f, bytes.data(), sz, &rd, nullptr);
+        CloseHandle(f);
+
+        // mime + 文件名
+        std::string mime = "application/octet-stream";
+        bool is_animated = false;
+        auto dot = a->path.find_last_of(L'.');
+        std::wstring fn = a->path;
+        auto sl = a->path.find_last_of(L"\\/");
+        if (sl != std::wstring::npos) fn = a->path.substr(sl + 1);
+        if (dot != std::wstring::npos) {
+            std::wstring ext = a->path.substr(dot);
+            for (auto& c : ext) c = (wchar_t)towlower(c);
+            if (ext == L".png") mime = "image/png";
+            else if (ext == L".jpg" || ext == L".jpeg") mime = "image/jpeg";
+            else if (ext == L".gif") { mime = "image/gif"; is_animated = true; }
+            else if (ext == L".webp") mime = "image/webp";
+        }
+        // 1. /api/media/upload
+        auto mr = net::uploadMultipart(L"/api/media/upload", ::g_session_token,
+                                        L"file", fn, mime, bytes);
+        if (!mr.ok()) { delete a; return 0; }
+        long long media_id = net::jsonInt(mr.body, "media_id");
+        if (media_id <= 0) { delete a; return 0; }
+
+        // 2. /api/sticker create
+        std::string sbody = std::string("{\"session_token\":\"") + ::g_session_token
+            + "\",\"media_id\":" + std::to_string(media_id)
+            + ",\"label\":\"" + net::jsonEscape(fn)
+            + "\",\"is_animated\":" + (is_animated ? "true" : "false") + "}";
+        auto sr = net::postJson(L"/api/sticker", sbody);
+        // 失败 toast 在主线程统一处理；成功也不弹 — 默默同步
+        PostMessageW(a->h, WM_APP + 13, sr.ok() ? 1 : 0, (LPARAM)(intptr_t)sr.status);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
 // 用 SHBrowseForFolder 选文件夹，扫描里面的图片/GIF 加进 userPack（最多 50 张，符合"每人 50 张"约束）
 void importEmojiFolder() {
     // BROWSEINFO 选文件夹
@@ -801,6 +853,8 @@ void importEmojiFolder() {
         if (loadMedia(full)) {
             userPack().push_back(full);
             ++added;
+            // 后端真同步 — 异步上传到 /api/media/upload + /api/sticker
+            uploadStickerAsync(full);
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
