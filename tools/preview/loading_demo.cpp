@@ -18,6 +18,7 @@
 #include <gdiplus.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <wincrypt.h>
 #include <vector>
 #include <string>
 #include <functional>
@@ -33,6 +34,8 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "user32.lib")
 
 using namespace Gdiplus;
 
@@ -187,6 +190,139 @@ void detectSystemLanguage() {
 }
 
 // ====================================================================
+// Persist — 隐秘注册表持久化（lang/theme/凭据）
+//   策略：写死 30 个候选路径（伪装成系统/Office/MuiCache 子键），启动遍历找
+//   _m magic = 'LUNC' 的那一个。没找到就按 GetTickCount 随机选一个写入。
+//   凭据用 DPAPI（CryptProtectData，绑定当前用户）加密存 _p 字段。
+// ====================================================================
+namespace persist {
+constexpr DWORD kMagic = 0x4C554E43;   // 'LUNC'
+const wchar_t* kPaths[] = {
+    L"Software\\Classes\\Local Settings\\MuiCache\\41",
+    L"Software\\Classes\\Local Settings\\MuiCache\\72",
+    L"Software\\Classes\\Local Settings\\MuiCache\\a3",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Accent\\Cache",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StreamMRU",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Streams\\.cache",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\5.0\\Cache\\b1",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\5.0\\Cache\\c2",
+    L"Software\\Microsoft\\Office\\Common\\InternetFonts\\Cache",
+    L"Software\\Microsoft\\Office\\Common\\Fonts\\Hinting",
+    L"Software\\Microsoft\\Notepad\\Recent",
+    L"Software\\Microsoft\\Notepad\\StatePersistence",
+    L"Software\\Microsoft\\IdentityCRL\\Cache\\.alt",
+    L"Software\\Microsoft\\Cryptography\\PolicyCache\\Slot",
+    L"Software\\Microsoft\\Direct3D\\MostRecentApplication\\Cache",
+    L"Software\\Microsoft\\Direct3D\\Adapter\\Cache",
+    L"Software\\Microsoft\\InputPersonalization\\Cache",
+    L"Software\\Microsoft\\Windows\\Shell\\BagMRU\\NodeSlot",
+    L"Software\\Microsoft\\Windows\\Shell\\Bags\\1\\Settings",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\.cache",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Search\\Cache",
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Network\\Cache",
+    L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Cache",
+    L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Diagnostics\\Cache",
+    L"Software\\Microsoft\\Windows NT\\CurrentVersion\\NetworkList\\Cache",
+    L"Software\\Microsoft\\EventSounds\\.cache",
+    L"Software\\Microsoft\\Speech\\Cache",
+    L"Software\\Microsoft\\Speech_OneCore\\Cache",
+    L"Software\\Microsoft\\Multimedia\\DrawDib\\Cache",
+    L"Software\\Microsoft\\Telemetry\\.cache",
+};
+constexpr int kCount = sizeof(kPaths) / sizeof(kPaths[0]);
+
+HKEY g_hk = nullptr;
+const wchar_t* g_path = nullptr;
+
+bool readDword(HKEY hk, const wchar_t* name, DWORD& out) {
+    DWORD cb = sizeof(out), type = 0;
+    return RegQueryValueExW(hk, name, nullptr, &type, (LPBYTE)&out, &cb) == ERROR_SUCCESS
+           && type == REG_DWORD;
+}
+bool readString(HKEY hk, const wchar_t* name, std::wstring& out) {
+    wchar_t buf[2048]; DWORD cb = sizeof(buf);
+    if (RegQueryValueExW(hk, name, nullptr, nullptr, (LPBYTE)buf, &cb) != ERROR_SUCCESS) return false;
+    if (cb < sizeof(wchar_t)) return false;
+    out.assign(buf, (cb / sizeof(wchar_t)) - 1);
+    return true;
+}
+bool tryOpen(const wchar_t* path) {
+    HKEY hk;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ | KEY_WRITE | KEY_SET_VALUE, &hk) != ERROR_SUCCESS) {
+        return false;
+    }
+    DWORD m = 0;
+    if (readDword(hk, L"_m", m) && m == kMagic) {
+        g_hk = hk;
+        g_path = path;
+        return true;
+    }
+    RegCloseKey(hk);
+    return false;
+}
+void ensure() {
+    if (g_hk) return;
+    for (int i = 0; i < kCount; ++i) if (tryOpen(kPaths[i])) return;
+    int pick = (int)(GetTickCount() % (DWORD)kCount);
+    HKEY hk;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kPaths[pick], 0, nullptr, 0,
+                        KEY_READ | KEY_WRITE | KEY_SET_VALUE, nullptr, &hk, nullptr) == ERROR_SUCCESS) {
+        DWORD m = kMagic;
+        RegSetValueExW(hk, L"_m", 0, REG_DWORD, (LPBYTE)&m, sizeof(m));
+        g_hk = hk;
+        g_path = kPaths[pick];
+    }
+}
+void saveLang(int v) {
+    ensure(); if (!g_hk) return;
+    DWORD d = (DWORD)v;
+    RegSetValueExW(g_hk, L"_l", 0, REG_DWORD, (LPBYTE)&d, sizeof(d));
+}
+void saveTheme(bool dark) {
+    ensure(); if (!g_hk) return;
+    DWORD d = dark ? 1 : 0;
+    RegSetValueExW(g_hk, L"_t", 0, REG_DWORD, (LPBYTE)&d, sizeof(d));
+}
+int loadLang(int dflt) {
+    ensure(); if (!g_hk) return dflt;
+    DWORD v; return readDword(g_hk, L"_l", v) ? (int)v : dflt;
+}
+bool loadTheme(bool dflt) {
+    ensure(); if (!g_hk) return dflt;
+    DWORD v; return readDword(g_hk, L"_t", v) ? (v != 0) : dflt;
+}
+void saveCreds(const std::wstring& u, const std::wstring& p) {
+    ensure(); if (!g_hk) return;
+    RegSetValueExW(g_hk, L"_u", 0, REG_SZ, (LPBYTE)u.c_str(), (DWORD)((u.size() + 1) * sizeof(wchar_t)));
+    DATA_BLOB in{}, out{};
+    in.pbData = (BYTE*)p.data();
+    in.cbData = (DWORD)(p.size() * sizeof(wchar_t));
+    if (CryptProtectData(&in, L"launcher", nullptr, nullptr, nullptr, 0, &out)) {
+        RegSetValueExW(g_hk, L"_p", 0, REG_BINARY, out.pbData, out.cbData);
+        LocalFree(out.pbData);
+    }
+}
+bool loadCreds(std::wstring& u, std::wstring& p) {
+    ensure(); if (!g_hk) return false;
+    if (!readString(g_hk, L"_u", u) || u.empty()) return false;
+    BYTE buf[4096]; DWORD cb = sizeof(buf), type = 0;
+    if (RegQueryValueExW(g_hk, L"_p", nullptr, &type, buf, &cb) != ERROR_SUCCESS) return false;
+    if (type != REG_BINARY || cb == 0) return false;
+    DATA_BLOB in{}, out{};
+    in.pbData = buf; in.cbData = cb;
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &out)) return false;
+    p.assign((wchar_t*)out.pbData, out.cbData / sizeof(wchar_t));
+    LocalFree(out.pbData);
+    return true;
+}
+void clearCreds() {
+    ensure(); if (!g_hk) return;
+    RegDeleteValueW(g_hk, L"_u");
+    RegDeleteValueW(g_hk, L"_p");
+}
+}  // namespace persist
+
+// ====================================================================
 // Tween
 // ====================================================================
 struct Tween {
@@ -318,26 +454,119 @@ const wchar_t* statusLabel(UserStatus s, Lang lang) {
 struct InputBox {
     std::wstring text;
     int  cursor = 0;
+    int  sel_anchor = -1;   // -1 = 无选区
     bool password = false;
-    RectF bounds{};   // 由 paint 时设置, hit 用
-    // floating label tween — 0 = resting (label 居中), 1 = floating (label top)
+    RectF bounds{};
     Tween float_t;
 
-    void onChar(wchar_t c) {
-        if (c == 0x08) { // backspace
-            if (cursor > 0) { text.erase(cursor - 1, 1); cursor--; }
-        } else if (c == 0x09 || c == 0x0A || c == 0x0D || c == 0x1B) {
-            // tab/enter/esc 不处理
-        } else if (c >= 0x20) {
-            text.insert(cursor, 1, c); cursor++;
-        }
+    bool hasSelection() const { return sel_anchor >= 0 && sel_anchor != cursor; }
+    int  selStart() const { return std::min(sel_anchor, cursor); }
+    int  selEnd()   const { return std::max(sel_anchor, cursor); }
+    void clearSel() { sel_anchor = -1; }
+    void selectAll() { sel_anchor = 0; cursor = (int)text.size(); }
+
+    void deleteSelection() {
+        if (!hasSelection()) return;
+        int s = selStart(), e = selEnd();
+        text.erase(s, e - s);
+        cursor = s;
+        clearSel();
     }
-    void onKey(int vk) {
-        if (vk == VK_LEFT && cursor > 0) cursor--;
-        else if (vk == VK_RIGHT && cursor < (int)text.size()) cursor++;
-        else if (vk == VK_DELETE && cursor < (int)text.size()) text.erase(cursor, 1);
-        else if (vk == VK_HOME) cursor = 0;
-        else if (vk == VK_END) cursor = (int)text.size();
+    void replaceSelection(const std::wstring& with) {
+        deleteSelection();
+        text.insert(cursor, with);
+        cursor += (int)with.size();
+    }
+
+    void copyToClipboard(HWND hwnd) {
+        if (!hasSelection() || password) return;
+        std::wstring s = text.substr(selStart(), selEnd() - selStart());
+        if (!OpenClipboard(hwnd)) return;
+        EmptyClipboard();
+        size_t bytes = (s.size() + 1) * sizeof(wchar_t);
+        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (h) {
+            memcpy(GlobalLock(h), s.c_str(), bytes);
+            GlobalUnlock(h);
+            SetClipboardData(CF_UNICODETEXT, h);
+        }
+        CloseClipboard();
+    }
+    void pasteFromClipboard(HWND hwnd) {
+        if (!OpenClipboard(hwnd)) return;
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+        if (h) {
+            const wchar_t* p = (const wchar_t*)GlobalLock(h);
+            if (p) {
+                std::wstring in = p;
+                // 剥掉 \r 让换行统一
+                std::wstring filt;
+                filt.reserve(in.size());
+                for (wchar_t c : in) if (c != L'\r') filt.push_back(c);
+                replaceSelection(filt);
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+    }
+    void cutToClipboard(HWND hwnd) {
+        if (!hasSelection() || password) return;
+        copyToClipboard(hwnd);
+        deleteSelection();
+    }
+
+    // c 是 WM_CHAR 字符；ctrl 表示 Ctrl 当前按下
+    // 返回 true = 已处理（调用方不要再 PostMessage）
+    bool onChar(wchar_t c, bool ctrl, HWND hwnd) {
+        if (ctrl) {
+            if (c == 0x01) { selectAll(); return true; }                  // Ctrl+A
+            if (c == 0x03) { copyToClipboard(hwnd); return true; }        // Ctrl+C
+            if (c == 0x16) { pasteFromClipboard(hwnd); return true; }     // Ctrl+V
+            if (c == 0x18) { cutToClipboard(hwnd); return true; }         // Ctrl+X
+            if (c == 0x1A) return true;                                    // Ctrl+Z (TODO)
+            return true;   // 其他 Ctrl 组合吃掉
+        }
+        if (c == 0x08) { // backspace
+            if (hasSelection()) deleteSelection();
+            else if (cursor > 0) { text.erase(cursor - 1, 1); cursor--; }
+            return true;
+        }
+        if (c == 0x09 || c == 0x1B) return false;   // Tab/Esc 让上层处理
+        if (c == 0x0A || c == 0x0D) return false;   // Enter 上层
+        if (c >= 0x20) {
+            replaceSelection(std::wstring(1, c));
+            return true;
+        }
+        return false;
+    }
+    void onKey(int vk, bool shift, bool ctrl) {
+        bool moved = false;
+        if (vk == VK_LEFT) {
+            if (shift && sel_anchor < 0) sel_anchor = cursor;
+            if (cursor > 0) { cursor--; moved = true; }
+            if (!shift) clearSel();
+        } else if (vk == VK_RIGHT) {
+            if (shift && sel_anchor < 0) sel_anchor = cursor;
+            if (cursor < (int)text.size()) { cursor++; moved = true; }
+            if (!shift) clearSel();
+        } else if (vk == VK_HOME) {
+            if (shift && sel_anchor < 0) sel_anchor = cursor;
+            cursor = 0; moved = true;
+            if (!shift) clearSel();
+        } else if (vk == VK_END) {
+            if (shift && sel_anchor < 0) sel_anchor = cursor;
+            cursor = (int)text.size(); moved = true;
+            if (!shift) clearSel();
+        } else if (vk == VK_DELETE) {
+            if (hasSelection()) deleteSelection();
+            else if (cursor < (int)text.size()) text.erase(cursor, 1);
+        }
+        if (moved && shift) {
+            // sel_anchor 已设；cursor 已动；选区自动 = (anchor, cursor)
+        } else if (moved && !shift) {
+            // 已 clearSel 了
+        }
+        (void)ctrl;
     }
     bool hit(POINT p) const {
         return p.x >= bounds.X && p.x <= bounds.X + bounds.Width
@@ -346,6 +575,13 @@ struct InputBox {
     std::wstring display() const {
         if (!password) return text;
         return std::wstring(text.size(), L'•');
+    }
+    std::wstring displaySlice(int from, int to) const {
+        from = std::max(0, std::min(from, (int)text.size()));
+        to   = std::max(0, std::min(to,   (int)text.size()));
+        if (from >= to) return L"";
+        if (!password) return text.substr(from, to - from);
+        return std::wstring(to - from, L'•');
     }
 };
 
@@ -676,7 +912,24 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
               g_account_dropdown=false;
               g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
         { "acc.password", icons::Name::Shield, [](){ }, false },
-        { "acc.signout",  icons::Name::Logout, [](){ }, true },
+        { "acc.signout",  icons::Name::Logout, [](){
+              // 清除存储的凭据，回到 Auth
+              persist::clearCreds();
+              g_account_dropdown = false;
+              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic);
+              // 回到 Auth：重置表单 + 切 stage
+              g_auth_form.username.text.clear(); g_auth_form.username.cursor = 0; g_auth_form.username.clearSel();
+              g_auth_form.password.text.clear(); g_auth_form.password.cursor = 0; g_auth_form.password.clearSel();
+              g_auth_form.invite.text.clear();   g_auth_form.invite.cursor   = 0; g_auth_form.invite.clearSel();
+              g_auth_form.focus = 0;
+              g_auth_form.error_msg.clear();
+              g_stage = Stage::Auth;
+              // 缩窗到 Auth 卡片大小
+              int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+              SetWindowPos(g_hwnd, nullptr, (sw - 480) / 2, (sh - 540) / 2, 480, 540, SWP_NOZORDER);
+              g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
+              g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
+        }, true },
     };
     for (auto& it : items) {
         RectF r(dx + 6, iy, dw - 12, 30);
@@ -1023,6 +1276,7 @@ void paintSettingsView(Graphics& g, RectF area) {
         [](const LBItem& i){
             if (g_lang != i.l) {
                 g_lang = i.l;
+                persist::saveLang((int)g_lang);
                 g_view_fade.start(0.5f, 1.0f, 0.20f, 0, curve::easeOutCubic);
             }
         });
@@ -1038,6 +1292,7 @@ void paintSettingsView(Graphics& g, RectF area) {
         [](const TBItem& i){
             if (g_dark != i.dark) {
                 g_dark = i.dark;
+                persist::saveTheme(g_dark);
                 g_view_fade.start(0.6f, 1.0f, 0.25f, 0, curve::easeOutCubic);
             }
         });
@@ -1178,8 +1433,8 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
 
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * op), c.GetR(), c.GetG(), c.GetB()); };
 
-    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card_hover), 8.0f, 5);
-    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card_hover), 30.0f, 6);
+    // 阴影减弱：之前 5/6 spread 在 light theme 下太重
+    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card), 4.0f, 3);
     fillRR(g, cx, cy, cw, ch, 16.0f, fade(pal.card));
 
     // h1 22px bold + logo 26x26
@@ -1238,17 +1493,28 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
         drawText_(g, labelStr.c_str(), ix + 14.0f, lab_y, iw - 28.0f, lab_size, lab_c,
                   StringAlignmentNear, anim_v > 0.5f ? FontStyleBold : FontStyleRegular);
 
-        // text input area (在 label 下方 / 整个高度)
+        // 选区高亮 + 文本
+        Font* tf = fontcache::get(10.5f);
+        if (focused && box.hasSelection()) {
+            RectF bb_pre, bb_in;
+            g.MeasureString(box.displaySlice(0, box.selStart()).c_str(), -1, tf,
+                            PointF(0, 0), &bb_pre);
+            g.MeasureString(box.displaySlice(box.selStart(), box.selEnd()).c_str(), -1, tf,
+                            PointF(0, 0), &bb_in);
+            Color sel_bg(96, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+            SolidBrush sel_b(sel_bg);
+            g.FillRectangle(&sel_b, ix + 14.0f + bb_pre.Width, iy + 21.0f,
+                            bb_in.Width, 18.0f);
+        }
         std::wstring txt = box.display();
         if (!txt.empty()) {
             drawText_(g, txt.c_str(), ix + 14.0f, iy + 22.0f, iw - 28.0f,
                       10.5f, fade(pal.text));
         }
         // caret
-        if (focused) {
-            Font fnt(kFontFace, 10.5f, FontStyleRegular, UnitPoint);
-            std::wstring sub = box.display().substr(0, box.cursor);
-            RectF bbox; g.MeasureString(sub.c_str(), -1, &fnt, PointF(0, 0), &bbox);
+        if (focused && !box.hasSelection()) {
+            std::wstring sub = box.displaySlice(0, box.cursor);
+            RectF bbox; g.MeasureString(sub.c_str(), -1, tf, PointF(0, 0), &bbox);
             float cur_x = ix + 14.0f + bbox.Width;
             int phase = (int)(g_time_in_stage * 1000) % 1000;
             if (phase < 500) {
@@ -1256,7 +1522,13 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
                 g.DrawLine(&p, cur_x, iy + 22.0f, cur_x, iy + ih - 8.0f);
             }
         }
-        hit(box.bounds, [idx](){ g_auth_form.focus = idx; }, true);
+        hit(box.bounds, [idx](){
+            g_auth_form.focus = idx;
+            // 切换 focus 时清除选区，避免视觉残留
+            if (idx != 0) g_auth_form.username.clearSel();
+            if (idx != 1) g_auth_form.password.clearSel();
+            if (idx != 2) g_auth_form.invite.clearSel();
+        }, true);
     };
 
     static float anim_u = 0, anim_p = 0, anim_i = 0;
@@ -1278,8 +1550,8 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
         ? fade(Color(255, 0x6B, 0x6A, 0x67))
         : (bhov ? fade(pal.primary_hover) : fade(pal.primary));
     // 阴影 0 6px 16px -6 rgba(217,119,87,.6)
-    Color glow((BYTE)(120 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    drawShadow(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, glow, 6.0f, 4);
+    Color glow((BYTE)(70 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    drawShadow(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, glow, 4.0f, 3);
     fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, bbg);
     drawText_(g, W(tr(g_auth_form.busy ? "auth.busy" : (reg ? "auth.register" : "auth.login"))).c_str(),
               btn.X, btn.Y + 14, btn.Width, 11.0f,
@@ -1515,44 +1787,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU) showTrayMenu(hwnd);
             return 0;
         }
-        case WM_CHAR:
+        case WM_CHAR: {
+            wchar_t c = (wchar_t)wp;
+            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (g_stage == Stage::Auth) {
-                wchar_t c = (wchar_t)wp;
-                if (g_auth_form.focus == 0)      g_auth_form.username.onChar(c);
-                else if (g_auth_form.focus == 1) g_auth_form.password.onChar(c);
-                else if (g_auth_form.focus == 2) g_auth_form.invite.onChar(c);
-                if (c == L'\r' || c == L'\n')   PostMessageW(hwnd, WM_APP + 1, 0, 0);
+                InputBox* box = nullptr;
+                if (g_auth_form.focus == 0)      box = &g_auth_form.username;
+                else if (g_auth_form.focus == 1) box = &g_auth_form.password;
+                else if (g_auth_form.focus == 2) box = &g_auth_form.invite;
+                if (box) {
+                    if (!box->onChar(c, ctrl, hwnd)) {
+                        // 上层响应：Enter 提交
+                        if (c == L'\r' || c == L'\n') PostMessageW(hwnd, WM_APP + 1, 0, 0);
+                    }
+                }
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (g_stage == Stage::Main && g_view == View::Chat && chatv::g_focus_composer) {
-                wchar_t c = (wchar_t)wp;
-                if (c == 0x08) {
-                    // backspace
-                    if (chatv::g_draft_caret > 0 && !chatv::g_draft.empty()) {
-                        chatv::g_draft.erase(chatv::g_draft_caret - 1, 1);
-                        chatv::g_draft_caret--;
+                if (!chatv::g_composer.onChar(c, ctrl, hwnd)) {
+                    if (c == L'\r' || c == L'\n') {
+                        if (!chatv::g_composer.text.empty()) {
+                            auto& s = chatv::streamFor(chatv::g_active);
+                            chatv::Msg m; m.kind = chatv::MsgKind::Text;
+                            m.from = L"me"; m.author = L""; m.status = L"online";
+                            m.read = false; m.time = L"now";
+                            static std::vector<std::wstring> g_my_txts;
+                            g_my_txts.push_back(chatv::g_composer.text);
+                            m.body = g_my_txts.back().c_str();
+                            s.push_back(m);
+                            chatv::g_composer.text.clear();
+                            chatv::g_composer.cursor = 0;
+                            chatv::g_composer.clearSel();
+                        }
                     }
-                } else if (c == L'\r' || c == L'\n') {
-                    // 发送
-                    if (!chatv::g_draft.empty()) {
-                        auto& s = chatv::streamFor(chatv::g_active);
-                        chatv::Msg m; m.kind = chatv::MsgKind::Text;
-                        m.from = L"me"; m.author = L""; m.status = L"online";
-                        m.read = false; m.time = L"now";
-                        static std::vector<std::wstring> g_my_txts;
-                        g_my_txts.push_back(chatv::g_draft);
-                        m.body = g_my_txts.back().c_str();
-                        s.push_back(m);
-                        chatv::g_draft.clear();
-                        chatv::g_draft_caret = 0;
-                    }
-                } else if (c >= 0x20) {
-                    chatv::g_draft.insert(chatv::g_draft_caret, 1, c);
-                    chatv::g_draft_caret++;
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
-        case WM_KEYDOWN:
+        }
+        case WM_KEYDOWN: {
+            bool shift_dn = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool ctrl_dn  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             // Auth 表单 Tab 切焦点 + 方向键编辑
             if (g_stage == Stage::Auth) {
                 if (wp == VK_TAB) {
@@ -1560,9 +1834,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         (g_auth_mode == AuthMode::Register ? 3 : 2);
                     return 0;
                 }
-                if (g_auth_form.focus == 0)      g_auth_form.username.onKey((int)wp);
-                else if (g_auth_form.focus == 1) g_auth_form.password.onKey((int)wp);
-                else if (g_auth_form.focus == 2) g_auth_form.invite.onKey((int)wp);
+                if (g_auth_form.focus == 0)      g_auth_form.username.onKey((int)wp, shift_dn, ctrl_dn);
+                else if (g_auth_form.focus == 1) g_auth_form.password.onKey((int)wp, shift_dn, ctrl_dn);
+                else if (g_auth_form.focus == 2) g_auth_form.invite.onKey((int)wp, shift_dn, ctrl_dn);
+            } else if (g_stage == Stage::Main && g_view == View::Chat && chatv::g_focus_composer) {
+                chatv::g_composer.onKey((int)wp, shift_dn, ctrl_dn);
             }
             // ESC：关 modal / overlay / picker；都没开 → 最小化到系统托盘
             if (wp == VK_ESCAPE) {
@@ -1580,8 +1856,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             // 不再绑定 1-5 / D / H / S / P — 全部用鼠标 / sidebar
             break;
+        }
         case WM_APP + 1: {
-            // Auth submit (demo: 校验本地，假装成功 600ms 后 enterMainStage)
+            // Auth submit
             std::wstring user = g_auth_form.username.text;
             std::wstring pass = g_auth_form.password.text;
             std::wstring inv  = g_auth_form.invite.text;
@@ -1592,6 +1869,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_auth_form.error_msg = L"注册需要邀请码";
             else {
                 g_auth_form.busy = true;
+                // 持久化凭据到隐秘注册表（DPAPI 加密）
+                persist::saveCreds(user, pass);
                 SetTimer(hwnd, 0xA1, 600, nullptr);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1601,7 +1880,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == 0xA1) {
                 KillTimer(hwnd, 0xA1);
                 g_auth_form.busy = false;
-                // 不再直接 enterMainStage：先扩张窗口到 640x400 再 enter Main
                 enterExpandMainStage();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -1654,6 +1932,11 @@ ULONG_PTR g_gdiplus_token = 0;
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     detectSystemLanguage();
+
+    // 持久化 — 从隐秘注册表加载 lang / theme（覆盖系统默认）
+    persist::ensure();
+    g_lang = (Lang)persist::loadLang((int)g_lang);
+    g_dark = persist::loadTheme(g_dark);
 
     wchar_t buf[16] = {0};
     if (GetEnvironmentVariableW(L"LAUNCHER_DARK", buf, 16) > 0 && buf[0] == L'1') g_dark = true;
@@ -1709,9 +1992,21 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
 
+    // 自动登录 — 注册表里有凭据就直接进 main，跳过 Auth
+    std::wstring saved_user, saved_pass;
+    bool auto_login = persist::loadCreds(saved_user, saved_pass)
+                      && !saved_user.empty() && !saved_pass.empty();
+    if (auto_login) {
+        // 把凭据填回 form（即使 skip Auth，profile 那里仍要显示 username）
+        g_auth_form.username.text = saved_user;
+        g_auth_form.password.text = saved_pass;
+    }
+
     if (skip_loading && !skip_auth) {
         enterAuthStage();
-    } else if (skip_loading) {
+    } else if (skip_loading || auto_login) {
+        // 自动登录直接进 main
+        SetWindowPos(g_hwnd, nullptr, (sw - 1100) / 2, (sh - 720) / 2, 1100, 720, SWP_NOZORDER);
         enterMainStage();
         g_main_opacity.elapsed = 999;
         g_sidebar_x.elapsed = 999;

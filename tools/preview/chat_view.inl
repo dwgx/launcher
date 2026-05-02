@@ -59,8 +59,7 @@ std::vector<Msg>& streamFor(const wchar_t* chid) {
 
 // ============== 状态 ==============
 const wchar_t* g_active{L"general"};
-std::wstring   g_draft;
-int            g_draft_caret{0};
+InputBox       g_composer;          // 完整 InputBox：选区 + Ctrl+A/C/V/X
 bool           g_picker_open{false};
 int            g_picker_tab{0};   // 0=emoji 1=sticker 2=gif
 Tween          g_picker_t;
@@ -284,8 +283,7 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
             auto& s = chatv::streamFor(g_active);
             if (idx >= 0 && idx < (int)s.size() && s[idx].author && s[idx].author[0]) {
                 std::wstring at = std::wstring(L"@") + s[idx].author + L" ";
-                g_draft += at;
-                g_draft_caret = (int)g_draft.size();
+                g_composer.replaceSelection(at);
                 g_focus_composer = true;
             }
         }, true);
@@ -397,18 +395,32 @@ void paintComposer(Graphics& g, RectF area) {
     // 文字 / placeholder：垂直居中（fy + (fh - line_h)/2，line_h 约 14px @ 9.5pt）
     const float pad_l = 16.0f;
     const float text_y = fy + (fh - 14.0f) / 2.0f;
-    if (g_draft.empty()) {
+    g_composer.bounds = RectF(fx, fy, fw, fh);
+    if (g_composer.text.empty()) {
         drawText_(g, L"写点什么…", fx + pad_l, text_y, fw - pad_l * 2.0f,
                   9.5f, pal.text_muted);
     } else {
-        drawText_(g, g_draft.c_str(), fx + pad_l, text_y, fw - pad_l * 2.0f,
+        // 选区高亮
+        Font* f = fontcache::get(9.5f);
+        if (g_focus_composer && g_composer.hasSelection()) {
+            RectF bb_pre, bb_in;
+            g.MeasureString(g_composer.displaySlice(0, g_composer.selStart()).c_str(), -1, f,
+                            PointF(0, 0), &bb_pre);
+            g.MeasureString(g_composer.displaySlice(g_composer.selStart(), g_composer.selEnd()).c_str(), -1, f,
+                            PointF(0, 0), &bb_in);
+            Color sel_bg(96, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+            SolidBrush sel_b(sel_bg);
+            g.FillRectangle(&sel_b, fx + pad_l + bb_pre.Width, text_y - 1.0f,
+                            bb_in.Width, 16.0f);
+        }
+        drawText_(g, g_composer.text.c_str(), fx + pad_l, text_y, fw - pad_l * 2.0f,
                   9.5f, pal.text);
     }
     // caret blink
-    if (g_focus_composer) {
-        Font fnt(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
-        std::wstring sub = g_draft.substr(0, std::min((size_t)g_draft_caret, g_draft.size()));
-        RectF bb; g.MeasureString(sub.c_str(), -1, &fnt, PointF(0, 0), &bb);
+    if (g_focus_composer && !g_composer.hasSelection()) {
+        Font* fnt = fontcache::get(9.5f);
+        std::wstring sub = g_composer.displaySlice(0, g_composer.cursor);
+        RectF bb; g.MeasureString(sub.c_str(), -1, fnt, PointF(0, 0), &bb);
         int phase = (int)(g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
             Pen p(pal.primary, 1.5f);
@@ -421,7 +433,7 @@ void paintComposer(Graphics& g, RectF area) {
     // send btn 圆形主色
     float sx = area.X + area.Width - 14.0f - send_w;
     float sy = iy + (fh - send_w) / 2.0f;
-    bool can_send = !g_draft.empty();
+    bool can_send = !g_composer.text.empty();
     bool sh = inRect(g_mouse, RectF(sx, sy, send_w, send_w));
     Color sbg = !can_send ? Color(140, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB())
                           : (sh ? pal.primary_hover : pal.primary);
@@ -435,10 +447,12 @@ void paintComposer(Graphics& g, RectF area) {
             Msg m; m.kind = MsgKind::Text; m.from = L"me"; m.author = L"";
             m.status = L"online"; m.read = false; m.time = L"now";
             static std::vector<std::wstring> g_my_msgs;
-            g_my_msgs.push_back(g_draft);
+            g_my_msgs.push_back(g_composer.text);
             m.body = g_my_msgs.back().c_str();
             s.push_back(m);
-            g_draft.clear(); g_draft_caret = 0;
+            g_composer.text.clear();
+            g_composer.cursor = 0;
+            g_composer.clearSel();
             g_focus_composer = true;
         }, true);
     }
@@ -559,9 +573,8 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
                     g_picker_open = false;
                     g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                 } else {
-                    // emoji → 插入 draft
-                    g_draft += val;
-                    g_draft_caret = (int)g_draft.size();
+                    g_composer.replaceSelection(val);
+                    g_focus_composer = true;
                 }
             }, true);
         }
