@@ -19,7 +19,7 @@ use askama::Template;
 h1{color:#C96442;}table{border-collapse:collapse;width:100%}td,th{border:1px solid #EDE9E1;padding:8px;text-align:left;}\
 .btn{background:#C96442;color:#fff;padding:8px 16px;border:none;border-radius:8px;cursor:pointer;}</style></head>\
 <body><h1>Launcher Admin</h1><p>Users: {{ user_count }}, Subscriptions: {{ sub_count }}</p>\
-<p><a href=/admin/users>Users</a> · <a href=/admin/subscriptions>Subscriptions</a></p></body></html>", ext = "html")]
+<p><a href=/admin/users>用户管理</a> · <a href=/admin/rebind>HWID 重绑定审批</a></p></body></html>", ext = "html")]
 struct DashTpl { user_count: i64, sub_count: i64 }
 
 #[derive(Template)]
