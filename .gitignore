@@ -1,0 +1,83 @@
+# Build
+build/
+out/
+cmake-build-*/
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/Makefile
+
+# vcpkg
+vcpkg_installed/
+.vcpkg/
+
+# Rust
+SystemBackend/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Compiled
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dll
+*.exe
+*.so
+*.dylib
+
+# Generated proto
+src/proto/*.pb.cc
+src/proto/*.pb.h
+SystemBackend/crates/proto/src/generated/
+
+# Fonts (large, downloaded by script)
+assets/fonts/*.ttf
+assets/fonts/*.otf
+assets/fonts/*.ttc
+!assets/fonts/.gitkeep
+
+# Secrets / local config — NEVER commit
+.deploy.local
+.env
+.env.local
+*.pem
+*.key
+SystemBackend/config/secrets.toml
+private_keys/
+
+# Logs
+*.log
+logs/
+
+# Crash dumps
+*.dmp
+
+# VMProtect output
+*.vmp.exe
+*.vmp.dll
+
+# Test coverage
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Temp
+*.tmp
+*~

@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/api",
+    "crates/signer",
+    "crates/proto",
+    "crates/shared",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["dwgx1337 <dwgx1337@outlook.com>"]
+license = "Proprietary"
+repository = "https://github.com/dwgx1337/launcher"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio       = { version = "1.40", features = ["full"] }
+axum        = { version = "0.7", features = ["macros"] }
+tower       = "0.5"
+tower-http  = { version = "0.5", features = ["cors", "trace", "limit"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+sqlx        = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros"] }
+chrono      = { version = "0.4", features = ["serde"] }
+uuid        = { version = "1", features = ["v4", "serde"] }
+prost       = "0.13"
+prost-build = "0.13"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+aes-gcm     = "0.10"
+argon2      = "0.5"
+rand        = "0.8"
+sha2        = "0.10"
+blake3      = "1.5"
+thiserror   = "1"
+anyhow      = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+toml        = "0.8"
+clap        = { version = "4.5", features = ["derive"] }
+askama      = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
+hex         = "0.4"
+base64      = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

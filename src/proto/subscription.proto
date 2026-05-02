@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package launcher.proto;
+
+// 订阅协议：客户端 + signer CLI 共用此 .proto。
+// 字节流 = Subscription 序列化 + 末尾 Ed25519 签名（不含在 Subscription.signature 里）。
+// 客户端先反序列化拿 signature，再用内置公钥验签去掉尾部签名后的字节。
+
+message Subscription {
+  string id = 1;
+  string name = 2;
+  uint64 updated_at = 3;        // unix seconds
+  uint64 valid_until = 4;       // unix seconds，到期后客户端拒绝
+  repeated GameEntry games = 5;
+  string issuer = 6;            // 签发账号（管理员邮箱），仅展示用
+  uint32 schema_version = 7;
+  bytes signature = 15;         // Ed25519，64 bytes，对前 14 个字段签
+}
+
+message GameEntry {
+  string game_id = 1;
+  string display_name = 2;
+  string version = 3;
+  string download_url = 4;
+  bytes file_hash = 5;          // BLAKE3 32 bytes
+  uint64 size_bytes = 6;
+  LaunchConfig launch = 7;
+  string cover_url = 8;
+}
+
+message LaunchConfig {
+  string executable = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  repeated HookSpec hooks = 4;
+  string working_directory = 5;
+}
+
+message HookSpec {
+  // 给 native::IHookEngine 用的描述符
+  string module_name = 1;       // e.g. "game.exe" or "module.dll"
+  bytes pattern = 2;             // 字节签名
+  bytes mask = 3;                // 0xFF 表示精确匹配，0x00 通配
+  uint32 offset = 4;             // pattern 命中后的偏移
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    INLINE_DETOUR = 1;
+    IAT_HOOK = 2;
+    VEH_HOOK = 3;
+  }
+  Kind kind = 5;
+  bytes payload = 6;             // 替换字节或跳板代码
+}
+
+// 登录/心跳响应共享
+message AuthResponse {
+  string session_token = 1;
+  uint64 expires_at = 2;
+  string subscription_tier = 3;   // "1day" | "3day" | "1week" | "2week" | "1month"
+  uint64 subscription_expires = 4;
+  string user_id = 5;
+}

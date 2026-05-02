@@ -1,0 +1,24 @@
+[Unit]
+Description=Launcher SystemBackend (axum)
+After=network.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=systembackend
+Group=systembackend
+WorkingDirectory=/opt/systembackend
+ExecStart=/opt/systembackend/systembackend
+Environment=LAUNCHER_CONFIG=/opt/systembackend/config.toml
+Environment=RUST_LOG=info,sqlx=warn,hyper=warn
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

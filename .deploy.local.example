@@ -1,0 +1,18 @@
+# 复制为 .deploy.local（已 gitignored），按需填值。
+# 仅本机使用，不要 commit、不要拷给他人。
+#
+# host       = SSH 服务器
+# port       = SSH 端口（业务端口 1337 在 axum 那边）
+# user       = SSH 用户
+# password   = 仅 setup-ssh-key.ps1 第一次用，跑完后清空
+# key_path   = 部署用 SSH key 路径（脚本会自动生成）
+# remote_dir = 二进制 + 配置部署路径
+# service    = systemd unit 名
+
+host       = "154.40.36.22"
+port       = "22"
+user       = "root"
+password   = ""
+key_path   = "$HOME\\.ssh\\launcher_deploy"
+remote_dir = "/opt/systembackend"
+service    = "systembackend"

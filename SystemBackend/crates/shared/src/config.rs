@@ -1,0 +1,36 @@
+use serde::Deserialize;
+use std::path::Path;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    pub bind_addr: String,
+    pub database_url: String,
+    pub session_ttl_seconds: i64,
+    pub heartbeat_grace_seconds: i64,
+
+    /// Argon2id 内存成本 (KiB)
+    #[serde(default = "default_argon_mem")]
+    pub argon_memory_kib: u32,
+    #[serde(default = "default_argon_iters")]
+    pub argon_iterations: u32,
+
+    /// 当前活跃签名公钥（hex），客户端会硬编码同样的值
+    pub signing_public_key_hex: String,
+
+    /// CDN base，用于客户端拉取 .helix
+    pub cdn_base: String,
+
+    /// 管理后台登录密码（明文留 toml，部署后立刻 chmod 600）
+    pub admin_password: String,
+}
+
+fn default_argon_mem() -> u32 { 64 * 1024 }
+fn default_argon_iters() -> u32 { 3 }
+
+impl AppConfig {
+    pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        let cfg: AppConfig = toml::from_str(&raw)?;
+        Ok(cfg)
+    }
+}

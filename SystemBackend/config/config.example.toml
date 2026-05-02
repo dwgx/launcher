@@ -1,0 +1,18 @@
+# 复制为 config.toml，部署时 chmod 600。
+
+bind_addr = "0.0.0.0:1337"
+database_url = "postgres://helix:CHANGE_ME@127.0.0.1:5432/helix"
+
+session_ttl_seconds = 86400          # 24h
+heartbeat_grace_seconds = 60
+
+argon_memory_kib = 65536
+argon_iterations = 3
+
+# signer keygen 后填进来；客户端硬编码同一个值
+signing_public_key_hex = "REPLACE_AFTER_KEYGEN"
+
+cdn_base = "https://cdn.example.com"
+
+# 管理面板登录密码；首次登录后立刻通过 /admin/security 改成强随机
+admin_password = "CHANGE_ME_BEFORE_DEPLOY"

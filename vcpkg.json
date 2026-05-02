@@ -1,0 +1,29 @@
+{
+  "name": "launcher",
+  "version-string": "0.1.0",
+  "description": "Launcher - Windows desktop game launcher / subscription manager",
+  "homepage": "https://github.com/dwgx1337/launcher",
+  "supports": "windows & x64",
+  "dependencies": [
+    "glfw3",
+    "fmt",
+    "spdlog",
+    {
+      "name": "libsodium",
+      "default-features": false
+    },
+    {
+      "name": "libcurl",
+      "features": [
+        "ssl",
+        "schannel"
+      ]
+    },
+    "sqlite3",
+    "protobuf",
+    "blake3",
+    "nlohmann-json",
+    "harfbuzz"
+  ],
+  "builtin-baseline": "2024-12-01"
+}
