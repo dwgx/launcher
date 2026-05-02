@@ -38,6 +38,7 @@ const wchar_t* kFontFace = L"Microsoft YaHei UI";
 // ====================================================================
 // Design tokens
 // ====================================================================
+// design tokens 直接对齐 Claude Design styles.css
 struct Palette {
     Color bg, surface, card, divider;
     Color primary, primary_hover;
@@ -45,6 +46,11 @@ struct Palette {
     Color sidebar_bg, sidebar_active;
     Color shadow_card, shadow_card_hover;
     Color overlay_dim;
+    Color status_online;     // #4ADE80
+    Color status_busy;       // #E34B4B
+    Color status_away;       // #F5A524
+    Color status_sleep;      // #8B7BD9
+    Color status_offline;    // #6B6A67
 };
 const Palette kLight = {
     Color(255, 0xFA, 0xF7, 0xF2), Color(255, 0xF3, 0xEF, 0xE8),
@@ -52,9 +58,12 @@ const Palette kLight = {
     Color(255, 0xC9, 0x64, 0x42), Color(255, 0xD9, 0x77, 0x57),
     Color(255, 0x1F, 0x1E, 0x1D), Color(255, 0x6B, 0x6A, 0x67),
     Color(255, 0xA8, 0xA3, 0x9A),
-    Color(255, 0xF1, 0xEC, 0xE3), Color(255, 0xE9, 0xE1, 0xD3),
-    Color( 14, 0, 0, 0),          Color( 30, 0, 0, 0),
-    Color(140, 0, 0, 0)
+    Color(255, 0xFA, 0xF7, 0xF2), Color(255, 0xE9, 0xE1, 0xD3),
+    Color( 10, 0, 0, 0),          Color( 20, 0, 0, 0),
+    Color(115, 0, 0, 0),
+    Color(255, 0x4A, 0xDE, 0x80), Color(255, 0xE3, 0x4B, 0x4B),
+    Color(255, 0xF5, 0xA5, 0x24), Color(255, 0x8B, 0x7B, 0xD9),
+    Color(255, 0x6B, 0x6A, 0x67)
 };
 const Palette kDark = {
     Color(255, 0x1A, 0x18, 0x16), Color(255, 0x20, 0x1E, 0x1B),
@@ -62,9 +71,12 @@ const Palette kDark = {
     Color(255, 0xD9, 0x77, 0x57), Color(255, 0xE5, 0x86, 0x66),
     Color(255, 0xF5, 0xF1, 0xEA), Color(255, 0xA8, 0xA3, 0x9A),
     Color(255, 0x6B, 0x6A, 0x67),
-    Color(255, 0x1E, 0x1B, 0x18), Color(255, 0x36, 0x30, 0x29),
-    Color( 80, 0, 0, 0),          Color(140, 0, 0, 0),
-    Color(180, 0, 0, 0)
+    Color(255, 0x1A, 0x18, 0x16), Color(255, 0x36, 0x30, 0x29),
+    Color( 60, 0, 0, 0),          Color( 92, 0, 0, 0),
+    Color(115, 0, 0, 0),
+    Color(255, 0x4A, 0xDE, 0x80), Color(255, 0xE3, 0x4B, 0x4B),
+    Color(255, 0xF5, 0xA5, 0x24), Color(255, 0x8B, 0x7B, 0xD9),
+    Color(255, 0x6B, 0x6A, 0x67)
 };
 bool g_dark = false;
 const Palette& palette() { return g_dark ? kDark : kLight; }
@@ -111,6 +123,9 @@ const char* tr(const char* key) {
         {"acc.password",        "Change password",  u8"修改密码",          u8"パスワード"},
         {"acc.signout",         "Sign out",         u8"退出登录",          u8"サインアウト"},
         {"lunching.launch",     "Launch",           u8"发射",              u8"起動"},
+        {"library.count",       "games",            u8"个游戏",        u8"件"},
+        {"library.launch",      "Launch",           u8"启动",              u8"起動"},
+        {"settings.about",      "About",            u8"关于",              u8"情報"},
         {"profile.title",       "Profile",          u8"个人信息",          u8"プロフィール"},
         {"profile.uid",         "UID",              u8"UID",               u8"UID"},
         {"profile.username",    "Username",         u8"用户名",            u8"ユーザー名"},
@@ -371,10 +386,10 @@ void paintLoading(Graphics& g, int Wpx, int Hpx) {
 }
 
 // ====================================================================
-// Topbar / Sidebar (icon-only) - 紧凑布局
+// Topbar / Sidebar (Claude Design 规格: 200 + 48)
 // ====================================================================
-const float kSidebarW = 56.0f;
-const float kTopbarH  = 36.0f;
+const float kSidebarW = 200.0f;
+const float kTopbarH  = 48.0f;
 
 struct MenuEntry { View view; const char* key; const wchar_t* glyph; };
 const MenuEntry kMenu[] = {
@@ -393,31 +408,52 @@ void paintTopbar(Graphics& g, int Wpx) {
     Pen sep(pal.divider, 1.0f);
     g.DrawLine(&sep, 0.0f, ty + kTopbarH, (REAL)Wpx, ty + kTopbarH);
 
-    drawText_(g, W(tr("app.name")).c_str(), 14.0f, ty + 9.0f, 200.0f, 10.0f,
-              pal.text, StringAlignmentNear, FontStyleBold);
+    // 标题 (design: 13px 500 weight, padding-left 20)
+    drawText_(g, W(tr("app.name")).c_str(), 20.0f, ty + 14.0f, 200.0f, 10.0f,
+              pal.text, StringAlignmentNear, FontStyleRegular);
 
-    // 右上 nickname + 头像
-    drawText_(g, g_user.nickname, (REAL)Wpx - 64.0f, ty + 11.0f, 36.0f,
-              8.5f, pal.text_muted, StringAlignmentFar);
-    float ar = 12.0f, ax = (REAL)Wpx - 12.0f - ar*2, ay = ty + (kTopbarH - ar*2)/2;
+    // 右上 user-trigger pill: padding 4 6 4 10, gap 10, radius 999
+    // 内容: nickname (13px muted) + avatar 24x24
+    float pill_h = 32.0f;
+    float ar = 12.0f;   // avatar radius (24x24)
+    float pill_pad_l = 12.0f, pill_pad_r = 4.0f, pill_gap = 10.0f;
+    // 估算 nickname 宽度
+    float name_w = measureText(g, g_user.nickname, 10.0f).Width + 4.0f;
+    float pill_w = pill_pad_l + name_w + pill_gap + ar*2 + pill_pad_r;
+    float pill_x = (REAL)Wpx - 16.0f - pill_w;
+    float pill_y = ty + (kTopbarH - pill_h) / 2.0f;
+    bool pill_hover = inRect(g_mouse, RectF(pill_x, pill_y, pill_w, pill_h));
+    if (pill_hover) {
+        Color hc(g_dark ? 12 : 10, pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+        fillRR(g, pill_x, pill_y, pill_w, pill_h, 999.0f, hc);
+    }
+    drawText_(g, g_user.nickname, pill_x + pill_pad_l, pill_y + 10.0f, name_w, 10.0f,
+              pal.text_muted, StringAlignmentNear);
+    float ax = pill_x + pill_pad_l + name_w + pill_gap;
+    float ay = pill_y + (pill_h - ar*2) / 2.0f;
     SolidBrush avbg(pal.primary);
     g.FillEllipse(&avbg, ax, ay, ar*2, ar*2);
-    Font af(kFontFace, 9.0f, FontStyleBold, UnitPoint);
+    Font af(kFontFace, 8.5f, FontStyleBold, UnitPoint);
     SolidBrush avf(Color(255, 255, 255, 255));
     StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
     RectF avrect(ax, ay, ar*2, ar*2);
     wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
     g.DrawString(initial, -1, &af, avrect, &fmt, &avf);
+    // 在线徽章
+    Color stC = pal.status_online;
+    SolidBrush stB(stC);
+    g.FillEllipse(&stB, ax + ar*2 - 7.0f, ay + ar*2 - 7.0f, 7.0f, 7.0f);
+    Pen ring(pal.bg, 2.0f);
+    g.DrawEllipse(&ring, ax + ar*2 - 7.0f, ay + ar*2 - 7.0f, 7.0f, 7.0f);
 
-    // hit area: nickname + avatar；hover 触发下拉
-    RectF avHit((REAL)Wpx - 70.0f, ty, 70.0f, kTopbarH);
+    // hover 触发下拉
+    RectF avHit(pill_x, ty, pill_w + 16.0f, kTopbarH);
     bool hovering = inRect(g_mouse, avHit);
     if (hovering && !g_account_dropdown) {
         g_account_dropdown = true;
         g_dropdown_t.start(0, 1, 0.18f, 0, curve::easeOutBack);
     }
-    // 不画 hit area onClick；下拉打开后由它的"外部检测"关闭
-    hit(avHit, [](){}, true);  // 让此区域不可拖
+    hit(avHit, [](){}, true);
 }
 
 void paintAccountDropdown(Graphics& g, int Wpx) {
@@ -500,29 +536,31 @@ void paintSidebar(Graphics& g, int Hpx) {
     Pen sep(pal.divider, 1.0f);
     g.DrawLine(&sep, sx + kSidebarW, kTopbarH, sx + kSidebarW, (REAL)Hpx);
 
-    float my = kTopbarH + 12.0f;
+    // design: padding 14px 10px, gap 4px, item h 38px, padding 0 12px, radius 8
+    float my = kTopbarH + 14.0f;
     for (auto& m : kMenu) {
         bool active = (m.view == g_view);
-        RectF item(sx + 6.0f, my, kSidebarW - 12.0f, 40.0f);
+        RectF item(sx + 10.0f, my, kSidebarW - 20.0f, 38.0f);
         bool hover = inRect(g_mouse, item);
-        if (active) {
-            fillRR(g, item.X, item.Y, item.Width, item.Height, 8.0f, pal.sidebar_active);
-            // 左侧 2px 主色指示
-            fillRR(g, sx, item.Y + 6, 2.5f, item.Height - 12, 1.0f, pal.primary);
-        } else if (hover) {
-            Color hc(40, pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
+        if (hover && !active) {
+            // hover bg rgba(217,119,87,.08)
+            Color hc(20, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
             fillRR(g, item.X, item.Y, item.Width, item.Height, 8.0f, hc);
         }
-        Color tc = active ? pal.primary : pal.text_muted;
-        // 居中大图标
-        Font f(kFontFace, 14.0f, FontStyleRegular, UnitPoint);
-        StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-        SolidBrush b(tc);
-        g.DrawString(m.glyph, -1, &f, item, &fmt, &b);
+        if (active) {
+            // active 左侧 3px 主色指示条 (.menu-item.active::before)
+            fillRR(g, item.X - 10.0f, item.Y + 9.0f, 3.0f, item.Height - 18.0f, 1.5f, pal.primary);
+        }
+        Color tc = active ? pal.primary : (hover ? pal.text : pal.text_muted);
+
+        // glyph 20x20 居左 + 12px gap + label 13.5px
+        drawText_(g, m.glyph, item.X + 12.0f, item.Y + 9.0f, 20.0f, 12.0f, tc);
+        drawText_(g, W(tr(m.key)).c_str(), item.X + 44.0f, item.Y + 11.0f, item.Width - 50.0f,
+                  10.5f, tc, StringAlignmentNear, FontStyleRegular);
 
         View target = m.view;
         hit(item, [target]() { switchView(target); }, true);
-        my += 44.0f;
+        my += 42.0f;   // 38 height + 4 gap
     }
 }
 
@@ -530,6 +568,9 @@ void paintSidebar(Graphics& g, int Hpx) {
 // Views (640x400 紧凑 layout)
 // ====================================================================
 void paintHomeView(Graphics& g, RectF area) {
+    // design: greet 28px bold tracking -.5; sub 13px muted mt 4
+    // profile-card: mt 22, padding 22 26 24, grid 86 / 1fr; avatar large 72x72
+    // meta grid 96/1fr/auto, font 13.5, padding-top 16
     const Palette& pal = palette();
     float op = g_view_fade.started ? g_view_fade.value() : 1.0f;
     op = (g_main_opacity.value()) * op;
@@ -538,121 +579,154 @@ void paintHomeView(Graphics& g, RectF area) {
 
     auto greet = replaceNick(W(tr("home.greet")).c_str(), g_user.nickname);
 
-    float ty = area.Y + 16 + (1.0f - op) * 8;
-    drawText_(g, greet.c_str(), area.X + 18, ty, area.Width - 36,
-              16.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    drawText_(g, W(tr("home.subtitle")).c_str(), area.X + 18, ty + 26, area.Width - 36,
-              8.5f, fade(pal.text_muted));
+    // padding 28 32 32 (design .view)
+    float vx = area.X + 32, vy = area.Y + 28;
+    float ty = vy + (1.0f - op) * 8;
+    drawText_(g, greet.c_str(), vx, ty, area.Width - 64,
+              22.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, W(tr("home.subtitle")).c_str(), vx, ty + 36, area.Width - 64,
+              10.0f, fade(pal.text_muted));
 
-    // 单个综合卡（紧凑）
-    float cx = area.X + 18, cy = area.Y + 60;
-    float cw = area.Width - 36, ch = area.Height - 80;
-    drawShadow(g, cx, cy, cw, ch, 12.0f, fade(pal.shadow_card), 2.0f, 3);
+    // profile-card
+    float cx = vx, cy = vy + 64;
+    float cw = area.Width - 64, ch = 240;
+    drawShadow(g, cx, cy, cw, ch, 12.0f, fade(pal.shadow_card), 1.0f, 2);
+    drawShadow(g, cx, cy, cw, ch, 12.0f, fade(pal.shadow_card), 8.0f, 3);
     fillRR(g, cx, cy, cw, ch, 12.0f, fade(pal.card));
 
-    // 头像 (左)
-    float avR = 28.0f, avx = cx + 18, avy = cy + 18;
+    // 大头像 72x72 (design .avatar.large)
+    float avR = 36.0f, avx = cx + 26, avy = cy + 26;
     SolidBrush avBg(fade(pal.primary));
     g.FillEllipse(&avBg, avx, avy, avR*2, avR*2);
-    Font af(kFontFace, 18.0f, FontStyleBold, UnitPoint);
+    Font af(kFontFace, 22.0f, FontStyleBold, UnitPoint);
     SolidBrush avF(Color((BYTE)(255 * op), 255, 255, 255));
     StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
     RectF avr(avx, avy, avR*2, avR*2);
     wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
     g.DrawString(initial, -1, &af, avr, &fmt, &avF);
+    // online dot 14x14, right 2 bottom 2, ring 3px card
+    float dotR = 7.0f;
+    float dx = avx + avR*2 - dotR*2 - 2.0f;
+    float dy = avy + avR*2 - dotR*2 - 2.0f;
+    SolidBrush stB(fade(pal.status_online));
+    g.FillEllipse(&stB, dx, dy, dotR*2, dotR*2);
+    Pen ring(fade(pal.card), 3.0f);
+    g.DrawEllipse(&ring, dx, dy, dotR*2, dotR*2);
 
-    // 用户信息 (右)
-    drawText_(g, g_user.nickname, cx + 86, cy + 16, cw - 100,
-              12.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    drawText_(g, g_user.email, cx + 86, cy + 36, cw - 100,
-              8.0f, fade(pal.text_muted));
-    SolidBrush gn(Color((BYTE)(255 * op), 0x4C, 0xAF, 0x50));
-    g.FillEllipse(&gn, cx + 86, cy + 56.0f, 6.0f, 6.0f);
-    drawText_(g, L"Online", cx + 96, cy + 52, 80, 7.5f, fade(pal.text_muted));
+    // profile-id (右上方)
+    float idX = cx + 26 + avR*2 + 18;
+    drawText_(g, g_user.nickname, idX, cy + 28, cw - (idX - cx) - 26,
+              14.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, g_user.email, idX, cy + 56, cw - (idX - cx) - 26,
+              10.0f, fade(pal.text_muted));
+    SolidBrush gn(fade(pal.status_online));
+    g.FillEllipse(&gn, idX, cy + 84.0f, 6.0f, 6.0f);
+    drawText_(g, L"Online", idX + 12, cy + 80, 80, 8.5f, fade(pal.text_muted));
 
-    // 4 行 small details
-    float ry = cy + 90;
-    struct R { const char* lab; const wchar_t* val; };
+    // meta divider
+    Pen sep(fade(pal.divider), 1.0f);
+    g.DrawLine(&sep, cx + 26, cy + 130, cx + cw - 26, cy + 130);
+
+    // 4 行 meta (design 13.5px, key/val/auto)
+    float ry = cy + 146;
+    struct R { const char* lab; const wchar_t* val; bool mono; };
     std::wstring tier_w = W(tr("tier.1week"));
     R rows[] = {
-        { "home.tier",       tier_w.c_str()      },
-        { "home.expires",    g_user.expires      },
-        { "home.device_id",  g_user.device_id    },
-        { "home.last_login", g_user.last_login   },
+        { "home.tier",       tier_w.c_str(),    false },
+        { "home.expires",    g_user.expires,    false },
+        { "home.device_id",  g_user.device_id,  true  },
+        { "home.last_login", g_user.last_login, true  },
     };
     for (int i = 0; i < 4; ++i) {
-        drawText_(g, W(tr(rows[i].lab)).c_str(), cx + 18, ry, 100,
-                  7.5f, fade(pal.text_muted));
-        drawText_(g, rows[i].val, cx + 110, ry, cw - 130,
-                  9.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+        drawText_(g, W(tr(rows[i].lab)).c_str(), cx + 26, ry, 100,
+                  9.0f, fade(pal.text_muted));
+        drawText_(g, rows[i].val, cx + 130, ry, cw - 200,
+                  9.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
         if (i == 3) {
-            // 历史登录链接
-            RectF link(cx + cw - 70, ry, 60, 14);
+            std::wstring lab = W(tr("home.history"));
+            float lw = measureText(g, lab.c_str(), 9.0f, FontStyleBold).Width + 16;
+            RectF link(cx + cw - 26 - lw, ry - 4, lw, 22);
             bool hov = inRect(g_mouse, link);
-            drawText_(g, W(tr("home.history")).c_str(), link.X, link.Y, link.Width,
-                      8.0f, hov ? fade(pal.primary_hover) : fade(pal.primary),
-                      StringAlignmentFar, FontStyleBold);
+            if (hov) {
+                Color hc((BYTE)(30 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+                fillRR(g, link.X, link.Y, link.Width, link.Height, 6.0f, hc);
+            }
+            drawText_(g, lab.c_str(), link.X, link.Y + 4, link.Width,
+                      9.0f, hov ? fade(pal.primary_hover) : fade(pal.primary),
+                      StringAlignmentCenter, FontStyleBold);
             hit(link, [](){
                 g_overlay = Overlay::History;
                 g_overlay_t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
             }, true);
         }
-        ry += 26.0f;
+        ry += 22.0f;
     }
 }
 
 void paintLunchingView(Graphics& g, RectF area) {
+    // design: lib-grid 4 cols 240px gap 18, mt 22; game-card 240x140
+    // bg linear-gradient 135 #2c2825 -> #1f1c19; cover radial primary 30%/20%
+    // hover translateY(-2) + shadow; meta abs left 14 right 14 bottom 12; name 14 bold; ver 11.5 muted
     const Palette& pal = palette();
     float op = g_view_fade.started ? g_view_fade.value() : 1.0f;
     op = (g_main_opacity.value()) * op;
     if (op <= 0.001f) return;
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * op), c.GetR(), c.GetG(), c.GetB()); };
 
-    drawText_(g, W(tr("menu.lunching")).c_str(), area.X + 18, area.Y + 16, 200,
-              16.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    float vx = area.X + 32, vy = area.Y + 28;
+    drawText_(g, W(tr("menu.library")).c_str(), vx, vy + (1.0f - op) * 8, 400,
+              22.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    wchar_t cnt[16]; swprintf_s(cnt, 16, L"1 %ls", W(tr("library.count")).c_str());
+    drawText_(g, cnt, vx, vy + 36, 200, 9.0f, fade(pal.text_muted));
 
-    // 单张大卡 CS2
-    float cw = area.Width - 36;
-    float ch = area.Height - 70;
-    float cx = area.X + 18, cy = area.Y + 50 + (1.0f - op) * 8;
-    bool hover = inRect(g_mouse, RectF(cx, cy, cw, ch));
+    // game-card 240x140, single CS
+    float gx = vx, gy = vy + 78;
+    bool hover = inRect(g_mouse, RectF(gx, gy, 240, 140));
     float lift = hover ? 2.0f : 0.0f;
 
-    drawShadow(g, cx, cy - lift, cw, ch, 14.0f,
+    drawShadow(g, gx, gy - lift, 240, 140, 12.0f,
                hover ? fade(pal.shadow_card_hover) : fade(pal.shadow_card),
-               hover ? 4.0f : 2.0f, hover ? 4 : 3);
-    fillRR(g, cx, cy - lift, cw, ch, 14.0f, fade(pal.card));
+               hover ? 8.0f : 2.0f, hover ? 4 : 3);
+    // gradient base 135deg #2c2825 → #1f1c19
+    LinearGradientBrush base(
+        PointF(gx, gy - lift), PointF(gx + 240, gy - lift + 140),
+        Color((BYTE)(255 * op), 0x2C, 0x28, 0x25),
+        Color((BYTE)(255 * op), 0x1F, 0x1C, 0x19));
+    GraphicsPath card; buildRoundRect(card, gx, gy - lift, 240, 140, 12.0f);
+    g.FillPath(&base, &card);
+    // radial primary cover at 30% 20%
+    GraphicsPath cover; cover.AddEllipse(gx - 80.0f, gy - lift - 100.0f, 280.0f, 280.0f);
+    PathGradientBrush rad(&cover);
+    Color radCenter((BYTE)(140 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    Color radEdge(0, 0, 0, 0);
+    rad.SetCenterColor(radCenter);
+    int n = 1;
+    rad.SetSurroundColors(&radEdge, &n);
+    g.SetClip(&card);
+    g.FillPath(&rad, &cover);
+    g.ResetClip();
 
-    // 顶部黑色横条（CS 风格）
-    Color blk((BYTE)(255 * op), 0x1A, 0x1A, 0x1A);
-    fillRR(g, cx, cy - lift, cw, 60.0f, 14.0f, blk);
-    SolidBrush blkb(blk);
-    g.FillRectangle(&blkb, (REAL)cx, (REAL)(cy - lift + 30.0f), (REAL)cw, (REAL)30.0f);
+    // CS yellow accent
+    Font cf(kFontFace, 22.0f, FontStyleBold, UnitPoint);
+    SolidBrush csB(Color((BYTE)(220 * op), 0xF5, 0xC4, 0x4C));
+    StringFormat csF; csF.SetAlignment(StringAlignmentNear);
+    g.DrawString(L"CS", -1, &cf, RectF(gx + 14, gy - lift + 12, 60, 30), &csF, &csB);
 
-    // CS logo (用文字 "CS" + 下方 "2" 模拟，Phase 2 换成 PNG)
-    Font lf(kFontFace, 24.0f, FontStyleBold, UnitPoint);
-    SolidBrush lfg(Color((BYTE)(255 * op), 0xF5, 0xC4, 0x4C));   // CS 黄
-    StringFormat lfmt; lfmt.SetAlignment(StringAlignmentCenter); lfmt.SetLineAlignment(StringAlignmentCenter);
-    g.DrawString(L"CS2", -1, &lf, RectF(cx, cy - lift + 8, cw, 50), &lfmt, &lfg);
+    // meta abs bottom-left
+    drawText_(g, L"Counter-Strike 2", gx + 14, gy - lift + 96, 240 - 28,
+              10.5f, Color((BYTE)(255 * op), 255, 255, 255),
+              StringAlignmentNear, FontStyleBold);
+    drawText_(g, L"v1.40.1.5", gx + 14, gy - lift + 116, 240 - 28,
+              8.5f, fade(pal.text_muted));
 
-    // 标题 + 版本
-    drawText_(g, L"Counter-Strike 2", cx + 24, cy - lift + 76, cw - 48,
-              13.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    drawText_(g, L"v1.40.5  ·  35.2 GB  ·  installed", cx + 24, cy - lift + 100, cw - 48,
-              8.0f, fade(pal.text_muted));
-    drawText_(g, L"Valve Corporation",  cx + 24, cy - lift + 118, cw - 48,
-              7.5f, fade(pal.text_faint));
+    hit(RectF(gx, gy - lift, 240, 140), [](){ /* launch */ }, true);
 
-    // Launch 按钮
-    RectF btn(cx + cw - 110, cy - lift + ch - 50, 90, 34);
-    bool bhov = inRect(g_mouse, btn);
-    Color bbg = bhov ? fade(pal.primary_hover) : fade(pal.primary);
-    fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 8.0f, bbg);
-    drawText_(g, W(tr("lunching.launch")).c_str(),
-              btn.X, btn.Y + 11, btn.Width, 10.0f,
-              Color((BYTE)(255 * op), 255, 255, 255),
-              StringAlignmentCenter, FontStyleBold);
-    hit(btn, [](){ /* TODO: launch */ }, true);
+    // Launch hint on hover
+    if (hover) {
+        drawText_(g, W(tr("library.launch")).c_str(),
+                  gx + 240 - 64, gy - lift + 116, 50, 8.5f,
+                  fade(pal.primary), StringAlignmentFar, FontStyleBold);
+    }
 }
 
 void paintCloudView(Graphics& g, RectF area) {
@@ -676,77 +750,85 @@ void paintCloudView(Graphics& g, RectF area) {
 }
 
 void paintSettingsView(Graphics& g, RectF area) {
+    // design: max-width 720; h2 13 uppercase tracking 1.2 muted, mt 18 mb 10
+    // seg card bg padding 4 radius 10 fit-content; button padding 7 14 radius 7 on=bg
     const Palette& pal = palette();
     float op = g_view_fade.started ? g_view_fade.value() : 1.0f;
     op = (g_main_opacity.value()) * op;
     if (op <= 0.001f) return;
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * op), c.GetR(), c.GetG(), c.GetB()); };
 
-    drawText_(g, W(tr("menu.settings")).c_str(), area.X + 18, area.Y + 16, 200,
-              16.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    float vx = area.X + 32, vy = area.Y + 28;
+    drawText_(g, W(tr("menu.settings")).c_str(), vx, vy + (1.0f - op) * 8, 400,
+              22.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
 
-    // Language
-    float sy = area.Y + 56;
-    drawText_(g, W(tr("settings.language")).c_str(), area.X + 18, sy, 200,
-              9.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    sy += 24;
-    struct LB { Lang l; const wchar_t* label; };
-    LB langs[] = { {Lang::En, L"EN"}, {Lang::ZhCN, L"中文"}, {Lang::JaJP, L"日本語"} };
-    float bx = area.X + 18;
-    for (auto& lb : langs) {
-        float bw = 70, bh = 28;
-        bool active = (g_lang == lb.l);
-        bool hover  = inRect(g_mouse, RectF(bx, sy, bw, bh));
-        Color bgc = active ? fade(pal.primary)
-                           : (hover ? fade(pal.surface) : fade(pal.card));
-        Color fgc = active ? Color((BYTE)(255 * op), 255, 255, 255) : fade(pal.text);
-        fillRR(g, bx, sy, bw, bh, 6.0f, bgc);
-        if (!active) strokeRR(g, bx, sy, bw, bh, 6.0f, fade(pal.divider));
-        drawText_(g, lb.label, bx, sy + 8, bw, 9.0f, fgc,
-                  StringAlignmentCenter, active ? FontStyleBold : FontStyleRegular);
-        Lang t = lb.l;
-        hit(RectF(bx, sy, bw, bh), [t]() {
-            if (g_lang != t) {
-                g_lang = t;
+    // Section helper: render h2 + seg pills
+    auto draw_seg_section = [&](float& sy, const char* h2_key, auto& items, auto active_test, auto on_click) {
+        // h2 13px uppercase muted tracking
+        drawText_(g, W(tr(h2_key)).c_str(), vx, sy, 200,
+                  9.0f, fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
+        sy += 26;
+        // seg container
+        const float btn_h = 30.0f, btn_pad = 4.0f;
+        float total_w = btn_pad * 2;
+        for (auto& it : items) {
+            float w = measureText(g, it.label, 9.5f, FontStyleBold).Width + 28;
+            total_w += w + 4;
+        }
+        total_w -= 4;  // last gap
+        // seg bg
+        fillRR(g, vx, sy, total_w, btn_h + btn_pad * 2, 10.0f, fade(pal.card));
+        float bx = vx + btn_pad;
+        for (auto& it : items) {
+            float w = measureText(g, it.label, 9.5f, FontStyleBold).Width + 28;
+            bool active = active_test(it);
+            bool hover  = inRect(g_mouse, RectF(bx, sy + btn_pad, w, btn_h));
+            if (active) {
+                fillRR(g, bx, sy + btn_pad, w, btn_h, 7.0f, fade(pal.bg));
+            }
+            Color fgc = active ? fade(pal.text) : (hover ? fade(pal.text) : fade(pal.text_muted));
+            drawText_(g, it.label, bx, sy + btn_pad + 9.0f, w, 9.5f, fgc,
+                      StringAlignmentCenter, FontStyleBold);
+            hit(RectF(bx, sy + btn_pad, w, btn_h), [it, on_click]() { on_click(it); }, true);
+            bx += w + 4;
+        }
+        sy += btn_h + btn_pad * 2 + 24;
+    };
+
+    float sy = vy + 64;
+    struct LBItem { Lang l; const wchar_t* label; };
+    LBItem langs[] = { {Lang::En, L"EN"}, {Lang::ZhCN, L"中文"}, {Lang::JaJP, L"日本語"} };
+    draw_seg_section(sy, "settings.language", langs,
+        [](const LBItem& i){ return g_lang == i.l; },
+        [](const LBItem& i){
+            if (g_lang != i.l) {
+                g_lang = i.l;
                 g_view_fade.start(0.5f, 1.0f, 0.20f, 0, curve::easeOutCubic);
             }
-        }, true);
-        bx += bw + 8;
-    }
+        });
 
-    // Theme
-    sy += 44;
-    drawText_(g, W(tr("settings.theme")).c_str(), area.X + 18, sy, 200,
-              9.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    sy += 24;
-    struct TB { bool dark; const char* labelKey; };
-    TB themes[] = { {false, "settings.theme_light"}, {true, "settings.theme_dark"} };
-    bx = area.X + 18;
-    for (auto& tb : themes) {
-        float bw = 70, bh = 28;
-        bool active = (g_dark == tb.dark);
-        bool hover  = inRect(g_mouse, RectF(bx, sy, bw, bh));
-        Color bgc = active ? fade(pal.primary)
-                           : (hover ? fade(pal.surface) : fade(pal.card));
-        Color fgc = active ? Color((BYTE)(255 * op), 255, 255, 255) : fade(pal.text);
-        fillRR(g, bx, sy, bw, bh, 6.0f, bgc);
-        if (!active) strokeRR(g, bx, sy, bw, bh, 6.0f, fade(pal.divider));
-        drawText_(g, W(tr(tb.labelKey)).c_str(), bx, sy + 8, bw, 9.0f, fgc,
-                  StringAlignmentCenter, active ? FontStyleBold : FontStyleRegular);
-        bool t = tb.dark;
-        hit(RectF(bx, sy, bw, bh), [t]() {
-            if (g_dark != t) {
-                g_dark = t;
+    struct TBItem { bool dark; const wchar_t* label; };
+    static std::wstring s_lab_l = W(tr("settings.theme_light"));
+    static std::wstring s_lab_d = W(tr("settings.theme_dark"));
+    s_lab_l = W(tr("settings.theme_light"));
+    s_lab_d = W(tr("settings.theme_dark"));
+    TBItem themes[] = { {false, s_lab_l.c_str()}, {true, s_lab_d.c_str()} };
+    draw_seg_section(sy, "settings.theme", themes,
+        [](const TBItem& i){ return g_dark == i.dark; },
+        [](const TBItem& i){
+            if (g_dark != i.dark) {
+                g_dark = i.dark;
                 g_view_fade.start(0.6f, 1.0f, 0.25f, 0, curve::easeOutCubic);
             }
-        }, true);
-        bx += bw + 8;
-    }
+        });
 
-    // About
-    sy += 50;
-    drawText_(g, L"Launcher v0.1.0  ·  © 2026 dwgx", area.X + 18, sy, 300,
-              7.5f, fade(pal.text_faint));
+    drawText_(g, W(tr("settings.about")).c_str(), vx, sy, 200,
+              9.0f, fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
+    sy += 26;
+    drawText_(g, L"Launcher  v0.1.0", vx, sy, 300, 9.5f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+    sy += 22;
+    drawText_(g, L"© 2026 dwgx  ·  Skia + Clay + GLFW + libcurl + axum",
+              vx, sy, 480, 8.5f, fade(pal.text_muted));
 }
 
 void paintProfileView(Graphics& g, RectF area) {
@@ -857,14 +939,18 @@ void paintHistoryOverlay(Graphics& g, int Wpx, int Hpx) {
 // Auth view (640x400)
 // ====================================================================
 void paintAuthView(Graphics& g, int Wpx, int Hpx) {
+    // design: card 380, padding 32 30 28, radius 16
+    // h1 22 bold tracking -.3, tagline 13 muted mt 4
+    // form mt 22 gap 14; field h 48 radius 10 bg=bg border=divider
+    // floating label: empty/blur -> 14 muted center; focus/filled -> 11 primary bold top
     g_hits.clear();
     const Palette& pal = palette();
     SolidBrush bg(pal.bg);
     g.FillRectangle(&bg, 0, 0, Wpx, Hpx);
 
     bool reg = (g_auth_mode == AuthMode::Register);
-    const float cw = 320.0f;
-    const float ch = reg ? 360.0f : 296.0f;
+    const float cw = 380.0f;
+    const float ch = reg ? 460.0f : 380.0f;
     const float cx = (Wpx - cw) / 2.0f;
     const float cy = (Hpx - ch) / 2.0f + g_auth_card_y.value();
     float op = g_auth_card_op.value();
@@ -872,102 +958,127 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
 
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * op), c.GetR(), c.GetG(), c.GetB()); };
 
-    drawShadow(g, cx, cy, cw, ch, 12.0f, fade(pal.shadow_card_hover), 6.0f, 4);
-    fillRR(g, cx, cy, cw, ch, 12.0f, fade(pal.card));
+    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card_hover), 8.0f, 5);
+    drawShadow(g, cx, cy, cw, ch, 16.0f, fade(pal.shadow_card_hover), 30.0f, 6);
+    fillRR(g, cx, cy, cw, ch, 16.0f, fade(pal.card));
 
-    // logo
-    float lr = 18.0f, lx = cx + 24, ly = cy + 24;
+    // h1 22px bold + logo 26x26
+    float lr = 14.0f, lx = cx + 30, ly = cy + 32;
     SolidBrush lbg(fade(pal.primary));
     g.FillEllipse(&lbg, lx, ly, lr*2, lr*2);
-    Font lf(kFontFace, 14.0f, FontStyleBold, UnitPoint);
+    Font lf(kFontFace, 12.0f, FontStyleBold, UnitPoint);
     SolidBrush lf_b(Color((BYTE)(255 * op), 255, 255, 255));
     StringFormat lfmt; lfmt.SetAlignment(StringAlignmentCenter); lfmt.SetLineAlignment(StringAlignmentCenter);
     RectF lr_rect(lx, ly, lr*2, lr*2);
     g.DrawString(L"L", -1, &lf, lr_rect, &lfmt, &lf_b);
 
     drawText_(g, W(tr(reg ? "auth.register.title" : "auth.login.title")).c_str(),
-              lx + lr*2 + 12, cy + 24, 200,
-              13.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
+              lx + lr*2 + 10, cy + 30, 220,
+              16.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
     drawText_(g, W(tr(reg ? "auth.register.sub" : "auth.login.sub")).c_str(),
-              lx + lr*2 + 12, cy + 44, 200, 7.5f, fade(pal.text_muted));
+              cx + 30, cy + 60, 320, 9.5f, fade(pal.text_muted));
 
-    // Inputs (自绘)
-    auto drawInput = [&](InputBox& box, float ix, float iy, float iw, float ih,
-                          const wchar_t* placeholder, int idx) {
+    // floating-label field 48px high
+    auto drawField = [&](InputBox& box, float ix, float iy, float iw, float ih,
+                          const char* labelKey, int idx, float* anim_t) {
         box.bounds = RectF(ix, iy, iw, ih);
         bool focused = (g_auth_form.focus == idx);
-        Color bxbg = fade(pal.surface);
-        fillRR(g, ix, iy, iw, ih, 6.0f, bxbg);
+        bool filled = !box.text.empty();
+        bool floating = focused || filled;
+        // 简单插值（稳态）
+        *anim_t = floating ? 1.0f : 0.0f;
+
+        // bg = bg(page-bg), border = divider/primary
+        fillRR(g, ix, iy, iw, ih, 10.0f, fade(pal.bg));
         Color bd = focused ? fade(pal.primary) : fade(pal.divider);
-        strokeRR(g, ix, iy, iw, ih, 6.0f, bd, focused ? 1.5f : 1.0f);
+        strokeRR(g, ix, iy, iw, ih, 10.0f, bd, focused ? 1.5f : 1.0f);
+        // focus halo
+        if (focused) {
+            Color halo((BYTE)(38 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+            strokeRR(g, ix - 2, iy - 2, iw + 4, ih + 4, 12.0f, halo, 4.0f);
+        }
+
+        // floating label
+        // floating: top 13 / 11px primary bold
+        // resting: vert center / 14px muted
+        std::wstring labelStr = W(tr(labelKey));
+        float t = *anim_t;
+        float lab_size = 11.5f - 3.5f * (1.0f - t);
+        float lab_y = iy + 5.0f + (ih * 0.5f - 5.0f - 5.0f) * (1.0f - t);
+        Color lab_c = floating ? fade(pal.primary) : fade(pal.text_muted);
+        drawText_(g, labelStr.c_str(), ix + 14.0f, lab_y, iw - 28.0f, lab_size, lab_c,
+                  StringAlignmentNear, floating ? FontStyleBold : FontStyleRegular);
+
+        // text input area (在 label 下方 / 整个高度)
         std::wstring txt = box.display();
-        if (txt.empty() && !focused) {
-            drawText_(g, placeholder, ix + 10, iy + 8, iw - 20,
-                      9.5f, fade(pal.text_faint));
-        } else {
-            drawText_(g, txt.c_str(), ix + 10, iy + 8, iw - 20,
-                      9.5f, fade(pal.text));
+        if (!txt.empty()) {
+            drawText_(g, txt.c_str(), ix + 14.0f, iy + 22.0f, iw - 28.0f,
+                      10.5f, fade(pal.text));
         }
         // caret
         if (focused) {
-            // 估算字符宽度（粗略）
-            Font f(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
+            Font fnt(kFontFace, 10.5f, FontStyleRegular, UnitPoint);
             std::wstring sub = box.display().substr(0, box.cursor);
-            RectF bbox; g.MeasureString(sub.c_str(), -1, &f, PointF(0, 0), &bbox);
-            float cx_ = ix + 10 + bbox.Width;
-            // blink
+            RectF bbox; g.MeasureString(sub.c_str(), -1, &fnt, PointF(0, 0), &bbox);
+            float cur_x = ix + 14.0f + bbox.Width;
             int phase = (int)(g_time_in_stage * 1000) % 1000;
             if (phase < 500) {
-                Pen p(fade(pal.text), 1.5f);
-                g.DrawLine(&p, cx_, iy + 6, cx_, iy + ih - 6);
+                Pen p(fade(pal.primary), 1.5f);
+                g.DrawLine(&p, cur_x, iy + 22.0f, cur_x, iy + ih - 8.0f);
             }
         }
         hit(box.bounds, [idx](){ g_auth_form.focus = idx; }, true);
     };
 
-    float fy = cy + 80;
-    drawText_(g, W(tr("auth.username")).c_str(), cx + 24, fy, 200, 7.5f, fade(pal.text_muted));
-    drawInput(g_auth_form.username, cx + 24, fy + 14, cw - 48, 32, L"username", 0);
-    fy += 60;
-    drawText_(g, W(tr("auth.password")).c_str(), cx + 24, fy, 200, 7.5f, fade(pal.text_muted));
+    static float anim_u = 0, anim_p = 0, anim_i = 0;
+    float fy = cy + 90;
+    drawField(g_auth_form.username, cx + 30, fy, cw - 60, 48, "auth.username", 0, &anim_u);
+    fy += 62;
     g_auth_form.password.password = true;
-    drawInput(g_auth_form.password, cx + 24, fy + 14, cw - 48, 32, L"********", 1);
-    fy += 60;
+    drawField(g_auth_form.password, cx + 30, fy, cw - 60, 48, "auth.password", 1, &anim_p);
+    fy += 62;
     if (reg) {
-        drawText_(g, W(tr("auth.invite")).c_str(), cx + 24, fy, 200, 7.5f, fade(pal.text_muted));
-        drawInput(g_auth_form.invite, cx + 24, fy + 14, cw - 48, 32, L"INVITE",   2);
-        fy += 60;
+        drawField(g_auth_form.invite, cx + 30, fy, cw - 60, 48, "auth.invite", 2, &anim_i);
+        fy += 62;
     }
 
-    // Submit button
-    RectF btn(cx + 24, fy + 8, cw - 48, 36);
+    // Submit btn-primary 44 high radius 10 + gradient shadow
+    RectF btn(cx + 30, fy + 6, cw - 60, 44);
     bool bhov = inRect(g_mouse, btn);
     Color bbg = g_auth_form.busy
         ? fade(Color(255, 0x6B, 0x6A, 0x67))
         : (bhov ? fade(pal.primary_hover) : fade(pal.primary));
-    fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 8.0f, bbg);
+    // 阴影 0 6px 16px -6 rgba(217,119,87,.6)
+    Color glow((BYTE)(120 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    drawShadow(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, glow, 6.0f, 4);
+    fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, bbg);
     drawText_(g, W(tr(g_auth_form.busy ? "auth.busy" : (reg ? "auth.register" : "auth.login"))).c_str(),
-              btn.X, btn.Y + 11, btn.Width, 10.0f,
+              btn.X, btn.Y + 14, btn.Width, 11.0f,
               Color((BYTE)(255 * op), 255, 255, 255),
               StringAlignmentCenter, FontStyleBold);
     if (!g_auth_form.busy) {
         hit(btn, [](){ PostMessageW(g_hwnd, WM_APP + 1, 0, 0); }, true);
     }
 
-    // Error
+    // Error: rgba(227,75,75,.1) bg, padding 8 10, radius 8
     if (!g_auth_form.error_msg.empty()) {
-        Color err((BYTE)(255 * op), 0xE0, 0x5A, 0x5A);
+        Color err_bg((BYTE)(28 * op), 0xE3, 0x4B, 0x4B);
+        Color err_fg((BYTE)(255 * op), 0xFF, 0x8A, 0x80);
+        RectF errR(btn.X, btn.Y + 56, btn.Width, 26);
+        fillRR(g, errR.X, errR.Y, errR.Width, errR.Height, 8.0f, err_bg);
         drawText_(g, g_auth_form.error_msg.c_str(),
-                  cx + 24, btn.Y + 44, cw - 48, 8.0f, err);
+                  errR.X + 10, errR.Y + 7, errR.Width - 20, 9.0f, err_fg);
     }
 
     // Switch link
     drawText_(g, W(tr(reg ? "auth.to_login" : "auth.to_register")).c_str(),
-              cx + 24, cy + ch - 28, 120, 7.5f, fade(pal.text_muted));
-    RectF link(cx + 110, cy + ch - 28, 120, 14);
+              cx + 30, cy + ch - 36, 160, 9.0f, fade(pal.text_muted));
+    std::wstring link_label = W(tr(reg ? "auth.go_login" : "auth.go_register"));
+    float link_w = measureText(g, link_label.c_str(), 9.0f, FontStyleBold).Width + 6;
+    RectF link(cx + 30 + 130, cy + ch - 36, link_w, 16);
     bool lhov = inRect(g_mouse, link);
-    drawText_(g, W(tr(reg ? "auth.go_login" : "auth.go_register")).c_str(),
-              link.X, link.Y, link.Width, 8.0f,
+    drawText_(g, link_label.c_str(),
+              link.X, link.Y + 1, link.Width, 9.0f,
               lhov ? fade(pal.primary_hover) : fade(pal.primary),
               StringAlignmentNear, FontStyleBold);
     hit(link, [](){
@@ -1043,13 +1154,13 @@ void enterLoadingStage() {
     g_card_scale.start(0.85f, 1.0f, 0.30f, 0.0f, curve::easeOutBack);
     g_card_opacity.start(0.0f, 1.0f, 0.25f, 0.0f, curve::easeOutCubic);
 }
-// 200x200 → 480x320 (loading 完了向外扩展到 Auth)
+// 200x200 → 480x540 (loading 完了向外扩展到 Auth, 容纳 380 卡片)
 void enterExpandAuthStage() {
     g_stage = Stage::ExpandAuth;
     g_time_in_stage = 0.0f;
     g_card_fade_out.start(0, 1, 0.25f, 0.0f, curve::easeOutCubic);
     g_window_w.start(200, 480, 0.50f, 0.05f, curve::easeOutQuint);
-    g_window_h.start(200, 320, 0.50f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(200, 540, 0.50f, 0.05f, curve::easeOutQuint);
 }
 void enterAuthStage() {
     g_stage = Stage::Auth;
@@ -1057,13 +1168,13 @@ void enterAuthStage() {
     g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
     g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
 }
-// 480x320 → 640x400 (Auth submit 后)
+// 480x540 → 1100x720 (Auth submit 后扩到桌面级主界面)
 void enterExpandMainStage() {
     g_stage = Stage::ExpandMain;
     g_time_in_stage = 0.0f;
     g_auth_card_op.start(g_auth_card_op.value(), 0, 0.20f, 0.0f, curve::easeOutCubic);
-    g_window_w.start(480, 640, 0.45f, 0.05f, curve::easeOutQuint);
-    g_window_h.start(320, 400, 0.45f, 0.05f, curve::easeOutQuint);
+    g_window_w.start(480, 1100, 0.50f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(540, 720,  0.50f, 0.05f, curve::easeOutQuint);
 }
 void enterMainStage() {
     g_stage = Stage::Main;
@@ -1143,7 +1254,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == 'S' || wp == 's') {
                 if (g_stage != Stage::Main) {
                     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-                    SetWindowPos(hwnd, nullptr, (sw - 640) / 2, (sh - 400) / 2, 640, 400, SWP_NOZORDER);
+                    SetWindowPos(hwnd, nullptr, (sw - 1100) / 2, (sh - 720) / 2, 1100, 720, SWP_NOZORDER);
                     enterMainStage();
                     g_main_opacity.elapsed = 999;
                     g_sidebar_x.elapsed = 999;
@@ -1252,9 +1363,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     RegisterClassExW(&wc);
 
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    // 入场流程：Dot 起始 40x40 容器（容纳点），完整流程后到 640x400
-    int initW = skip_loading ? 640 : 40;
-    int initH = skip_loading ? 400 : 40;
+    // 入场：Dot 40x40 → Loading 200x200 → Auth 480x540 → Main 1100x720
+    int initW = skip_loading ? 1100 : 40;
+    int initH = skip_loading ? 720  : 40;
 
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | (skip_loading ? 0 : WS_EX_TOPMOST),
