@@ -1355,10 +1355,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return HTCAPTION;
         }
-        case WM_MOUSEMOVE:
-            g_mouse.x = LOWORD(lp); g_mouse.y = HIWORD(lp);
-            InvalidateRect(hwnd, nullptr, FALSE);
+        case WM_MOUSEMOVE: {
+            int nx = LOWORD(lp), ny = HIWORD(lp);
+            if (nx == g_mouse.x && ny == g_mouse.y) break;
+            g_mouse.x = nx; g_mouse.y = ny;
+            // 不在每次 mousemove invalidate；主循环 60Hz 已经会重画
             break;
+        }
         case WM_LBUTTONUP: {
             POINT p { LOWORD(lp), HIWORD(lp) };
             for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
@@ -1408,47 +1411,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_KEYDOWN:
+            // Auth 表单 Tab 切焦点 + 方向键编辑
             if (g_stage == Stage::Auth) {
                 if (wp == VK_TAB) {
                     g_auth_form.focus = (g_auth_form.focus + 1) %
                         (g_auth_mode == AuthMode::Register ? 3 : 2);
-                    InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
                 if (g_auth_form.focus == 0)      g_auth_form.username.onKey((int)wp);
                 else if (g_auth_form.focus == 1) g_auth_form.password.onKey((int)wp);
                 else if (g_auth_form.focus == 2) g_auth_form.invite.onKey((int)wp);
             }
+            // ESC：关 modal / overlay；什么都没开就退出
             if (wp == VK_ESCAPE) {
-                if (g_overlay != Overlay::None) {
+                if (modal::g_cs2_open) {
+                    modal::closeCS2();
+                } else if (g_overlay != Overlay::None) {
                     g_overlay_t.start(g_overlay_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                     g_overlay = Overlay::None;
-                } else PostQuitMessage(0);
-            }
-            else if (wp == 'D' || wp == 'd') {
-                g_dark = !g_dark;
-                g_view_fade.start(0.6f, 1.0f, 0.25f, 0, curve::easeOutCubic);
-            }
-            else if (wp == 'H' || wp == 'h') {
-                g_overlay = Overlay::History;
-                g_overlay_t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
-            }
-            else if (wp == 'S' || wp == 's') {
-                if (g_stage != Stage::Main) {
-                    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-                    SetWindowPos(hwnd, nullptr, (sw - 1100) / 2, (sh - 720) / 2, 1100, 720, SWP_NOZORDER);
-                    enterMainStage();
-                    g_main_opacity.elapsed = 999;
-                    g_sidebar_x.elapsed = 999;
-                    g_topbar_y.elapsed = 999;
+                } else if (chatv::g_picker_open) {
+                    chatv::g_picker_open = false;
+                    chatv::g_picker_t.start(chatv::g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                } else {
+                    PostQuitMessage(0);
                 }
             }
-            else if (wp >= '1' && wp <= '5') {
-                static View vs[] = { View::Home, View::Lunching, View::Chat, View::Cloud, View::Settings };
-                switchView(vs[wp - '1']);
-            }
-            else if (wp == 'P' || wp == 'p') switchView(View::Profile);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            // 不再绑定 1-5 / D / H / S / P — 全部用鼠标 / sidebar
             break;
         case WM_APP + 1: {
             // Auth submit (demo: 校验本地，假装成功 600ms 后 enterMainStage)
@@ -1634,8 +1622,34 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             if (g_window_w.done()) enterMainStage();
         }
 
-        InvalidateRect(g_hwnd, nullptr, FALSE);
-        Sleep(8);
+        // 是否有动画在跑 — 若都已完成且不在 stage 转换 → idle 模式
+        auto active = [](const Tween& t){ return t.started && !t.done(); };
+        bool any_anim = active(g_card_scale) || active(g_card_opacity) || active(g_card_fade_out)
+            || active(g_window_w) || active(g_window_h)
+            || active(g_sidebar_x) || active(g_topbar_y) || active(g_main_opacity)
+            || active(g_view_fade) || active(g_dropdown_t) || active(g_overlay_t)
+            || active(g_auth_card_op) || active(g_auth_card_y)
+            || active(g_dot_size) || active(g_dot_alpha)
+            || active(g_status_fold_t) || active(modal::g_cs2_t)
+            || active(chatv::g_picker_t)
+            || active(g_auth_form.username.float_t)
+            || active(g_auth_form.password.float_t)
+            || active(g_auth_form.invite.float_t);
+        // loading spinner 在 Loading 阶段也要持续刷
+        bool always_anim = (g_stage != Stage::Main);
+        // chat typing dots / focus caret blink 在 main 时也要持续，但只 chat view 才有 typing
+        bool chat_active = (g_stage == Stage::Main && g_view == View::Chat);
+        bool needs_paint = any_anim || always_anim || chat_active || g_account_dropdown;
+
+        if (needs_paint) {
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+            Sleep(16);   // 60 FPS
+        } else {
+            // 静止状态：低功耗轮询，鼠标移动会触发 mousemove 但不再 invalidate
+            // 所以这里需要在 hover 状态变化时重画。简化为 30FPS 轮询。
+            InvalidateRect(g_hwnd, nullptr, FALSE);
+            Sleep(33);
+        }
     }
 end:
     GdiplusShutdown(g_gdiplus_token);

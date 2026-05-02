@@ -114,12 +114,8 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
         SolidBrush hbg(fade(Color(50, 255, 255, 255)));
         g.FillEllipse(&hbg, pbx, pby, 56.0f, 56.0f);
     }
-    // 点击 play → 打开 Steam URL
-    hit(RectF(pbx, pby, 56.0f, 56.0f), [](){
-        ShellExecuteW(nullptr, L"open",
-            L"https://store.steampowered.com/app/730/CounterStrike_2/",
-            nullptr, nullptr, SW_SHOWNORMAL);
-    }, true);
+    // 点击 play — 暂不真打开外部，避免外部 handler 异常 / focus 抖动；先关 modal
+    hit(RectF(pbx, pby, 56.0f, 56.0f), [](){ closeCS2(); }, true);
 
     // 关闭 ✕ 右上
     RectF xr(mx + mw - 36, my + 12, 26, 26);

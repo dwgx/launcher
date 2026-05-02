@@ -375,33 +375,34 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
         drawText_(g, m.time, bubble_x, y + bubble_h - 14, bubble_w - 8,
                   7.0f, mutedC, StringAlignmentFar);
     } else if (isVideo) {
-        // 视频缩略 + 时长 + 播放
-        LinearGradientBrush vg(PointF(bubble_x, y), PointF(bubble_x + bubble_w, y + bubble_h),
-                               Color(255, 0x40, 0x36, 0x32), Color(255, 0x18, 0x14, 0x12));
-        GraphicsPath vp; buildRoundRect(vp, bubble_x, y, bubble_w, bubble_h, 12);
-        g.FillPath(&vg, &vp);
-        // CS 文字 cover (假视频)
-        Font cf(kFontFace, 16.0f, FontStyleBold, UnitPoint);
-        SolidBrush csb(Color(80, 0xD9, 0x77, 0x57));
-        StringFormat csf; csf.SetAlignment(StringAlignmentCenter); csf.SetLineAlignment(StringAlignmentCenter);
-        g.DrawString(L"CS2", -1, &cf, RectF(bubble_x, y, bubble_w, bubble_h - 30), &csf, &csb);
+        // 视频缩略 — 简化纯色背景避免 GDI+ LinearGradient + Path 组合开销
+        Color bgC(255, 0x28, 0x24, 0x20);
+        fillRR(g, bubble_x, y, bubble_w, bubble_h, 12, bgC);
+        // 静态 CS2 文字
+        drawText_(g, L"CS2", bubble_x, y + 36, bubble_w, 16.0f,
+                  Color(110, 0xD9, 0x77, 0x57), StringAlignmentCenter, FontStyleBold);
         // 中央 play 按钮
+        float cx_btn = bubble_x + bubble_w / 2 - 22.0f;
+        float cy_btn = y + (bubble_h - 30) / 2 - 22.0f;
         SolidBrush pbg(Color(180, 0, 0, 0));
-        g.FillEllipse(&pbg, bubble_x + bubble_w/2 - 22.0f, y + (bubble_h - 30)/2 - 22.0f, 44.0f, 44.0f);
-        icons::drawSvg(g, icons::Name::Play,
-                       bubble_x + bubble_w/2 - 12, y + (bubble_h - 30)/2 - 12, 24,
+        g.FillEllipse(&pbg, cx_btn, cy_btn, 44.0f, 44.0f);
+        icons::drawSvg(g, icons::Name::Play, cx_btn + 10, cy_btn + 10, 24,
                        Color(255, 255, 255, 255));
         // 底部 meta bar
-        Color metaBar(120, 0, 0, 0);
-        fillRR(g, bubble_x + 8, y + bubble_h - 24, bubble_w - 16, 16, 5.0f, metaBar);
+        fillRR(g, bubble_x + 8, y + bubble_h - 24, bubble_w - 16, 16, 5.0f,
+               Color(120, 0, 0, 0));
         drawText_(g, m.body, bubble_x + 14, y + bubble_h - 22, bubble_w - 60,
                   8.0f, Color(255, 255, 255, 255), StringAlignmentNear);
-        wchar_t dur[16]; swprintf_s(dur, 16, L"%d:%02d", m.video_seconds / 60, m.video_seconds % 60);
+        wchar_t dur[16];
+        int sec = m.video_seconds > 0 ? m.video_seconds : 0;
+        swprintf_s(dur, 16, L"%d:%02d", sec / 60, sec % 60);
         drawText_(g, dur, bubble_x + bubble_w - 50, y + bubble_h - 22, 40,
                   8.0f, Color(255, 255, 255, 255), StringAlignmentFar, FontStyleBold);
-        // time
         drawText_(g, m.time, bubble_x, y + bubble_h - 6, bubble_w - 8,
                   7.0f, Color(180, 255, 255, 255), StringAlignmentFar);
+        // 点击 → 弹 toast 提示而非真正打开（避免 ShellExecute 抖动）
+        // 当前：什么都不做 — 后续接 video player 时再连
+        hit(RectF(cx_btn, cy_btn, 44.0f, 44.0f), [](){ /* TODO: in-app video player */ }, true);
     } else {
         // text bubble
         Color cardC = me ? pal.primary : pal.card;
