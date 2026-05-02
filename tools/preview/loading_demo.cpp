@@ -1803,6 +1803,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (g_stage == Stage::Main && g_view == View::Chat && chatv::g_focus_composer) {
+                // Ctrl+V 优先尝试粘贴媒体（图片 / 文件 drop）
+                if (ctrl && c == 0x16) {
+                    if (chatv::tryPasteMedia(hwnd)) {
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                }
                 if (!chatv::g_composer.onChar(c, ctrl, hwnd)) {
                     if (c == L'\r' || c == L'\n') {
                         if (!chatv::g_composer.text.empty()) {
@@ -1922,6 +1929,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EndPaint(hwnd, &ps);
             return 0;
         }
+        case WM_DROPFILES: {
+            // 拖入文件 → chat 当前频道发媒体
+            if (g_stage == Stage::Main && g_view == View::Chat) {
+                HDROP drop = (HDROP)wp;
+                UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < n; ++i) {
+                    wchar_t path[MAX_PATH];
+                    if (DragQueryFileW(drop, i, path, MAX_PATH)) {
+                        chatv::appendMedia(path);
+                    }
+                }
+                DragFinish(drop);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         case WM_RBUTTONUP:  hideToTray(hwnd); return 0;
         case WM_DESTROY:    trayRemove(); PostQuitMessage(0); return 0;
     }
@@ -1990,6 +2013,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
     DWM_WINDOW_CORNER_PREFERENCE pref = DWMWCP_ROUND;
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
+    DragAcceptFiles(g_hwnd, TRUE);   // 接收文件拖拽
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
 
     // 自动登录 — 注册表里有凭据就直接进 main，跳过 Auth

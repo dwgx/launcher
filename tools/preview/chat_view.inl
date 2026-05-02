@@ -27,7 +27,7 @@ const Channel kChannels[] = {
 };
 const wchar_t* kGroups[] = { L"IMPORTANT", L"GENERAL", L"GAMES", L"SHOP" };
 
-enum class MsgKind { Text, Sticker, Gif, System, DayDivider, Typing, LinkCard, Video };
+enum class MsgKind { Text, Sticker, Gif, System, DayDivider, Typing, LinkCard, Video, Image };
 
 struct Msg {
     MsgKind kind{MsgKind::Text};
@@ -57,6 +57,60 @@ std::vector<Msg>& streamFor(const wchar_t* chid) {
     return it->second;
 }
 
+// ============== 媒体附件存储 ==============
+struct Media {
+    enum Kind { KImage, KGif, KVideo, KFile } kind{KImage};
+    std::wstring path;
+    Gdiplus::Image* img{nullptr};   // GDI+ image (image/gif 解码后)
+    int width{0}, height{0};
+};
+inline std::unordered_map<std::wstring, Media>& mediaCache() {
+    static std::unordered_map<std::wstring, Media> m;
+    return m;
+}
+
+// 从路径推 kind + 解码（image/gif）
+const Media* loadMedia(const std::wstring& path) {
+    auto& cache = mediaCache();
+    auto it = cache.find(path);
+    if (it != cache.end()) return &it->second;
+    Media m; m.path = path;
+    std::wstring s = path;
+    auto dot = s.find_last_of(L'.');
+    std::wstring suf = (dot != std::wstring::npos) ? s.substr(dot) : L"";
+    for (auto& c : suf) c = (wchar_t)towlower(c);
+    if (suf == L".png" || suf == L".jpg" || suf == L".jpeg" || suf == L".webp" || suf == L".bmp") {
+        m.kind = Media::KImage;
+        m.img = Gdiplus::Image::FromFile(path.c_str());
+    } else if (suf == L".gif") {
+        m.kind = Media::KGif;
+        m.img = Gdiplus::Image::FromFile(path.c_str());
+    } else if (suf == L".mp4" || suf == L".webm" || suf == L".mov" || suf == L".avi" || suf == L".mkv") {
+        m.kind = Media::KVideo;
+    } else {
+        m.kind = Media::KFile;
+    }
+    if (m.img && m.img->GetLastStatus() == Gdiplus::Ok) {
+        m.width = m.img->GetWidth();
+        m.height = m.img->GetHeight();
+    } else if (m.img) {
+        delete m.img; m.img = nullptr;
+    }
+    auto [ins, _] = cache.emplace(path, std::move(m));
+    return &ins->second;
+}
+
+// 文件名（路径最后一段）
+inline std::wstring basename(const std::wstring& p) {
+    auto pos = p.find_last_of(L"\\/");
+    return (pos == std::wstring::npos) ? p : p.substr(pos + 1);
+}
+
+// 长生命周期 path 字符串
+inline std::vector<std::wstring>& mediaPathStore() {
+    static std::vector<std::wstring> v; return v;
+}
+
 // ============== 状态 ==============
 const wchar_t* g_active{L"general"};
 InputBox       g_composer;          // 完整 InputBox：选区 + Ctrl+A/C/V/X
@@ -74,6 +128,77 @@ float g_typing_t = 0.0f;
 void switchChannel(const wchar_t* id) {
     g_active = id;
     g_picker_open = false;
+}
+
+// 把一个文件路径作为 media message 加到当前频道
+void appendMedia(const std::wstring& path) {
+    if (path.empty()) return;
+    const Media* m = loadMedia(path);
+    if (!m) return;
+    auto& store = mediaPathStore();
+    store.push_back(path);
+    Msg msg; msg.from = L"me"; msg.author = L""; msg.status = L"online";
+    msg.read = false; msg.time = L"now";
+    msg.body = store.back().c_str();
+    switch (m->kind) {
+        case Media::KImage: msg.kind = MsgKind::Image; break;
+        case Media::KGif:   msg.kind = MsgKind::Gif;   break;
+        case Media::KVideo: msg.kind = MsgKind::Video; break;
+        case Media::KFile:  msg.kind = MsgKind::Text;  break;
+    }
+    streamFor(g_active).push_back(msg);
+}
+
+// 保存 HBITMAP 到临时 PNG，返回路径
+std::wstring saveBitmapToTempPng(HBITMAP hbm) {
+    if (!hbm) return L"";
+    Gdiplus::Bitmap b(hbm, nullptr);
+    wchar_t tmp[MAX_PATH], file[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    GetTempFileNameW(tmp, L"lpv", 0, file);
+    std::wstring out = file; out += L".png";
+    DeleteFileW(file);
+    CLSID clsid;
+    UINT num = 0, sz = 0;
+    Gdiplus::GetImageEncodersSize(&num, &sz);
+    if (sz == 0) return L"";
+    std::vector<BYTE> buf(sz);
+    auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
+    Gdiplus::GetImageEncoders(num, sz, enc);
+    for (UINT i = 0; i < num; ++i) {
+        if (wcscmp(enc[i].MimeType, L"image/png") == 0) {
+            clsid = enc[i].Clsid; break;
+        }
+    }
+    if (b.Save(out.c_str(), &clsid, nullptr) == Gdiplus::Ok) return out;
+    return L"";
+}
+
+// 从剪贴板尝试粘贴媒体（图片 / 文件 drop）。返回 true 表示已消费。
+bool tryPasteMedia(HWND hwnd) {
+    if (!OpenClipboard(hwnd)) return false;
+    bool consumed = false;
+    // 先看 HDROP（拖拽 / 复制文件）
+    if (HANDLE h = GetClipboardData(CF_HDROP)) {
+        HDROP drop = (HDROP)h;
+        UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < n; ++i) {
+            wchar_t buf[MAX_PATH];
+            if (DragQueryFileW(drop, i, buf, MAX_PATH)) {
+                appendMedia(buf);
+                consumed = true;
+            }
+        }
+    }
+    // 再看图片 bitmap
+    if (!consumed) {
+        if (HANDLE h = GetClipboardData(CF_BITMAP)) {
+            std::wstring tmp = saveBitmapToTempPng((HBITMAP)h);
+            if (!tmp.empty()) { appendMedia(tmp); consumed = true; }
+        }
+    }
+    CloseClipboard();
+    return consumed;
 }
 
 bool isMarketChannel() {
@@ -223,8 +348,92 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
     }
 
     bool me = (wcscmp(m.from, L"me") == 0);
+    bool isImage = (m.kind == MsgKind::Image);
+    bool isGif   = (m.kind == MsgKind::Gif);
+    bool isVideo = (m.kind == MsgKind::Video);
 
-    // 当前简化为 Text only（sample 数据已清空，未来 sticker/gif/link/video 加回时再扩展）
+    // ---------- Image / GIF / Video 媒体气泡 ----------
+    if (isImage || isGif || isVideo) {
+        const Media* mm = loadMedia(m.body ? m.body : L"");
+        const float bub_max_w = std::min(maxw * 0.55f, 320.0f);
+        float bub_w = 240.0f, bub_h = 180.0f;
+        if (mm && mm->img && mm->width > 0 && mm->height > 0) {
+            float aspect = (float)mm->height / (float)mm->width;
+            bub_w = std::min(bub_max_w, (float)mm->width);
+            bub_h = bub_w * aspect;
+            if (bub_h > 240.0f) { bub_h = 240.0f; bub_w = bub_h / aspect; }
+        } else if (isVideo) {
+            bub_w = 260.0f; bub_h = 160.0f;
+        }
+        const float gutter_m = 38.0f;
+        float bub_x = me ? (x + maxw - 14.0f - bub_w) : (x + gutter_m);
+
+        // 头像（非自己 + 非连续）
+        if (!me && !prev_same_author) {
+            drawAvatar(g, x, y + bub_h - 28.0f, 14.0f, m.author, m.status, palette());
+        }
+
+        // 圆角裁剪 + 画图 / 视频封面
+        GraphicsPath cp; buildRoundRect(cp, bub_x, y, bub_w, bub_h, 12.0f);
+        g.SetClip(&cp);
+        if (mm && mm->img) {
+            g.DrawImage(mm->img, RectF(bub_x, y, bub_w, bub_h));
+        } else {
+            // video 没缩略 / 图片解码失败 — 纯色占位
+            SolidBrush bg(Color(255, 0x28, 0x24, 0x20));
+            g.FillRectangle(&bg, bub_x, y, bub_w, bub_h);
+        }
+        // 视频底部渐变蒙版让 ▶ 可读
+        if (isVideo) {
+            LinearGradientBrush vmask(PointF(bub_x, y + bub_h * 0.5f), PointF(bub_x, y + bub_h),
+                                      Color(0, 0, 0, 0), Color(160, 0, 0, 0));
+            g.FillRectangle(&vmask, bub_x, y + bub_h * 0.5f, bub_w, bub_h * 0.5f);
+        }
+        g.ResetClip();
+
+        // 视频中央播放按钮 + 文件名
+        if (isVideo) {
+            float btnr = 24.0f;
+            float btnx = bub_x + bub_w / 2 - btnr;
+            float btny = y + bub_h / 2 - btnr;
+            SolidBrush pbg(Color(190, 0, 0, 0));
+            g.FillEllipse(&pbg, btnx, btny, btnr * 2, btnr * 2);
+            icons::drawSvg(g, icons::Name::Play, btnx + 12.0f, btny + 12.0f, 24.0f,
+                           Color(255, 255, 255, 255));
+            // 文件名（底部 padding）
+            std::wstring fn = basename(m.body ? m.body : L"");
+            drawText_(g, fn.c_str(), bub_x + 10.0f, y + bub_h - 22.0f, bub_w - 20.0f,
+                      8.0f, Color(255, 255, 255, 255), StringAlignmentNear, FontStyleBold);
+            // 整个气泡点击 → ShellExecute 默认播放器
+            std::wstring path_copy = m.body ? m.body : L"";
+            hit(RectF(bub_x, y, bub_w, bub_h), [path_copy](){
+                if (!path_copy.empty()) {
+                    ShellExecuteW(nullptr, L"open", path_copy.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }, true);
+        } else if (isImage || isGif) {
+            // 图片点击 → 用默认查看器打开（暂不做内嵌大图）
+            std::wstring path_copy = m.body ? m.body : L"";
+            hit(RectF(bub_x, y, bub_w, bub_h), [path_copy](){
+                if (!path_copy.empty()) {
+                    ShellExecuteW(nullptr, L"open", path_copy.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }, true);
+        }
+        // time + 双勾
+        const Palette& palc = palette();
+        Color metaC(220, 255, 255, 255);
+        drawText_(g, m.time, bub_x, y + bub_h - 14.0f, bub_w - 10.0f,
+                  7.0f, metaC, StringAlignmentFar);
+        if (me) {
+            Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
+            icons::drawSvg(g, icons::Name::Check2,
+                           bub_x + bub_w - 24.0f, y + bub_h - 16.0f, 12.0f, tickC);
+        }
+        (void)palc;
+        return bub_h + 10.0f;
+    }
+
     // 用 GDI+ MeasureString 精确测算
     const float pad_l = 14.0f, pad_r = 14.0f;
     const float pad_t = 9.0f,  pad_b = 8.0f;
