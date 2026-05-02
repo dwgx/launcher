@@ -115,6 +115,10 @@ inline std::vector<std::wstring>& mediaPathStore() {
 const wchar_t* g_active{L"general"};
 InputBox       g_composer;          // 完整 InputBox：选区 + Ctrl+A/C/V/X
 bool           g_picker_open{false};
+inline std::unordered_map<std::wstring, bool>& groupCollapsed() {
+    static std::unordered_map<std::wstring, bool> m;
+    return m;
+}
 int            g_picker_tab{0};   // 0=emoji 1=sticker 2=gif
 Tween          g_picker_t;
 int            g_streams_dirty_index{-1};   // 上次 active 切换的标记，触发 fade
@@ -264,10 +268,15 @@ void paintChatList(Graphics& g, RectF area) {
             Color hc(g_dark ? 14 : 10, pal.text.GetR(), pal.text.GetG(), pal.text.GetB());
             fillRR(g, ghead.X, ghead.Y, ghead.Width, ghead.Height, 4.0f, hc);
         }
-        drawText_(g, L"▾", area.X + 10, row_y + 4, 12, 8.0f, pal.text_muted);
+        bool collapsed = groupCollapsed()[gname];
+        drawText_(g, collapsed ? L"▸" : L"▾", area.X + 10, row_y + 4, 12, 8.0f, pal.text_muted);
         drawText_(g, gname, area.X + 26, row_y + 4, 200,
                   8.0f, pal.text_muted, StringAlignmentNear, FontStyleBold);
+        const wchar_t* gn = gname;
+        hit(ghead, [gn](){ groupCollapsed()[gn] = !groupCollapsed()[gn]; }, true);
         row_y += 24;
+
+        if (collapsed) { row_y += 6; continue; }
 
         // channels in group
         for (auto& c : kChannels) {
@@ -855,6 +864,13 @@ void paintChatPane(Graphics& g, RectF area) {
 
 // ============== 顶层 entry ==============
 void paintChatViewTop(Graphics& g, RectF area) {
+    // view 切换 fade（共用 g_view_fade）
+    float op = g_view_fade.started ? g_view_fade.value() : 1.0f;
+    if (op < 0.999f) {
+        // 平移 + 透明 — 简单做法：偏 8px 上 + 全局 alpha 控不住，所以直接改 area.Y
+        // 让用户感受到切换；alpha 影响子调用复杂，暂只做 translate
+        area.Y += (1.0f - op) * 8.0f;
+    }
     float lw = 240;
     paintChatList(g, RectF(area.X, area.Y, lw, area.Height));
     paintChatPane(g, RectF(area.X + lw + 1, area.Y, area.Width - lw - 1, area.Height));

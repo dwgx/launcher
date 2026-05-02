@@ -352,6 +352,7 @@ enum class Overlay { None, History };
 
 Stage    g_stage    = Stage::Dot;
 AuthMode g_auth_mode = AuthMode::Login;
+bool     g_skip_auth_after_loading = false;   // auto_login 模式标记
 View     g_view  = View::Home;
 Overlay  g_overlay = Overlay::None;
 bool     g_account_dropdown = false;
@@ -731,13 +732,13 @@ const float kTopbarH  = 48.0f;
 #include "market_view.inl"
 #include "chat_view.inl"
 
-struct MenuEntry { View view; const char* key; const wchar_t* glyph; };
+struct MenuEntry { View view; const char* key; icons::Name icon; };
 const MenuEntry kMenu[] = {
-    { View::Home,     "menu.home",     L"◉" },
-    { View::Lunching, "menu.lunching", L"⚡" },
-    { View::Chat,     "menu.chat",     L"✉" },
-    { View::Cloud,    "menu.cloud",    L"☁" },
-    { View::Settings, "menu.settings", L"⚙" },
+    { View::Home,     "menu.home",     icons::Name::Home },
+    { View::Lunching, "menu.lunching", icons::Name::Library },
+    { View::Chat,     "menu.chat",     icons::Name::Chat },
+    { View::Cloud,    "menu.cloud",    icons::Name::Cloud },
+    { View::Settings, "menu.settings", icons::Name::Settings },
 };
 
 void paintTopbar(Graphics& g, int Wpx) {
@@ -998,8 +999,8 @@ void paintSidebar(Graphics& g, int Hpx) {
         }
         Color tc = active ? pal.primary : (hover ? pal.text : pal.text_muted);
 
-        // glyph 20x20 居左 + 12px gap + label 13.5px
-        drawText_(g, m.glyph, item.X + 12.0f, item.Y + 9.0f, 20.0f, 12.0f, tc);
+        // SVG 图标 — 不依赖系统字体，避免 Yahei UI 渲染不出 ☁ ⚙ 这类 unicode
+        icons::drawSvg(g, m.icon, item.X + 12.0f, item.Y + 9.0f, 20.0f, tc);
         drawText_(g, W(tr(m.key)).c_str(), item.X + 44.0f, item.Y + 11.0f, item.Width - 50.0f,
                   10.5f, tc, StringAlignmentNear, FontStyleRegular);
 
@@ -1923,7 +1924,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (g_stage == Stage::Expanding)  paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandAuth) paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::Auth)       paintAuthView(g, Wpx, Hpx);
-            else if (g_stage == Stage::ExpandMain) paintAuthView(g, Wpx, Hpx);
+            else if (g_stage == Stage::ExpandMain) {
+                // auto-login: Loading 卡片 fade out + 窗口扩张；非 auto-login 走 Auth 卡片 fade
+                if (g_skip_auth_after_loading) paintLoading(g, Wpx, Hpx);
+                else paintAuthView(g, Wpx, Hpx);
+            }
             else                                    paintMain(g, Wpx, Hpx);
             BitBlt(hdc, 0, 0, Wpx, Hpx, s_mem, 0, 0, SRCCOPY);
             EndPaint(hwnd, &ps);
@@ -2021,15 +2026,16 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     bool auto_login = persist::loadCreds(saved_user, saved_pass)
                       && !saved_user.empty() && !saved_pass.empty();
     if (auto_login) {
-        // 把凭据填回 form（即使 skip Auth，profile 那里仍要显示 username）
         g_auth_form.username.text = saved_user;
         g_auth_form.password.text = saved_pass;
+        g_auth_form.username.cursor = (int)saved_user.size();
+        g_auth_form.password.cursor = (int)saved_pass.size();
     }
 
     if (skip_loading && !skip_auth) {
         enterAuthStage();
-    } else if (skip_loading || auto_login) {
-        // 自动登录直接进 main
+    } else if (skip_loading) {
+        // 调试快进
         SetWindowPos(g_hwnd, nullptr, (sw - 1100) / 2, (sh - 720) / 2, 1100, 720, SWP_NOZORDER);
         enterMainStage();
         g_main_opacity.elapsed = 999;
@@ -2041,9 +2047,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             g_overlay_t.elapsed = 999;
         }
     } else {
-        // 完整入场：Dot
+        // 完整入场动画：Dot → Loading → ...（auto_login 时走 g_skip_auth_after_loading 标记跳过 Auth）
         enterDotStage();
     }
+    // 主循环里用此标记决定 Loading 完后是去 Auth 还是直接 ExpandMain
+    extern bool g_skip_auth_after_loading;
+    g_skip_auth_after_loading = auto_login && !skip_loading;
 
     auto last = std::chrono::steady_clock::now();
     MSG msg{};
@@ -2088,7 +2097,16 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             resize_to_tween();
             if (g_window_w.done()) enterLoadingStage();
         } else if (g_stage == Stage::Loading && g_time_in_stage > 1.4f) {
-            enterExpandAuthStage();
+            if (g_skip_auth_after_loading) {
+                // 自动登录：Loading 完后直接展开到 Main 1100x720（跳 Auth）
+                g_stage = Stage::ExpandMain;
+                g_time_in_stage = 0.0f;
+                g_card_fade_out.start(0, 1, 0.30f, 0.0f, curve::easeOutCubic);
+                g_window_w.start(200, 1100, 0.55f, 0.05f, curve::easeOutQuint);
+                g_window_h.start(200, 720,  0.55f, 0.05f, curve::easeOutQuint);
+            } else {
+                enterExpandAuthStage();
+            }
         } else if (g_stage == Stage::ExpandAuth) {
             resize_to_tween();
             if (g_window_w.done()) enterAuthStage();

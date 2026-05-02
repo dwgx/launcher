@@ -205,12 +205,34 @@ pub async fn send(
     if !allowed_types.contains(&req.msg_type.as_str()) {
         return Err((StatusCode::BAD_REQUEST, "bad msg_type".into()));
     }
-    // 是成员？
-    let member = sqlx::query_scalar!(
-        "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2", req.chat_id, me)
-        .fetch_optional(&s.db).await.map_err(internal)?;
-    if member.is_none() {
-        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    // 拿 chat 元信息（kind / write_role / is_official）
+    let chat_meta = sqlx::query!(
+        r#"SELECT kind, write_role, is_official FROM chats WHERE id = $1"#,
+        req.chat_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
+    // 拿当前用户角色
+    let user_admin = sqlx::query_scalar!(
+        "SELECT is_admin FROM users WHERE id = $1", me)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .unwrap_or(false);
+
+    if chat_meta.kind == "channel" && chat_meta.is_official {
+        // 官方频道按 write_role 控权
+        if chat_meta.write_role == "admin_only" && !user_admin {
+            return Err((StatusCode::FORBIDDEN,
+                "此频道只允许管理员发言".into()));
+        }
+        // user 频道：所有登录用户可发，无需 chat_members
+    } else {
+        // dm / group / 非官方 channel — 仍需 member 关系
+        let member = sqlx::query_scalar!(
+            "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2",
+            req.chat_id, me)
+            .fetch_optional(&s.db).await.map_err(internal)?;
+        if member.is_none() {
+            return Err((StatusCode::FORBIDDEN, "not a member".into()));
+        }
     }
 
     let row = sqlx::query!(
@@ -254,11 +276,18 @@ pub async fn history(
     Query(q): Query<HistoryQ>,
 ) -> Result<Json<Vec<MessageOut>>, (StatusCode, String)> {
     let me = auth_user(&s, &q.session_token).await?;
-    let member = sqlx::query_scalar!(
-        "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2", q.chat_id, me)
-        .fetch_optional(&s.db).await.map_err(internal)?;
-    if member.is_none() {
-        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    // 官方频道任何登录用户可读；其他需 member
+    let chat_meta = sqlx::query!(
+        "SELECT kind, is_official FROM chats WHERE id = $1", q.chat_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
+    if !(chat_meta.kind == "channel" && chat_meta.is_official) {
+        let member = sqlx::query_scalar!(
+            "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2", q.chat_id, me)
+            .fetch_optional(&s.db).await.map_err(internal)?;
+        if member.is_none() {
+            return Err((StatusCode::FORBIDDEN, "not a member".into()));
+        }
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let before = q.before_id.unwrap_or(i64::MAX);
