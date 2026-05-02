@@ -4,8 +4,8 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-02 22:42**
-最后 commit：**待提交** feat: Chat + Market + Picker + CS2 modal + admin channels + media size config
+最后更新：**2026-05-02 22:46**
+最后 commit：**`11fe542`** feat: Chat + Market + Picker views + admin/channels + media size config
 GitHub：https://github.com/dwgx/launcher (private, master)
 
 ---
