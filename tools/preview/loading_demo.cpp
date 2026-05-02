@@ -186,12 +186,13 @@ struct Tween {
 // ====================================================================
 // 状态
 // ====================================================================
-enum class Stage { Loading, Expanding, Auth, Main };
+// 入场流程：Dot → ExpandLoading → Loading → ExpandAuth → Auth → ExpandMain → Main
+enum class Stage { Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth, ExpandMain, Main };
 enum class AuthMode { Login, Register };
 enum class View  { Home, Lunching, Cloud, Settings, Profile };
 enum class Overlay { None, History };
 
-Stage    g_stage    = Stage::Loading;
+Stage    g_stage    = Stage::Dot;
 AuthMode g_auth_mode = AuthMode::Login;
 View     g_view  = View::Home;
 Overlay  g_overlay = Overlay::None;
@@ -203,6 +204,8 @@ Tween g_sidebar_x, g_topbar_y, g_main_opacity;
 Tween g_view_fade;
 Tween g_dropdown_t;
 Tween g_overlay_t;
+// Dot 阶段：起始小点
+Tween g_dot_size, g_dot_alpha;
 Tween g_auth_card_y, g_auth_card_op;
 
 float g_time_in_stage = 0.0f;
@@ -1004,14 +1007,49 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
 }
 
 // ====================================================================
+// Dot 阶段：起始一个小点 (40x40 窗口里画 2→14px 主色圆)
+// ====================================================================
+void paintDot(Graphics& g, int Wpx, int Hpx) {
+    const Palette& pal = palette();
+    SolidBrush bg(pal.bg);
+    g.FillRectangle(&bg, 0, 0, Wpx, Hpx);
+    float sz = g_dot_size.value();
+    float a  = g_dot_alpha.value();
+    if (a <= 0.001f) return;
+    Color c((BYTE)(255 * a), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    SolidBrush b(c);
+    g.FillEllipse(&b, (Wpx - sz) / 2.0f, (Hpx - sz) / 2.0f, sz, sz);
+}
+
+// ====================================================================
 // Stage 切换
 // ====================================================================
-void enterMainStage() {
-    g_stage = Stage::Main;
+void enterDotStage() {
+    g_stage = Stage::Dot;
     g_time_in_stage = 0.0f;
-    g_sidebar_x.start(0, 1, 0.40f, 0.05f, curve::easeOutQuint);
-    g_topbar_y.start(0, 1, 0.35f, 0.10f, curve::easeOutCubic);
-    g_main_opacity.start(0, 1, 0.45f, 0.15f, curve::easeOutQuint);
+    g_dot_size.start(2, 14, 0.30f, 0.0f, curve::easeOutCubic);
+    g_dot_alpha.start(0, 1, 0.25f, 0.0f, curve::easeOutCubic);
+}
+// 40x40 → 200x200 (展开成加载卡片)
+void enterExpandLoadingStage() {
+    g_stage = Stage::ExpandLoading;
+    g_time_in_stage = 0.0f;
+    g_window_w.start(40, 200, 0.40f, 0.0f, curve::easeOutBack);
+    g_window_h.start(40, 200, 0.40f, 0.0f, curve::easeOutBack);
+}
+void enterLoadingStage() {
+    g_stage = Stage::Loading;
+    g_time_in_stage = 0.0f;
+    g_card_scale.start(0.85f, 1.0f, 0.30f, 0.0f, curve::easeOutBack);
+    g_card_opacity.start(0.0f, 1.0f, 0.25f, 0.0f, curve::easeOutCubic);
+}
+// 200x200 → 480x320 (loading 完了向外扩展到 Auth)
+void enterExpandAuthStage() {
+    g_stage = Stage::ExpandAuth;
+    g_time_in_stage = 0.0f;
+    g_card_fade_out.start(0, 1, 0.25f, 0.0f, curve::easeOutCubic);
+    g_window_w.start(200, 480, 0.50f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(200, 320, 0.50f, 0.05f, curve::easeOutQuint);
 }
 void enterAuthStage() {
     g_stage = Stage::Auth;
@@ -1019,13 +1057,23 @@ void enterAuthStage() {
     g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
     g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
 }
-void enterExpandingStage() {
-    g_stage = Stage::Expanding;
+// 480x320 → 640x400 (Auth submit 后)
+void enterExpandMainStage() {
+    g_stage = Stage::ExpandMain;
     g_time_in_stage = 0.0f;
-    g_card_fade_out.start(0, 1, 0.30f, 0.0f, curve::easeOutCubic);
-    g_window_w.start(200, 640, 0.55f, 0.10f, curve::easeOutQuint);
-    g_window_h.start(200, 400, 0.55f, 0.10f, curve::easeOutQuint);
+    g_auth_card_op.start(g_auth_card_op.value(), 0, 0.20f, 0.0f, curve::easeOutCubic);
+    g_window_w.start(480, 640, 0.45f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(320, 400, 0.45f, 0.05f, curve::easeOutQuint);
 }
+void enterMainStage() {
+    g_stage = Stage::Main;
+    g_time_in_stage = 0.0f;
+    g_sidebar_x.start(0, 1, 0.40f, 0.05f, curve::easeOutQuint);
+    g_topbar_y.start(0, 1, 0.35f, 0.10f, curve::easeOutCubic);
+    g_main_opacity.start(0, 1, 0.45f, 0.15f, curve::easeOutQuint);
+}
+// 兼容旧调用名
+void enterExpandingStage() { enterExpandLoadingStage(); }
 
 // ====================================================================
 // WndProc
@@ -1130,7 +1178,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == 0xA1) {
                 KillTimer(hwnd, 0xA1);
                 g_auth_form.busy = false;
-                enterMainStage();
+                // 不再直接 enterMainStage：先扩张窗口到 640x400 再 enter Main
+                enterExpandMainStage();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1145,10 +1194,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.SetSmoothingMode(SmoothingModeAntiAlias);
             g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
             g.SetCompositingQuality(CompositingQualityHighQuality);
-            if (g_stage == Stage::Loading)        paintLoading(g, Wpx, Hpx);
-            else if (g_stage == Stage::Expanding) paintLoading(g, Wpx, Hpx);
-            else if (g_stage == Stage::Auth)      paintAuthView(g, Wpx, Hpx);
-            else                                   paintMain(g, Wpx, Hpx);
+            if (g_stage == Stage::Dot)             paintDot(g, Wpx, Hpx);
+            else if (g_stage == Stage::ExpandLoading) paintLoading(g, Wpx, Hpx);
+            else if (g_stage == Stage::Loading)    paintLoading(g, Wpx, Hpx);
+            else if (g_stage == Stage::Expanding)  paintLoading(g, Wpx, Hpx);
+            else if (g_stage == Stage::ExpandAuth) paintLoading(g, Wpx, Hpx);
+            else if (g_stage == Stage::Auth)       paintAuthView(g, Wpx, Hpx);
+            else if (g_stage == Stage::ExpandMain) paintAuthView(g, Wpx, Hpx);
+            else                                    paintMain(g, Wpx, Hpx);
             BitBlt(hdc, 0, 0, Wpx, Hpx, mem, 0, 0, SRCCOPY);
             SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem);
             EndPaint(hwnd, &ps);
@@ -1199,8 +1252,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     RegisterClassExW(&wc);
 
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    int initW = skip_loading ? 640 : 200;
-    int initH = skip_loading ? 400 : 200;
+    // 入场流程：Dot 起始 40x40 容器（容纳点），完整流程后到 640x400
+    int initW = skip_loading ? 640 : 40;
+    int initH = skip_loading ? 400 : 40;
 
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | (skip_loading ? 0 : WS_EX_TOPMOST),
@@ -1226,8 +1280,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             g_overlay_t.elapsed = 999;
         }
     } else {
-        g_card_scale.start(0.85f, 1.0f, 0.40f, 0.0f, curve::easeOutBack);
-        g_card_opacity.start(0.0f, 1.0f, 0.30f, 0.0f, curve::easeOutCubic);
+        // 完整入场：Dot
+        enterDotStage();
     }
 
     auto last = std::chrono::steady_clock::now();
@@ -1251,15 +1305,28 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_dropdown_t.tick(dt);
         g_overlay_t.tick(dt);
         g_auth_card_op.tick(dt); g_auth_card_y.tick(dt);
+        g_dot_size.tick(dt);   g_dot_alpha.tick(dt);
 
-        if (g_stage == Stage::Loading && g_time_in_stage > 1.6f) {
-            enterExpandingStage();
-        } else if (g_stage == Stage::Expanding) {
+        // 入场流程驱动
+        auto resize_to_tween = [&]() {
             int w = (int)g_window_w.value();
             int h = (int)g_window_h.value();
             int x = (sw - w) / 2, y = (sh - h) / 2;
             SetWindowPos(g_hwnd, nullptr, x, y, w, h, SWP_NOZORDER);
+        };
+        if (g_stage == Stage::Dot && g_time_in_stage > 0.45f) {
+            enterExpandLoadingStage();
+        } else if (g_stage == Stage::ExpandLoading) {
+            resize_to_tween();
+            if (g_window_w.done()) enterLoadingStage();
+        } else if (g_stage == Stage::Loading && g_time_in_stage > 1.4f) {
+            enterExpandAuthStage();
+        } else if (g_stage == Stage::ExpandAuth) {
+            resize_to_tween();
             if (g_window_w.done()) enterAuthStage();
+        } else if (g_stage == Stage::ExpandMain) {
+            resize_to_tween();
+            if (g_window_w.done()) enterMainStage();
         }
 
         InvalidateRect(g_hwnd, nullptr, FALSE);
