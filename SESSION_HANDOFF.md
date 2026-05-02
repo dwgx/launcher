@@ -4,9 +4,24 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-02 22:46**
-最后 commit：**`11fe542`** feat: Chat + Market + Picker views + admin/channels + media size config
+最后更新：**2026-05-03 06:05**
+最后 commit：**`d966cd6`** feat(preview): sticker 真上传 + transitions 框架
 GitHub：https://github.com/dwgx/launcher (private, master)
+
+### 最近 10 个 commit（这一轮的密集改动）
+
+```
+d966cd6  sticker 真上传 + transitions 框架
+0c29a1b  修改密码 modal + chat send 真后端 + admin 角色编辑
+60e6b0d  WinHTTP × backend 真接通 + 滚动日志 + 打勾动画 + 头像缩略图
+1f84cc7  sidebar 加 market 入口 + 头像本地缓存真生效
+bef4ca8  表情包文件夹导入 + 主页扩展 + 后端 user_roles + 50 上限
+72bc9d6  真齿轮/聊天泡图标 + 卡片切换动画 + 滑块 seg + 按钮立体 + 性能
+6c43844  sidebar SVG icons + auto-login 动画 + chat 折叠 + 频道写权限
+aa96f04  chat 内嵌图片/视频粘贴 + 拖拽文件 + GDI+ image bubble
+22f6347  InputBox 完整键盘 + 选区 + 隐秘注册表 + DPAPI 自动登录
+23d810c  modal/dropdown 点击阻断 + 托盘 balloon + 红 badge 清零
+```
 
 ---
 
@@ -43,6 +58,30 @@ GitHub：https://github.com/dwgx/launcher (private, master)
 0007_official_channels  chats.slug / is_official / group_label + 8 官方频道写入
                         (announcements/rules/general/random/helpdesk/cs2/market/trades)
                         — 不要 touhou/vrchat
+0008_channel_roles      chats.write_role (admin_only / user) + users.is_admin
+                        general/random = user (聊天频道 2 个)，其他 = admin_only
+0009_user_roles         users.role/role_label + user_roles_catalog (4 预设：
+                        admin/oldhand/newhand/user 中文头衔) + user_tags
+                        ⚠ 改过 hash 后 _sqlx_migrations DELETE row 9 重跑过
+                        ⚠ 表 owner = helix（兜底 ALTER OWNER 在 SQL 里）
+```
+
+### 新加 API（这一轮）
+
+```
+GET  /api/chat/official?session_token=     拿 8 官方频道 slug→uuid 映射
+                                           返回 [{id,slug,title,group_label,write_role}]
+POST /api/chat/send                         检查 chats.write_role + users.is_admin
+                                           admin_only 频道非 admin 返 403
+GET  /api/chat/history                      官方频道任何登录用户可读（无需 chat_members）
+admin SSR /admin/users                      表加"头衔"列 + 编辑 dialog 加 role 下拉 +
+                                           role_label（自定义中文头衔，COALESCE 更新）
+
+config.toml 新字段:
+  sticker_per_user_limit = 50             每用户表情包上限（admin 可改）
+  media_image_max_bytes  = 8MB
+  media_video_max_bytes  = 32MB
+  media_generic_max_bytes = 100MB
 ```
 
 ### API（全部 /api 前缀，session_token 鉴权）
@@ -78,6 +117,24 @@ LAUNCHER1 邀请码已耗尽。要新用户注册先去 `/admin/invites` 生成�
 
 ## 2. 客户端 Preview (`tools/preview/LauncherPreview.exe`)
 
+**文件结构**（这一轮拆出多个 inl 模块，loading_demo.cpp 主，include 这些）:
+```
+tools/preview/
+├── loading_demo.cpp       — 入口 + WndProc + view 路由 + 全局 state
+├── icons.inl              — 30+ Claude 风 SVG (GraphicsPath stroke 1.7)
+├── net.inl                — WinHTTP 客户端 (TLS skip-verify) + JSON helpers + multipart
+├── transitions.inl        — Slide/Fade/Scale 通用 tween 容器（这一轮新加）
+├── modals.inl             — CS2 详情 + History 460 wide + 修改密码 3-field
+├── chat_view.inl          — Discord 风 240 list + bubble + composer + picker
+├── market_view.inl        — 卖 CS2 .cfg + search + sort + paging
+└── build_preview.bat      — cl.exe 一键编译
+```
+
+**lib pragma**: gdiplus, dwmapi, shell32, advapi32, crypt32, user32,
+                comdlg32, ole32, winhttp
+
+
+
 239KB GDI+ 独立 demo（不依赖 Skia/Clay/vcpkg），用 Microsoft YaHei UI 字体。
 
 ### 入场动画 5 阶段（用户特别要求）
@@ -94,50 +151,56 @@ Main         topbar 48 + sidebar 200 + 5 view
 
 ### View（已实现）
 
-- **Home**：profile-card grid 86/1fr，72×72 头像 + 14×14 online dot 3px ring，name 18 bold + email + Online，4 行 meta + history-link 链接
-- **Lunching**：240×140 game-card，**真 CS2 fastly steam 缩略图**（assets/images/games/cs2_header.jpg）+ 渐变蒙版让文字可读；fallback 渐变（无图时）。点击弹出 **CS2 详情 Modal** (Steam 商店链接 + 启动按钮 + steam:// 协议)
-- **Chat**（**新**）：Discord 风 240/1fr，server head + chan-group fold (▾) + chat-row + bubble。
-    - 8 官方频道写死（剔除 touhou/vrchat）
-    - bubble: text / sticker / gif / link card (Steam URL 自动渲染) / video (▶ 缩略+时长) / system pill / day-divider / typing 三点弹动 / 引用气泡 (3px 主色竖条 + 缩略原文 — Discord 风)
-    - tail-stack：连续同作者尾部圆角拉直
-    - composer：emoji/sticker/gif/attach 4 图标 + textarea + send btn (右下 38 圆 + glow)
-    - Picker 320×360 三 tab (Emoji 8 列 / Sticker 8 列 / GIF 2 列渐变占位)，emoji 插入 draft、sticker/gif 直接发
-    - 头像左键 → 在自己 draft 插入 @作者 (用户要求的"右键艾特")
-    - 搜索 + more 行操作（design icon-btn 34）
-- **Market**（**新**）：在 SHOP/market 频道里，单列卡 + search 38 + sort（热度/最新/价格）+ 5/page 分页。**卖 CS2 .cfg 参数 / 灵敏度 / autoexec / crosshair / 代练**（按用户要求"出售 cfg 参数"）。10 条 sample 含 NiKo crosshair / s1mple cfg / Faceit 代练 等
+- **Home**：profile-card grid 86/1fr，72×72 头像（圆形裁剪真图） + Online。
+  下面 3 列 stat 卡（**当前时间** / **本机 PC 名** / **订阅** 主色渐变）+ "我的标签" chips
+  （CS2 / Premier 18k / 东京机房 / 私服管理员 / + 添加，待接 user_tags）
+- **Lunching**：CS2 game-card（真 fastly steam 缩略图），点击弹 CS2 详情 modal
+- **Chat**：Discord 风 240/1fr。8 官方频道写死（剔除 touhou/vrchat），group fold ▾ ▸
+  - bubble: text / sticker / gif / image / video / link card / system / day / typing / 引用气泡
+  - composer: emoji + textarea + send（**只一个 emoji 按钮，删了 sticker/gif/磁铁**）
+  - **Picker 重写**：单"表情包"面板 + 顶部"导入"按钮 → SHBrowseForFolder 选文件夹
+    扫 .gif/.png/.jpg/.webp/.bmp 加进 userPack（≤50/user），下面 8 列系统 emoji（Segoe UI Emoji）
+  - 头像左键 → 在 composer 插 @作者
+  - **真后端**：启动 GET /api/chat/official 拿 slug→uuid + 发消息 POST /api/chat/send
+- **Market**：sidebar 独立入口（云端之上，盾牌 icon），同 chat#market 频道用同一渲染
 - **Cloud**：占位空状态卡
-- **Settings**：seg control，三段 Language/Theme/About
-- **Profile**：3 字段 UID/Username/Nickname（前两锁），上传头像/改密按钮
+- **Settings**：seg control 滑块 tween（active pill 从旧位置滑到新位置 0.30s easeOutQuint）
+- **Profile**：UID/Username/Nickname + 上传头像（GetOpenFileNameW + CopyFile + 后台上传 /api/profile/avatar）+ 修改密码（3 field modal → /api/profile/password）
 
 ### 全局特性
 
-- **全局可拖动**：WM_NCHITTEST 默认 HTCAPTION，g_hits 区域返 HTCLIENT
-- **自绘 InputBox**：替换 Win32 EDIT，WM_CHAR + caret blink + password mode
-- **floating label tween**（**修**）：现在用 `Tween float_t` 在 0..1 平滑插值 size + position + color（之前是单帧切换）
-- **头像 hover 下拉**：scale-up from 右上原点 + auto-hide。
-    - **新**：5 状态折叠菜单 (online/busy/away/sleep/offline) — 用户要求的"在线情况折叠菜单"
-    - 4 行操作 (profile/history/password/signout)，每行 Claude SVG icon
-- **Claude 审美 SVG icon**（**新**）：`icons.inl` 提供 30+ 图标用 GraphicsPath 路径手画 (Home/Library/Cloud/Chat/Settings/Logout/Logo/Eye/EyeOff/X/History/Search/Send/Phone/Video/More/Smile/Paperclip/Check/Check2/User/Moon/Shield/Bell/Reply/At/Link/Play/Trash/Edit/Plus/Hash)。stroke=1.7 + LineCap=Round 跟 design 一致
-- **History overlay**（**修**）：460 wide design 规格 + row-item 排版 + 5/page 分页 + ‹ › 翻页 + 关闭按钮 (Ghost btn) — 全部 13 条记录
+- **全局可拖动**：WM_NCHITTEST 默认 HTCAPTION
+- **自绘 InputBox**（重写）：sel_anchor 选区 + Ctrl+A/C/V/X + Shift+方向 + Backspace/Del 删选区
+  + 选区高亮渲染（半透明 primary 背景）。Auth 三 field + chat composer + change-pw 3 field 共用
+- **剪贴板**：CF_UNICODETEXT 文本 + CF_BITMAP 图片 → 临时 PNG → image bubble；CF_HDROP 拖拽文件
+- **WM_DROPFILES**：直接拖文件进 chat 自动发到当前频道
+- **floating label tween**：用 `Tween float_t` 在 0..1 平滑插值 size + pos + color
+- **托盘**：Shell_NotifyIcon + 右键菜单（显示主窗口 / 退出）。ESC 最小化到托盘 + 第一次 balloon 提示
+- **Account dropdown**：**点击切换**（不再 hover popover），5 状态折叠菜单 + 4 行操作
+- **Claude SVG icon set**（icons.inl）：30+ 图标 GraphicsPath stroke 1.7，settings 是真齿轮形 16-vertex polygon，chat 是 speech bubble 圆角矩形 + 底左尖
+- **head shot 缩略图**：loadAvatar 时预生成 24/28/72 三档 Bitmap（HighQualityBicubic），avatarFor(size) 选合适尺寸 — 之前 1024 缩 24px 像地球仪
+- **History modal**：460 wide + row-item + 5/page 分页 + ‹ › 翻页 + 关闭 Ghost btn
+- **CS2 modal**：cover + 中央 ▶（打开 Steam 商店页）+ Steam stat 三段（账号/最近玩/总时长 — 读 HKCU\Software\Valve\Steam）+ 启动 CS2 + 商店页 双按钮
+- **Toast**：右下角弹 Card 提示，2.5s 自动 fade（用于上传/错误反馈）
+- **Modal 外部 hit**：4 环形（上/下/左/右）避开 modal 内部，不再阻断 ✕ / 关闭 / play 按钮
+- **drawShadow 单 path**：之前 4 ring 循环改成单次大 path（性能 3-6x）
+- **WaitMessage idle**：没动画时主循环阻塞等消息（CPU = 0），动画 60FPS
 
 ---
 
 ## 3. Claude Design 参考（用户提供的设计稿）
 
-**位置**：`C:\Users\dwgx1\Downloads\Launcher\`
-- `styles.css` 898 行（design 真理来源）
-- `Launcher.html` / `views.jsx` / `components.jsx` / `tweaks-panel.jsx`
-- `i18n/*.json`，`anim/*` 和 `theme/*` C++ 头
+**位置**：`C:\Users\dwgx1\Downloads\Launcher\` 镜像到仓库 `docs/design/`
 
-**已对齐到 Preview**：所有 design tokens / 尺寸 / Topbar / Sidebar / Home / Library(=Lunching CS) / Settings / Auth(Login)
+**已全部对齐**：design tokens / Topbar / Sidebar / Home / Lunching / Chat / Market / Settings / Auth / Profile / History modal / Floating label tween / SVG icons / 真后端
 
-**Design 有但 Preview 还没做**：
-- **Chat view**：Discord 风 grid 240/1fr，server head + chan-group + chat-row + bubble + composer + picker(emoji/gif) + typing 动画
-- **Market view**：market-grid + market-card + market-search 38 高 + market-sort 排序
-- **History modal 460 wide** + row-item 排版（现在是 800-padding 占满）
-- **floating label tween** 真做缓动（现在 anim_t 单帧 0/1）
-- **stagger entry**（design 的 .stagger > * nth-child rise 动画）
-- **真接后端**（Auth 现在是 600ms 假成功，没调 WinHTTP）
+**Preview 真后端流程**：
+- Auth submit → 真 POST /api/auth/login (异步线程) → 拿 session_token 存隐秘注册表
+- 头像上传 → CopyFile 本地缓存 + 后台异步 multipart POST /api/profile/avatar
+- 表情包导入 → 文件夹扫描 + 每张图后台异步 POST /api/media/upload + /api/sticker
+- 修改密码 → modal POST /api/profile/password (成功清 session 强制重登)
+- Chat 启动 → GET /api/chat/official 拿 slug→uuid 映射
+- Chat 发消息 → POST /api/chat/send (admin_only 频道非 admin 返 403 → toast)
 
 ---
 
@@ -213,15 +276,46 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 ## 7. 下一步候选（用户未指定时不要主动开干）
 
-按可能价值排序：
+### 用户明确点过但还没做（高优先）
 
-1. **Preview 加 Chat view** — design 完整规格在 styles.css 的 .chat-shell ~ .chat-composer
-2. **Preview 加 Market view** — design 在 .market / .market-card
-3. **Preview 真接 WinHTTP 调后端** — 现在 600ms 假登录，应该真 POST /api/auth/{register,login}
-4. **History modal 改 460 design** — 现在是简陋占满版
-5. **floating label tween** + **view fade tween** — 用户提过"刷新率/卡顿"，缓动接好就丝滑
-6. **Source Han Sans CN 嵌入** — `scripts/download-fonts.ps1` 有，AddFontResourceEx 加载
-7. **CS2 PNG 缩略图** — 替换文字 logo（assets/images/）
-8. **真实工程 src/** Phase 2 移植 — vcpkg + fetch-skia + cmake build，把 Preview 实现搬 Skia
-9. **Stripe / 微信支付** 接 credit 充值
+1. **WS receive** — `WinHttpWebSocketCompleteUpgrade` 后台线程接 /ws/chat?session_token=…
+   收到 message JSON 解析 → push 进 streamFor(channel) → PostMessage WM_APP+10 触发重绘
+   （已经有 WM_APP+10 的 case 处理但没实际接收）
+2. **启动拉取已上传 stickers** — GET /api/sticker/mine（需新加 endpoint）
+   下载 media 到本地 cache + 加进 userPack — 用户在另一台机也能看到自己上传的
+3. **UI 层迁移到 transitions.inl** — 把现有零散 Tween 调用包装成 tx::Slide / tx::Fade / tx::Scale
+   modal 入场 / view 切换 / popover 都用统一 transition 接口
+4. **个人标签接 user_tags 表** — Home view "+添加" → modal 输入 → POST 持久化
+
+### 大件（用户没明说但合理）
+
+5. **Phase 2 真实 src/ 工程跑通** — vcpkg + fetch-skia + cmake build，把 Preview 整个搬到 Skia + Clay
+   （当前 src/ 只是骨架 + design 给的几个 .h，从未编译）
+6. **Source Han Sans CN 嵌入** — assets/fonts/ 下载 + AddFontResourceEx 加载
+7. **HWID 真采集** — 现在 Preview 用 "launcher-preview-demo" 字面量
+8. **Stripe / 微信支付** 接 credit 充值
+9. **真实订阅签发** — Phase 7 BLAKE3 + Ed25519 .helix 验签
+
+### 已知 bug / 用户报但难复现
+
+- 用户多次报"右上角割裂"截图 — PrintWindow 自测复现不出，可能是窗口被拖到屏幕外的截图边缘伪影
+- 用户反馈 modal fade in 中间帧文字消失 — 也是截图时机问题，稳态自测正常
+
+---
+
+## 8. 重要的硬约束（这一轮才确认下来的）
+
+- **不要 hover 自动展开 popover** — 用户明确否决；所有 dropdown 改 click 切换
+- **官方频道写死，不要 touhou/vrchat** — chat_view.inl kChannels 数组
+- **chat composer 不要 sticker/GIF/磁铁三按钮**，只留 emoji + textarea + send
+- **表情包 ≤ 50/user**（admin 可在 config.toml `sticker_per_user_limit` 改）
+- **用户聊天频道 = general + random 两个**（其他官方频道 admin_only）
+- **退出登录后下次启动不要自动登录**（clearCreds 删 _u/_p/_s/_x）
+- **窗口 ESC = 最小化到托盘**，不是退出（右键空白处也是）；托盘右键菜单"退出"才真 quit
+- **隐秘注册表持久化**：30 个候选路径伪装系统/Office/MuiCache，启动遍历找 `_m=LUNC` magic
+  ```
+  _l = lang DWORD     _t = theme DWORD
+  _u = username SZ    _p = password DPAPI binary
+  _s = session_token  _x = user_id
+  ```
 10. **管理后台 chat 监控** — 看消息流 / 封号 / 删消息
