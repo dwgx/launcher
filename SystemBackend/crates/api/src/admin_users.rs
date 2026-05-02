@@ -193,10 +193,39 @@ async fn user_edit_submit(
     Redirect::to("/admin/users")
 }
 
+// SSR 重置密码：表单 POST，强制断开该用户所有 session
+#[derive(Deserialize)]
+pub struct ResetPwForm { pub new_password: String }
+
+async fn user_reset_pw_form(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Form(form): Form<ResetPwForm>,
+) -> impl IntoResponse {
+    if form.new_password.len() < 8 {
+        return Redirect::to("/admin/users?err=pw_too_short");
+    }
+    let h = match hashing::hash_password(&form.new_password,
+        s.cfg.argon_memory_kib, s.cfg.argon_iterations) {
+        Ok(v) => v,
+        Err(_) => return Redirect::to("/admin/users?err=hash_failed"),
+    };
+    let _ = sqlx::query!(
+        "UPDATE users SET password_hash=$1, password_changed_at=now() WHERE id=$2",
+        h, id).execute(&s.db).await;
+    let _ = sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id)
+        .execute(&s.db).await;
+    let _ = sqlx::query!(
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.reset_password_form',$1,NULL)",
+        id.to_string()).execute(&s.db).await;
+    Redirect::to("/admin/users?reset=ok")
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin/users",                  get(users_page))
         .route("/admin/users/:id/edit",         post(user_edit_submit))
+        .route("/admin/users/:id/reset-pw",     post(user_reset_pw_form))
         .route("/api/admin/users",              get(list_users))
         .route("/api/admin/users/:id",          post(patch_user))
         .route("/api/admin/users/:id/reset-pw", post(admin_reset_password))

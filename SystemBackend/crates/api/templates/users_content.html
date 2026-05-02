@@ -5,7 +5,7 @@
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="card-title text-base">全部用户</h2>
-        <p class="text-xs opacity-60 mt-1">最近 200 个</p>
+        <p class="text-xs opacity-60 mt-1">最近 200 个 · 操作菜单可改资料 / 重置密码（强制断开所有 session）</p>
       </div>
       <span class="badge badge-outline">{{ users.len() }}</span>
     </div>
@@ -37,11 +37,12 @@
             </td>
             <td class="text-xs opacity-70 font-mono">{{ u.created }}</td>
             <td class="font-mono text-xs opacity-60">{{ u.invite_code }}</td>
-            <td>
-              <details class="dropdown">
+            <td class="space-x-1">
+              <details class="dropdown dropdown-end">
                 <summary class="btn btn-xs btn-ghost">编辑</summary>
                 <form method="post" action="/admin/users/{{ u.id }}/edit"
-                      class="dropdown-content z-[1] menu p-3 shadow bg-base-200 rounded-box w-72 space-y-2">
+                      class="dropdown-content z-[20] menu p-3 shadow-xl bg-base-200 rounded-box w-72 space-y-2">
+                  <span class="text-xs opacity-60">改资料（留空表示不改）</span>
                   <input name="uid"      placeholder="UID 7 数字" value="{{ u.uid }}" class="input input-sm input-bordered" maxlength="7">
                   <input name="username" placeholder="用户名" value="{{ u.username }}" class="input input-sm input-bordered">
                   <input name="nickname" placeholder="昵称" value="{{ u.nickname }}" class="input input-sm input-bordered">
@@ -54,6 +55,18 @@
                     <option value="1month">1month</option>
                   </select>
                   <button class="btn btn-sm btn-primary">保存</button>
+                </form>
+              </details>
+              <details class="dropdown dropdown-end">
+                <summary class="btn btn-xs btn-ghost text-rose-400">重置密码</summary>
+                <form method="post" action="/admin/users/{{ u.id }}/reset-pw"
+                      class="dropdown-content z-[20] menu p-3 shadow-xl bg-base-200 rounded-box w-72 space-y-2"
+                      onsubmit="return confirm('确认重置 {{ u.username }} 的密码？此操作会强制断开所有 session。')">
+                  <span class="text-xs opacity-60">新密码 ≥ 8 字</span>
+                  <input name="new_password" type="password" placeholder="新密码" required minlength="8"
+                         class="input input-sm input-bordered" autocomplete="new-password">
+                  <button class="btn btn-sm" style="background:#B14444;color:#fff">确认重置</button>
+                  <span class="text-[10px] opacity-50">重置后所有该用户活跃 session 立即失效</span>
                 </form>
               </details>
             </td>
