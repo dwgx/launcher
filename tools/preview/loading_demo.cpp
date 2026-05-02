@@ -26,10 +26,13 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <unordered_map>
+#include <map>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 using namespace Gdiplus;
 
@@ -242,10 +245,61 @@ struct UserInfo {
     const wchar_t* last_login= L"05-02 10:32";
 } g_user;
 
+// Steam 集成 — 从 HKCU\Software\Valve\Steam 读 PersonaName + LastGameNameUsed。
+// 游玩时长精确值要 Steam Web API（需 key），暂占位。
+struct SteamInfo {
+    std::wstring persona;        // 当前 Steam 账号名
+    std::wstring last_game;      // Steam 记录的"上次玩的游戏名"
+    std::wstring last_played;    // CS2 上次启动时间（占位 — 真值在 vdf 里）
+    std::wstring playtime_label; // CS2 总时长（占位）
+    bool resolved = false;
+} g_steam;
+
+void readSteamInfo() {
+    if (g_steam.resolved) return;
+    g_steam.resolved = true;
+    HKEY hk;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        wchar_t buf[256]; DWORD cb = sizeof(buf);
+        if (RegQueryValueExW(hk, L"LastGameNameUsed", nullptr, nullptr, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
+            g_steam.last_game = buf;
+        }
+        cb = sizeof(buf);
+        if (RegQueryValueExW(hk, L"PseudoUUID", nullptr, nullptr, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
+            // PseudoUUID 不是 persona 名 — 只是设备 id
+        }
+        RegCloseKey(hk);
+    }
+    // PersonaName 在 HKCU\Software\Valve\Steam\ActiveProcess\... 没固定，
+    // 真正在 config/loginusers.vdf 文本里 — 这里用 Last user 的注册表 fallback：
+    HKEY hk2;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &hk2) == ERROR_SUCCESS) {
+        DWORD steam_id = 0; DWORD cb = sizeof(steam_id);
+        RegQueryValueExW(hk2, L"ActiveUser", nullptr, nullptr, (LPBYTE)&steam_id, &cb);
+        if (steam_id) {
+            wchar_t fmt[32]; swprintf_s(fmt, 32, L"steamid:%lu", steam_id);
+            g_steam.persona = fmt;
+        }
+        RegCloseKey(hk2);
+    }
+    // CS2 (730) 启动时间 — Steam 不在 reg 暴露；这里给空，后续真接时改成解析
+    // %SteamPath%\userdata\<id>\config\localconfig.vdf 的 "AppLastPlayed"
+    if (g_steam.persona.empty()) g_steam.persona = L"未登录 Steam";
+    if (g_steam.last_played.empty()) g_steam.last_played = L"—";
+    if (g_steam.playtime_label.empty()) g_steam.playtime_label = L"—";
+}
+
 enum class UserStatus { Online, Busy, Away, Sleep, Offline };
 UserStatus g_status = UserStatus::Online;
 bool g_status_fold_open = false;
 Tween g_status_fold_t;
+
+// 托盘 ID + 自定义 message
+constexpr UINT kTrayCallbackMsg = WM_APP + 100;
+constexpr UINT kTrayUid = 1;
+NOTIFYICONDATAW g_nid{};
+bool g_tray_added = false;
+HMENU g_tray_menu = nullptr;
 const wchar_t* statusKey(UserStatus s) {
     switch (s) {
     case UserStatus::Online:  return L"online";
@@ -312,6 +366,30 @@ struct AuthForm {
 // ====================================================================
 // 工具
 // ====================================================================
+// Font cache — 关键性能优化。GDI+ 每次创建 Font 会触发 GDI 字体匹配，
+// 每帧重建会卡到飞起。按 (size, style) 缓存指针，运行期不释放。
+namespace fontcache {
+struct Key {
+    int size_q;
+    int style;
+    bool operator==(const Key& o) const { return size_q == o.size_q && style == o.style; }
+};
+struct KeyHash { size_t operator()(const Key& k) const {
+    return std::hash<int>()(k.size_q) ^ (std::hash<int>()(k.style) << 1); } };
+inline std::unordered_map<Key, Font*, KeyHash>& cacheMap() {
+    static std::unordered_map<Key, Font*, KeyHash> g; return g;
+}
+inline Font* get(float size_pt, FontStyle style = FontStyleRegular) {
+    Key k{ (int)(size_pt * 4.0f + 0.5f), (int)style };
+    auto& m = cacheMap();
+    auto it = m.find(k);
+    if (it != m.end()) return it->second;
+    Font* f = new Font(kFontFace, size_pt, style, UnitPoint);
+    m.emplace(k, f);
+    return f;
+}
+}  // namespace fontcache
+
 void buildRoundRect(GraphicsPath& p, REAL x, REAL y, REAL w, REAL h, REAL r) {
     p.Reset();
     p.AddArc(x, y, r*2, r*2, 180, 90);
@@ -340,16 +418,14 @@ void drawShadow(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r,
 void drawText_(Graphics& g, const wchar_t* text, REAL x, REAL y, REAL w,
                float size, Color color,
                StringAlignment ha = StringAlignmentNear, FontStyle fs = FontStyleRegular) {
-    Font font(kFontFace, size, fs, UnitPoint);
     SolidBrush b(color);
     StringFormat fmt; fmt.SetAlignment(ha);
     RectF r(x, y, w, size * 3);
-    g.DrawString(text, -1, &font, r, &fmt, &b);
+    g.DrawString(text, -1, fontcache::get(size, fs), r, &fmt, &b);
 }
 RectF measureText(Graphics& g, const wchar_t* text, float size, FontStyle fs = FontStyleRegular) {
-    Font font(kFontFace, size, fs, UnitPoint);
     RectF bbox;
-    g.MeasureString(text, -1, &font, PointF(0, 0), &bbox);
+    g.MeasureString(text, -1, fontcache::get(size, fs), PointF(0, 0), &bbox);
     return bbox;
 }
 std::wstring W(const char* utf8) {
@@ -1342,6 +1418,51 @@ void enterMainStage() {
 void enterExpandingStage() { enterExpandLoadingStage(); }
 
 // ====================================================================
+// 托盘 — Shell_NotifyIcon + 右键弹出菜单（显示主窗口 / 退出）
+// ====================================================================
+void trayAdd(HWND hwnd) {
+    if (g_tray_added) return;
+    ZeroMemory(&g_nid, sizeof(g_nid));
+    g_nid.cbSize = sizeof(g_nid);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = kTrayUid;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = kTrayCallbackMsg;
+    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wcscpy_s(g_nid.szTip, L"Launcher");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    g_tray_added = true;
+}
+void trayRemove() {
+    if (!g_tray_added) return;
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+    g_tray_added = false;
+}
+void hideToTray(HWND hwnd) {
+    trayAdd(hwnd);
+    ShowWindow(hwnd, SW_HIDE);
+}
+void showFromTray(HWND hwnd) {
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+}
+void showTrayMenu(HWND hwnd) {
+    if (!g_tray_menu) {
+        g_tray_menu = CreatePopupMenu();
+        AppendMenuW(g_tray_menu, MF_STRING, 1001, L"显示主窗口");
+        AppendMenuW(g_tray_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(g_tray_menu, MF_STRING, 1002, L"退出");
+    }
+    POINT pt; GetCursorPos(&pt);
+    SetForegroundWindow(hwnd);
+    UINT cmd = TrackPopupMenu(g_tray_menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        pt.x, pt.y, 0, hwnd, nullptr);
+    if (cmd == 1001) showFromTray(hwnd);
+    else if (cmd == 1002) { trayRemove(); PostQuitMessage(0); }
+}
+
+// ====================================================================
 // WndProc
 // ====================================================================
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1359,11 +1480,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int nx = LOWORD(lp), ny = HIWORD(lp);
             if (nx == g_mouse.x && ny == g_mouse.y) break;
             g_mouse.x = nx; g_mouse.y = ny;
-            // 不在每次 mousemove invalidate；主循环 60Hz 已经会重画
+            // hover 状态需要实时更新；GDI+ dirty region 会 batch invalidate
+            InvalidateRect(hwnd, nullptr, FALSE);
             break;
         }
         case WM_LBUTTONUP: {
             POINT p { LOWORD(lp), HIWORD(lp) };
+            // 任何点击都会重置 chat composer focus；hit 处理时如果落在 textarea 会再 set true
+            chatv::g_focus_composer = false;
             for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
                 if (inRect(p, it->rect)) {
                     if (it->on_click) it->on_click();
@@ -1372,6 +1496,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             break;
+        }
+        case kTrayCallbackMsg: {
+            UINT ev = LOWORD(lp);
+            if (ev == WM_LBUTTONUP) showFromTray(hwnd);
+            else if (ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU) showTrayMenu(hwnd);
+            return 0;
         }
         case WM_CHAR:
             if (g_stage == Stage::Auth) {
@@ -1422,7 +1552,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 else if (g_auth_form.focus == 1) g_auth_form.password.onKey((int)wp);
                 else if (g_auth_form.focus == 2) g_auth_form.invite.onKey((int)wp);
             }
-            // ESC：关 modal / overlay；什么都没开就退出
+            // ESC：关 modal / overlay / picker；都没开 → 最小化到系统托盘
             if (wp == VK_ESCAPE) {
                 if (modal::g_cs2_open) {
                     modal::closeCS2();
@@ -1433,7 +1563,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     chatv::g_picker_open = false;
                     chatv::g_picker_t.start(chatv::g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                 } else {
-                    PostQuitMessage(0);
+                    hideToTray(hwnd);
                 }
             }
             // 不再绑定 1-5 / D / H / S / P — 全部用鼠标 / sidebar
@@ -1468,13 +1598,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc; GetClientRect(hwnd, &rc);
             int Wpx = rc.right - rc.left, Hpx = rc.bottom - rc.top;
-            HDC mem = CreateCompatibleDC(hdc);
-            HBITMAP bmp = CreateCompatibleBitmap(hdc, Wpx, Hpx);
-            HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-            Graphics g(mem);
+            // Backbuffer 缓存：避免每帧 CreateCompatibleBitmap/DC（GDI 资源昂贵）。
+            // 窗口尺寸变化时才重建。
+            static HDC s_mem = nullptr;
+            static HBITMAP s_bmp = nullptr;
+            static HBITMAP s_old = nullptr;
+            static int s_w = 0, s_h = 0;
+            if (!s_mem || s_w != Wpx || s_h != Hpx) {
+                if (s_mem) {
+                    SelectObject(s_mem, s_old);
+                    DeleteObject(s_bmp);
+                    DeleteDC(s_mem);
+                }
+                s_mem = CreateCompatibleDC(hdc);
+                s_bmp = CreateCompatibleBitmap(hdc, Wpx, Hpx);
+                s_old = (HBITMAP)SelectObject(s_mem, s_bmp);
+                s_w = Wpx; s_h = Hpx;
+            }
+            Graphics g(s_mem);
             g.SetSmoothingMode(SmoothingModeAntiAlias);
             g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-            g.SetCompositingQuality(CompositingQualityHighQuality);
+            g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
             if (g_stage == Stage::Dot)             paintDot(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandLoading) paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::Loading)    paintLoading(g, Wpx, Hpx);
@@ -1483,13 +1628,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (g_stage == Stage::Auth)       paintAuthView(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandMain) paintAuthView(g, Wpx, Hpx);
             else                                    paintMain(g, Wpx, Hpx);
-            BitBlt(hdc, 0, 0, Wpx, Hpx, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem);
+            BitBlt(hdc, 0, 0, Wpx, Hpx, s_mem, 0, 0, SRCCOPY);
             EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_RBUTTONUP:  PostQuitMessage(0); return 0;
-        case WM_DESTROY:    PostQuitMessage(0); return 0;
+        case WM_RBUTTONUP:  hideToTray(hwnd); return 0;
+        case WM_DESTROY:    trayRemove(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -1622,7 +1766,6 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             if (g_window_w.done()) enterMainStage();
         }
 
-        // 是否有动画在跑 — 若都已完成且不在 stage 转换 → idle 模式
         auto active = [](const Tween& t){ return t.started && !t.done(); };
         bool any_anim = active(g_card_scale) || active(g_card_opacity) || active(g_card_fade_out)
             || active(g_window_w) || active(g_window_h)
@@ -1635,20 +1778,18 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
             || active(g_auth_form.username.float_t)
             || active(g_auth_form.password.float_t)
             || active(g_auth_form.invite.float_t);
-        // loading spinner 在 Loading 阶段也要持续刷
-        bool always_anim = (g_stage != Stage::Main);
-        // chat typing dots / focus caret blink 在 main 时也要持续，但只 chat view 才有 typing
-        bool chat_active = (g_stage == Stage::Main && g_view == View::Chat);
-        bool needs_paint = any_anim || always_anim || chat_active || g_account_dropdown;
+        // 入场阶段 + chat (typing dots / caret) 一直要画
+        bool always_anim = (g_stage != Stage::Main)
+            || (g_stage == Stage::Main && g_view == View::Chat && chatv::g_focus_composer);
+        bool needs_paint = any_anim || always_anim;
 
         if (needs_paint) {
             InvalidateRect(g_hwnd, nullptr, FALSE);
             Sleep(16);   // 60 FPS
         } else {
-            // 静止状态：低功耗轮询，鼠标移动会触发 mousemove 但不再 invalidate
-            // 所以这里需要在 hover 状态变化时重画。简化为 30FPS 轮询。
-            InvalidateRect(g_hwnd, nullptr, FALSE);
-            Sleep(33);
+            // 真静止：完全不主动 invalidate，等鼠标 / 键盘事件触发。
+            // WaitMessage 阻塞到下一个消息，CPU = 0
+            WaitMessage();
         }
     }
 end:

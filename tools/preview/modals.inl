@@ -124,64 +124,93 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
     icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18, fade(Color(255, 255, 255, 255)));
     hit(xr, [](){ closeCS2(); }, true);
 
+    // 中央 play btn 改为打开 Steam 商店页（带视频自动播放）—
+    // 异步 ShellExecute 不阻塞主线程，失败 silent
+    hit(RectF(pbx, pby, 56.0f, 56.0f), [](){
+        ShellExecuteW(nullptr, L"open",
+            L"https://store.steampowered.com/app/730/CounterStrike_2/",
+            nullptr, nullptr, SW_SHOWNORMAL);
+    }, true);
+
     // 内容区
+    readSteamInfo();
     float bx = mx + 28;
-    float by = my + cover_h + 18;
+    float by = my + cover_h + 22;
     drawText_(g, L"Counter-Strike 2", bx, by, mw - 56,
               18.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
-    drawText_(g, L"Valve · 1.40.1.5  ·  CS2 (csgo 迷徒重集 你已被剧导调路)",
+    drawText_(g, L"Valve · Source 2 引擎",
               bx, by + 28, mw - 56, 9.0f, fade(pal.text_muted));
 
-    // 三段 stat
-    float sty = by + 56;
-    struct Stat { const wchar_t* k; const wchar_t* v; };
+    // 三段 stat — 真值从 Steam reg 读
+    float sty = by + 60;
+    struct Stat { const wchar_t* k; std::wstring v; };
     Stat stats[] = {
-        { L"上次启动", L"05-02 10:32" },
-        { L"游戏时长", L"1284 小时" },
-        { L"已订阅",   L"1 周" },
+        { L"上次玩",   g_steam.last_played },
+        { L"总时长",   g_steam.playtime_label },
+        { L"Steam",   g_steam.persona },
     };
     float sw = (mw - 56) / 3;
     for (int i = 0; i < 3; ++i) {
         float sx = bx + i * sw;
         drawText_(g, stats[i].k, sx, sty, sw, 8.0f, fade(pal.text_muted));
-        drawText_(g, stats[i].v, sx, sty + 14, sw, 11.0f, fade(pal.text),
+        drawText_(g, stats[i].v.c_str(), sx, sty + 16, sw - 12, 10.5f, fade(pal.text),
                   StringAlignmentNear, FontStyleBold);
     }
 
     // 描述
-    drawText_(g, L"经典战术 FPS 已升级至 Source 2 引擎。本订阅含完整启动器接管 + cfg 管控。\n点击播放按钮观看官方宣传片，或通过下方按钮直接启动 Steam 上的 CS2。",
-              bx, sty + 56, mw - 56, 8.5f, fade(pal.text_muted));
+    drawText_(g, L"经典战术 FPS。订阅含 cfg 管控、灵敏度同步与启动器接管。点击中央播放按钮观看官方宣传片。",
+              bx, sty + 50, mw - 56, 8.5f, fade(pal.text_muted));
 
-    // 底部按钮
-    float btny = my + mh - 60;
-    RectF launch(bx, btny, 140, 40);
-    bool lhov = inRect(g_mouse, launch);
-    Color lbg = lhov ? fade(pal.primary_hover) : fade(pal.primary);
-    Color lglow(80, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    drawShadow(g, launch.X, launch.Y, launch.Width, launch.Height, 10, lglow, 4, 3);
-    fillRR(g, launch.X, launch.Y, launch.Width, launch.Height, 10, lbg);
-    icons::drawSvg(g, icons::Name::Play, launch.X + 14, launch.Y + 11, 18,
-                   Color(255, 255, 255, 255));
-    drawText_(g, L"启动", launch.X + 36, launch.Y + 13, launch.Width - 36, 10.0f,
-              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentNear, FontStyleBold);
-    hit(launch, [](){
-        // 真启动用 ShellExecute 打开 steam:// 协议
+    // 底部按钮 — 重新排版避免重叠：每个按钮 icon (18) + gap 10 + label 文字
+    float btny = my + mh - 64;
+    float btn_h = 42.0f;
+    auto drawBtn = [&](float bx_, float bw_, bool primary, icons::Name icon,
+                       const wchar_t* label, std::function<void()> click) {
+        bool hov = inRect(g_mouse, RectF(bx_, btny, bw_, btn_h));
+        Color bg, fg;
+        if (primary) {
+            bg = hov ? fade(pal.primary_hover) : fade(pal.primary);
+            fg = Color((BYTE)(255 * t), 255, 255, 255);
+            Color glow(80, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+            drawShadow(g, bx_, btny, bw_, btn_h, 10, glow, 4, 3);
+        } else {
+            bg = hov ? fade(pal.bg) : fade(pal.card);
+            fg = fade(pal.text);
+        }
+        fillRR(g, bx_, btny, bw_, btn_h, 10, bg);
+        if (!primary) strokeRR(g, bx_, btny, bw_, btn_h, 10, fade(pal.divider));
+
+        // 测算 label 宽度（用 caching font）
+        Font* f = fontcache::get(10.0f, FontStyleBold);
+        RectF mb;
+        g.MeasureString(label, -1, f, PointF(0, 0), &mb);
+        const float ico_w = 18.0f, gap = 10.0f;
+        float total = ico_w + gap + mb.Width;
+        float content_x = bx_ + (bw_ - total) / 2.0f;
+        float content_y = btny + (btn_h - 18.0f) / 2.0f;
+        icons::drawSvg(g, icon, content_x, content_y, ico_w, fg);
+        // 文字 baseline 与 icon 中心对齐
+        SolidBrush brush(fg);
+        StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
+        g.DrawString(label, -1, f,
+                     RectF(content_x + ico_w + gap, btny + (btn_h - mb.Height) / 2.0f,
+                           mb.Width + 4.0f, mb.Height + 2.0f), &fmt, &brush);
+
+        hit(RectF(bx_, btny, bw_, btn_h), click, true);
+    };
+
+    // 两个等宽按钮 + 中间 gap
+    float gap = 12.0f;
+    float total_w = mw - 56.0f;
+    float btn_w = (total_w - gap) / 2.0f;
+    drawBtn(bx, btn_w, true, icons::Name::Play, L"启动 CS2", [](){
         ShellExecuteW(nullptr, L"open", L"steam://run/730", nullptr, nullptr, SW_SHOWNORMAL);
-    }, true);
-
-    RectF stm(bx + 152, btny, 160, 40);
-    bool shov = inRect(g_mouse, stm);
-    Color sbgC = shov ? fade(pal.bg) : fade(pal.card);
-    fillRR(g, stm.X, stm.Y, stm.Width, stm.Height, 10, sbgC);
-    strokeRR(g, stm.X, stm.Y, stm.Width, stm.Height, 10, fade(pal.divider));
-    icons::drawSvg(g, icons::Name::Link, stm.X + 14, stm.Y + 11, 18, fade(pal.text));
-    drawText_(g, L"Steam 商店页", stm.X + 36, stm.Y + 13, stm.Width - 36, 9.5f, fade(pal.text),
-              StringAlignmentNear, FontStyleBold);
-    hit(stm, [](){
+    });
+    drawBtn(bx + btn_w + gap, btn_w, false, icons::Name::Link, L"Steam 商店页", [](){
         ShellExecuteW(nullptr, L"open",
             L"https://store.steampowered.com/app/730/CounterStrike_2/",
             nullptr, nullptr, SW_SHOWNORMAL);
-    }, true);
+    });
 
     // 点 modal 外关闭
     hit(RectF(0, 0, (REAL)Wpx, (REAL)Hpx), [Wpx, Hpx, mx, my, mw, mh](){

@@ -47,66 +47,14 @@ struct Msg {
     int video_seconds{0};
 };
 
-// 各频道默认 sample
+// 频道消息流 — 一律从空开始；后端真正接通后由 WS 推送填充
 std::vector<Msg>& streamFor(const wchar_t* chid) {
-    static std::vector<Msg> g_general = {
-        {MsgKind::DayDivider,L"",L"",L"",L"今天"},
-        {MsgKind::Text, L"yuki", L"yuki", L"online", L"早！谁今晚有空开把 cs2 啊", L"09:42"},
-        {MsgKind::Text, L"yuki", L"yuki", L"online", L"我打 premier 单挑掉分到一个怀疑人生", L"09:42"},
-        {MsgKind::Text, L"reimu",L"博丽灵梦",L"away", L"我！但是 8 点之后", L"09:50"},
-        {MsgKind::Text, L"me",   L"",       L"online",L"+1 等我下班", L"10:01", true},
-        {MsgKind::Text, L"yuki", L"yuki", L"online", L"晚上一起开 cs 吗？", L"10:42"},
-        {MsgKind::Sticker,L"sakuya",L"十六夜咲夜",L"busy",L"🎮", L"10:43"},
-        {MsgKind::Text, L"me",   L"",       L"online",L"开开开 8 点 disc 见", L"10:44", true},
-        // 引用气泡 (Discord 风)
-        {MsgKind::Text, L"reimu",L"博丽灵梦",L"away", L"那我先去打两把热身", L"10:45",
-         false, L"yuki", L"晚上一起开 cs 吗？"},
-        // 链接卡
-        {MsgKind::LinkCard, L"yuki", L"yuki", L"online",
-         L"https://store.steampowered.com/app/730/CounterStrike_2/", L"10:46",
-         false, L"", L"",
-         L"Counter-Strike 2 — Steam", L"store.steampowered.com"},
-        // 视频消息
-        {MsgKind::Video, L"sakuya", L"十六夜咲夜", L"busy",
-         L"highlight_clutch.mp4", L"10:48", false, L"", L"", L"", L"", 14},
-        {MsgKind::Typing, L"yuki", L"yuki", L"online"},
-    };
-    static std::vector<Msg> g_announcements = {
-        {MsgKind::DayDivider,L"",L"",L"",L"今天"},
-        {MsgKind::System, L"system",L"",L"",L"📢 Launcher v0.1.0 已发布"},
-        {MsgKind::Text, L"reimu", L"博丽灵梦", L"away", L"周六晚 8 点联机，记得报名", L"08:00"},
-    };
-    static std::vector<Msg> g_rules = {
-        {MsgKind::DayDivider,L"",L"",L"",L"04-01"},
-        {MsgKind::System, L"system",L"",L"",L"请阅读社区规则"},
-    };
-    static std::vector<Msg> g_random = {
-        {MsgKind::DayDivider,L"",L"",L"",L"今天"},
-        {MsgKind::Text, L"yuki", L"yuki", L"online", L"今天天气不错", L"08:30"},
-    };
-    static std::vector<Msg> g_helpdesk = {
-        {MsgKind::DayDivider,L"",L"",L"",L"今天"},
-        {MsgKind::Text, L"flandre", L"芙兰朵露", L"offline", L"我登录不上 ，help", L"02:14"},
-    };
-    static std::vector<Msg> g_cs2 = {
-        {MsgKind::DayDivider,L"",L"",L"",L"今天"},
-        {MsgKind::Text, L"reimu", L"博丽灵梦", L"away", L"matchmaking 又寄了…", L"09:18"},
-        {MsgKind::Text, L"me",    L"",       L"online", L"steam 又抽风", L"09:20", true},
-    };
-    static std::vector<Msg> g_trades = {
-        {MsgKind::DayDivider,L"",L"",L"",L"04-25"},
-        {MsgKind::Text, L"flandre", L"芙兰朵露", L"offline", L"出 awp ｜印花集 价好", L"03:14"},
-    };
-    static std::vector<Msg> g_empty;
-
-    if (wcscmp(chid, L"general")       == 0) return g_general;
-    if (wcscmp(chid, L"announcements") == 0) return g_announcements;
-    if (wcscmp(chid, L"rules")         == 0) return g_rules;
-    if (wcscmp(chid, L"random")        == 0) return g_random;
-    if (wcscmp(chid, L"helpdesk")      == 0) return g_helpdesk;
-    if (wcscmp(chid, L"cs2")           == 0) return g_cs2;
-    if (wcscmp(chid, L"trades")        == 0) return g_trades;
-    return g_empty;
+    static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
+    auto it = g_streams.find(chid);
+    if (it == g_streams.end()) {
+        it = g_streams.emplace(std::wstring(chid), std::vector<Msg>{}).first;
+    }
+    return it->second;
 }
 
 // ============== 状态 ==============
@@ -276,192 +224,142 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
     }
 
     bool me = (wcscmp(m.from, L"me") == 0);
-    bool isSticker = (m.kind == MsgKind::Sticker);
-    bool isGif = (m.kind == MsgKind::Gif);
-    bool isLink = (m.kind == MsgKind::LinkCard);
-    bool isVideo = (m.kind == MsgKind::Video);
 
-    // 测算文字宽 (text only)
-    float content_w_max = maxw * 0.6f;
-    if (isLink || isVideo) content_w_max = std::min(maxw * 0.72f, 280.0f);
+    // 当前简化为 Text only（sample 数据已清空，未来 sticker/gif/link/video 加回时再扩展）
+    // 用 GDI+ MeasureString 精确测算
+    const float pad_l = 14.0f, pad_r = 14.0f;
+    const float pad_t = 9.0f,  pad_b = 8.0f;
+    const float content_w_max = maxw * 0.62f;
+    const float min_w = 60.0f;
+    std::wstring body_w = m.body ? m.body : L"";
 
-    float bubble_h = 0;
-    float bubble_w = 0;
-    std::wstring body_w = m.body;
+    Font body_font(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
+    StringFormat body_fmt;
+    body_fmt.SetAlignment(StringAlignmentNear);
 
-    if (isSticker) {
-        bubble_h = 64; bubble_w = 64;
-    } else if (isGif) {
-        bubble_h = 140; bubble_w = 220;
-    } else if (isLink) {
-        bubble_h = 76; bubble_w = 280;
-    } else if (isVideo) {
-        bubble_h = 160; bubble_w = 240;
-    } else {
-        // 简单换行：按宽度估算行数
-        float meas = measureText(g, body_w.c_str(), 9.5f).Width + 50; // +meta
-        bubble_w = std::min(meas + 24, content_w_max);
-        int approx_chars_per_row = (int)((bubble_w - 24) / 7.0f);
-        if (approx_chars_per_row < 8) approx_chars_per_row = 8;
-        int rows = std::max(1, (int)body_w.size() / approx_chars_per_row + 1);
-        bubble_h = (float)(rows * 18 + 16);
-    }
+    // 第一遍：单行宽度
+    RectF unbounded(0, 0, 4096.0f, 4096.0f);
+    RectF measured;
+    g.MeasureString(body_w.c_str(), -1, &body_font, unbounded, &body_fmt, &measured);
+    float wanted_w = measured.Width + pad_l + pad_r;
 
     bool has_reply = m.reply_excerpt && m.reply_excerpt[0];
-    if (has_reply) bubble_h += 26;
+    bool show_author = !me && m.author && m.author[0] && !prev_same_author;
 
-    // 作者名（群聊 + 不是连续相同作者 + 不是自己 + 非贴纸gif）
-    bool show_author = !me && m.author && m.author[0] && !prev_same_author && !isSticker && !isGif;
-    if (show_author) bubble_h += 16;
+    // 时间 meta 估算
+    Font meta_font(kFontFace, 7.5f, FontStyleRegular, UnitPoint);
+    RectF meta_box;
+    g.MeasureString(m.time ? m.time : L"", -1, &meta_font, unbounded, &body_fmt, &meta_box);
+    float meta_w = meta_box.Width + (me ? 16.0f : 0.0f);   // me 多留双勾空间
+    // 文字 + meta 不换行能塞下时
+    if (wanted_w + meta_w + 8.0f <= content_w_max) {
+        wanted_w += meta_w + 8.0f;
+    }
+    float bubble_w = std::max(min_w, std::min(wanted_w, content_w_max));
 
-    float gutter = 36.0f;
+    // 第二遍：限定宽度后实际行高
+    RectF inner_layout(0, 0, bubble_w - pad_l - pad_r, 4096.0f);
+    g.MeasureString(body_w.c_str(), -1, &body_font, inner_layout, &body_fmt, &measured);
+    float text_h = measured.Height;
+
+    float bubble_h = pad_t + (show_author ? 14.0f : 0.0f)
+                          + (has_reply ? 24.0f : 0.0f)
+                          + text_h
+                          + 16.0f   /* meta line */
+                          + pad_b;
+
+    const float gutter = 38.0f;
     float bubble_x;
     if (me) {
-        bubble_x = x + maxw - 18 - bubble_w;
+        bubble_x = x + maxw - pad_r - bubble_w;
     } else {
-        bubble_x = x + 4 + gutter;
+        bubble_x = x + gutter;
     }
 
-    // 头像（只在第一条画）
+    // 头像（仅非自己 + 非连续）
     if (!me && !prev_same_author) {
-        drawAvatar(g, x + 4, y + bubble_h - 28, 14, m.author, m.status, pal);
-        // 头像右键 hit area → at menu
+        drawAvatar(g, x, y + bubble_h - 28.0f, 14.0f, m.author, m.status, pal);
         int idx = msg_index;
-        hit(RectF(x + 4, y + bubble_h - 28, 28, 28), [idx]() {
-            // 左键打开 popover, 这里映射成插入 @
-            std::wstring at = std::wstring(L"@") + chatv::streamFor(g_active)[idx].author + L" ";
-            g_draft += at;
-            g_draft_caret = (int)g_draft.size();
+        hit(RectF(x, y + bubble_h - 28.0f, 28.0f, 28.0f), [idx](){
+            auto& s = chatv::streamFor(g_active);
+            if (idx >= 0 && idx < (int)s.size() && s[idx].author && s[idx].author[0]) {
+                std::wstring at = std::wstring(L"@") + s[idx].author + L" ";
+                g_draft += at;
+                g_draft_caret = (int)g_draft.size();
+                g_focus_composer = true;
+            }
         }, true);
     }
 
-    // 气泡
-    if (isSticker) {
-        Font f(kFontFace, 36.0f, FontStyleRegular, UnitPixel);
-        SolidBrush b(pal.text);
-        StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
-        g.DrawString(m.body, -1, &f, RectF(bubble_x, y, bubble_w, bubble_h), &fmt, &b);
-    } else if (isGif) {
-        // 渐变方块 + GIF 标
-        LinearGradientBrush lg(PointF(bubble_x, y), PointF(bubble_x + bubble_w, y + bubble_h),
-                               Color(255, 0x7C, 0x9D, 0xD9), pal.primary);
-        GraphicsPath gp; buildRoundRect(gp, bubble_x, y, bubble_w, bubble_h, 12);
-        g.FillPath(&lg, &gp);
-        drawText_(g, m.body, bubble_x, y + bubble_h / 2 - 8, bubble_w, 11.0f,
-                  Color(255, 255, 255, 255), StringAlignmentCenter, FontStyleBold);
-        // GIF 标
-        Color tag_bg(140, 0, 0, 0);
-        fillRR(g, bubble_x + 6, y + 6, 28, 14, 4.0f, tag_bg);
-        drawText_(g, L"GIF", bubble_x + 6, y + 6 + 1, 28, 7.5f,
-                  Color(255, 255, 255, 255), StringAlignmentCenter, FontStyleBold);
-    } else if (isLink) {
-        Color cardC = me ? pal.primary : pal.card;
-        fillRR(g, bubble_x, y, bubble_w, bubble_h, 12, cardC);
-        Color barC(255, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-        fillRR(g, bubble_x, y, 3, bubble_h, 1.5f, barC);
-        // host + title + url
-        Color textC = me ? Color(255, 255, 255, 255) : pal.text;
-        Color mutedC = me ? Color(220, 255, 255, 255) : pal.text_muted;
-        drawText_(g, m.link_host, bubble_x + 14, y + 8, bubble_w - 28,
-                  7.5f, mutedC, StringAlignmentNear);
-        drawText_(g, m.link_title, bubble_x + 14, y + 22, bubble_w - 28,
-                  9.0f, textC, StringAlignmentNear, FontStyleBold);
-        drawText_(g, m.body, bubble_x + 14, y + 44, bubble_w - 28,
-                  8.0f, mutedC, StringAlignmentNear);
-        // 链接 icon
-        icons::drawSvg(g, icons::Name::Link, bubble_x + bubble_w - 30, y + bubble_h - 28, 18,
-                       me ? Color(220, 255, 255, 255) : pal.text_muted);
-        // meta
-        drawText_(g, m.time, bubble_x, y + bubble_h - 14, bubble_w - 8,
-                  7.0f, mutedC, StringAlignmentFar);
-    } else if (isVideo) {
-        // 视频缩略 — 简化纯色背景避免 GDI+ LinearGradient + Path 组合开销
-        Color bgC(255, 0x28, 0x24, 0x20);
-        fillRR(g, bubble_x, y, bubble_w, bubble_h, 12, bgC);
-        // 静态 CS2 文字
-        drawText_(g, L"CS2", bubble_x, y + 36, bubble_w, 16.0f,
-                  Color(110, 0xD9, 0x77, 0x57), StringAlignmentCenter, FontStyleBold);
-        // 中央 play 按钮
-        float cx_btn = bubble_x + bubble_w / 2 - 22.0f;
-        float cy_btn = y + (bubble_h - 30) / 2 - 22.0f;
-        SolidBrush pbg(Color(180, 0, 0, 0));
-        g.FillEllipse(&pbg, cx_btn, cy_btn, 44.0f, 44.0f);
-        icons::drawSvg(g, icons::Name::Play, cx_btn + 10, cy_btn + 10, 24,
-                       Color(255, 255, 255, 255));
-        // 底部 meta bar
-        fillRR(g, bubble_x + 8, y + bubble_h - 24, bubble_w - 16, 16, 5.0f,
-               Color(120, 0, 0, 0));
-        drawText_(g, m.body, bubble_x + 14, y + bubble_h - 22, bubble_w - 60,
-                  8.0f, Color(255, 255, 255, 255), StringAlignmentNear);
-        wchar_t dur[16];
-        int sec = m.video_seconds > 0 ? m.video_seconds : 0;
-        swprintf_s(dur, 16, L"%d:%02d", sec / 60, sec % 60);
-        drawText_(g, dur, bubble_x + bubble_w - 50, y + bubble_h - 22, 40,
-                  8.0f, Color(255, 255, 255, 255), StringAlignmentFar, FontStyleBold);
-        drawText_(g, m.time, bubble_x, y + bubble_h - 6, bubble_w - 8,
-                  7.0f, Color(180, 255, 255, 255), StringAlignmentFar);
-        // 点击 → 弹 toast 提示而非真正打开（避免 ShellExecute 抖动）
-        // 当前：什么都不做 — 后续接 video player 时再连
-        hit(RectF(cx_btn, cy_btn, 44.0f, 44.0f), [](){ /* TODO: in-app video player */ }, true);
-    } else {
-        // text bubble
-        Color cardC = me ? pal.primary : pal.card;
-        fillRR(g, bubble_x, y, bubble_w, bubble_h, 14, cardC);
-        if (prev_same_author) {
-            // tail-stack：尾部圆角拉直 (design)
-            // 这里简化，靠默认 14 半径，文字直接堆叠
-        } else if (me) {
-            // 右下角拉直 (design .bubble.me border-bottom-right-radius:4)
-            fillRR(g, bubble_x + bubble_w - 14, y + bubble_h - 14, 14, 14, 0.0f, cardC);
-            fillRR(g, bubble_x + bubble_w - 14, y + bubble_h - 14, 14, 14, 4.0f, cardC);
-        } else {
-            // 左下角拉直
-            fillRR(g, bubble_x, y + bubble_h - 14, 14, 14, 0.0f, cardC);
-            fillRR(g, bubble_x, y + bubble_h - 14, 14, 14, 4.0f, cardC);
-        }
+    // 气泡背景
+    Color cardC = me ? pal.primary : pal.card;
+    fillRR(g, bubble_x, y, bubble_w, bubble_h, 14.0f, cardC);
 
-        float ty = y + 8;
-        // reply (引用条)
-        if (has_reply) {
-            Color repBar(255, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-            fillRR(g, bubble_x + 8, ty + 2, 3, 18, 1.5f, repBar);
-            Color repNameC = me ? Color(255, 255, 255, 255) : pal.primary;
-            Color repTextC = me ? Color(220, 255, 255, 255) : pal.text_muted;
-            drawText_(g, m.reply_author, bubble_x + 16, ty + 1, bubble_w - 24,
-                      7.5f, repNameC, StringAlignmentNear, FontStyleBold);
-            drawText_(g, m.reply_excerpt, bubble_x + 16, ty + 11, bubble_w - 24,
-                      7.5f, repTextC, StringAlignmentNear);
-            ty += 24;
-        }
-        // 作者名
-        if (show_author) {
-            drawText_(g, m.author, bubble_x + 12, ty, bubble_w - 24,
-                      8.0f, pal.primary, StringAlignmentNear, FontStyleBold);
-            ty += 14;
-        }
-        // 正文
-        Color textC = me ? Color(255, 255, 255, 255) : pal.text;
-        // 简单 word-wrap：让 GDI+ 自动换行 — 给一个限定宽度的矩形
-        Font f(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
-        SolidBrush bb(textC);
-        StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
-        RectF tr(bubble_x + 12, ty, bubble_w - 24, bubble_h - (ty - y) - 4);
-        g.DrawString(body_w.c_str(), -1, &f, tr, &fmt, &bb);
-        // meta (time + 双勾)
-        Color metaC = me ? Color(220, 255, 255, 255) : pal.text_muted;
-        drawText_(g, m.time, bubble_x, y + bubble_h - 14, bubble_w - 24,
-                  7.0f, metaC, StringAlignmentFar);
-        if (me) {
+    float ty = y + pad_t;
+
+    // 引用条
+    if (has_reply) {
+        Color repBar = me ? Color(255, 255, 255, 255)
+                          : Color(255, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+        fillRR(g, bubble_x + pad_l, ty + 1.0f, 3.0f, 18.0f, 1.5f, repBar);
+        Color repNameC = me ? Color(255, 255, 255, 255) : pal.primary;
+        Color repTextC = me ? Color(220, 255, 255, 255) : pal.text_muted;
+        drawText_(g, m.reply_author, bubble_x + pad_l + 8.0f, ty, bubble_w - pad_l - pad_r - 8.0f,
+                  7.5f, repNameC, StringAlignmentNear, FontStyleBold);
+        drawText_(g, m.reply_excerpt, bubble_x + pad_l + 8.0f, ty + 10.0f,
+                  bubble_w - pad_l - pad_r - 8.0f,
+                  7.5f, repTextC, StringAlignmentNear);
+        ty += 24.0f;
+    }
+
+    // 作者名
+    if (show_author) {
+        drawText_(g, m.author, bubble_x + pad_l, ty, bubble_w - pad_l - pad_r,
+                  8.0f, pal.primary, StringAlignmentNear, FontStyleBold);
+        ty += 14.0f;
+    }
+
+    // 正文
+    Color textC = me ? Color(255, 255, 255, 255) : pal.text;
+    SolidBrush textB(textC);
+    RectF text_rect(bubble_x + pad_l, ty, bubble_w - pad_l - pad_r, text_h + 4.0f);
+    g.DrawString(body_w.c_str(), -1, &body_font, text_rect, &body_fmt, &textB);
+
+    // meta（时间 + 双勾）右下角
+    Color metaC = me ? Color(220, 255, 255, 255) : pal.text_muted;
+    float meta_y = y + bubble_h - 14.0f;
+    drawText_(g, m.time, bubble_x, meta_y, bubble_w - pad_r - (me ? 16.0f : 0.0f),
+              7.0f, metaC, StringAlignmentFar);
+    if (me) {
+        Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
+        icons::drawSvg(g, icons::Name::Check2,
+                       bubble_x + bubble_w - pad_r - 14.0f, meta_y - 2.0f, 12.0f, tickC);
+    }
+
+    return bubble_h + 8.0f;
+}
+
+// (旧版 sticker/gif/link/video 分支已移除 — sample 数据清空后用不到。
+//  后端真正接通后按 message_type 重新加。)
+#if 0
+static float paintBubble_legacy_unused(Graphics& g, const Msg& m, float x, float y, float maxw,
+                                       const Palette& pal, bool prev_same_author, int msg_index) {
+    bool me = false; (void)g; (void)m; (void)x; (void)y; (void)maxw; (void)pal; (void)prev_same_author; (void)msg_index;
+    if (false) {
+        Color cardC = pal.card;
+        if (false) {
             Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
             icons::drawSvg(g, icons::Name::Check2,
                            bubble_x + bubble_w - 22, y + bubble_h - 16, 14, tickC);
         }
     }
 
-    return bubble_h + 6;
+    return 0.0f;
 }
+#endif
 
 // ============== Composer ==============
+// 只保留 emoji + textarea + send 三件套；左下三个杂图标全部删掉。
 void paintComposer(Graphics& g, RectF area) {
     const Palette& pal = palette();
     SolidBrush bg(pal.bg);
@@ -469,53 +367,44 @@ void paintComposer(Graphics& g, RectF area) {
     Pen sep(pal.divider, 1.0f);
     g.DrawLine(&sep, area.X, area.Y, area.X + area.Width, area.Y);
 
-    // 4 个图标 + textarea + send
-    float icon_size = 28;
-    float ix = area.X + 14;
-    float iy = area.Y + (area.Height - icon_size) / 2;
-    auto iconBtn = [&](icons::Name n, std::function<void()> click) {
-        bool hov = inRect(g_mouse, RectF(ix, iy, icon_size, icon_size));
-        if (hov) fillRR(g, ix, iy, icon_size, icon_size, 6, pal.card);
-        icons::drawSvg(g, n, ix + 5, iy + 5, 18, hov ? pal.text : pal.text_muted);
-        hit(RectF(ix, iy, icon_size, icon_size), click, true);
-        ix += icon_size + 4;
-    };
-    iconBtn(icons::Name::Smile, [](){
+    // emoji 圆角图标按钮
+    const float ico_sz = 30.0f;
+    float ix = area.X + 14.0f;
+    float iy = area.Y + (area.Height - ico_sz) / 2.0f;
+    bool ehov = inRect(g_mouse, RectF(ix, iy, ico_sz, ico_sz));
+    if (ehov) fillRR(g, ix, iy, ico_sz, ico_sz, 8.0f, pal.card);
+    icons::drawSvg(g, icons::Name::Smile, ix + 6.0f, iy + 6.0f, 18.0f,
+                   ehov ? pal.text : pal.text_muted);
+    hit(RectF(ix, iy, ico_sz, ico_sz), [](){
         g_picker_open = !g_picker_open;
         g_picker_tab = 0;
         g_picker_t.start(g_picker_t.value(), g_picker_open ? 1.0f : 0.0f, 0.22f, 0, curve::easeOutBack);
-    });
-    iconBtn(icons::Name::More, [](){   // sticker tab via more icon
-        g_picker_open = !g_picker_open;
-        g_picker_tab = 1;
-        g_picker_t.start(g_picker_t.value(), g_picker_open ? 1.0f : 0.0f, 0.22f, 0, curve::easeOutBack);
-    });
-    iconBtn(icons::Name::Video, [](){
-        g_picker_open = !g_picker_open;
-        g_picker_tab = 2;
-        g_picker_t.start(g_picker_t.value(), g_picker_open ? 1.0f : 0.0f, 0.22f, 0, curve::easeOutBack);
-    });
-    iconBtn(icons::Name::Paperclip, [](){});
+    }, true);
 
-    // textarea
-    float fx = ix + 4;
-    float fw = area.Width - (fx - area.X) - 14 - 38 - 8;
-    float fh = area.Height - 16;
-    float fy = area.Y + 8;
-    fillRR(g, fx, fy, fw, fh, 18, pal.card);
-    strokeRR(g, fx, fy, fw, fh, 18,
-             g_focus_composer ? pal.primary : pal.divider, g_focus_composer ? 1.5f : 1.0f);
+    // textarea — 居中精确，placeholder 与文字垂直对齐
+    float fx = ix + ico_sz + 10.0f;
+    float send_w = 38.0f;
+    float fw = area.Width - (fx - area.X) - 14.0f - send_w - 10.0f;
+    float fh = ico_sz;
+    float fy = iy;
+    fillRR(g, fx, fy, fw, fh, fh / 2.0f, pal.card);
+    strokeRR(g, fx, fy, fw, fh, fh / 2.0f,
+             g_focus_composer ? pal.primary : pal.divider, g_focus_composer ? 1.4f : 1.0f);
     if (g_focus_composer) {
-        Color halo(28, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-        strokeRR(g, fx - 2, fy - 2, fw + 4, fh + 4, 20, halo, 4.0f);
+        Color halo(22, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+        strokeRR(g, fx - 2.0f, fy - 2.0f, fw + 4.0f, fh + 4.0f, fh / 2.0f + 2.0f, halo, 3.0f);
     }
-    // 文字 / placeholder
+    // 文字 / placeholder：垂直居中（fy + (fh - line_h)/2，line_h 约 14px @ 9.5pt）
+    const float pad_l = 16.0f;
+    const float text_y = fy + (fh - 14.0f) / 2.0f;
     if (g_draft.empty()) {
-        drawText_(g, L"写点什么…", fx + 14, fy + 9, fw - 28, 9.5f, pal.text_muted);
+        drawText_(g, L"写点什么…", fx + pad_l, text_y, fw - pad_l * 2.0f,
+                  9.5f, pal.text_muted);
     } else {
-        drawText_(g, g_draft.c_str(), fx + 14, fy + 9, fw - 28, 9.5f, pal.text);
+        drawText_(g, g_draft.c_str(), fx + pad_l, text_y, fw - pad_l * 2.0f,
+                  9.5f, pal.text);
     }
-    // caret
+    // caret blink
     if (g_focus_composer) {
         Font fnt(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
         std::wstring sub = g_draft.substr(0, std::min((size_t)g_draft_caret, g_draft.size()));
@@ -523,36 +412,34 @@ void paintComposer(Graphics& g, RectF area) {
         int phase = (int)(g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
             Pen p(pal.primary, 1.5f);
-            float cx_ = fx + 14 + bb.Width;
-            g.DrawLine(&p, cx_, fy + 9, cx_, fy + fh - 9);
+            float cx_ = fx + pad_l + bb.Width;
+            g.DrawLine(&p, cx_, fy + 7.0f, cx_, fy + fh - 7.0f);
         }
     }
     hit(RectF(fx, fy, fw, fh), [](){ g_focus_composer = true; }, true);
 
-    // send btn
-    float sx = area.X + area.Width - 14 - 38;
-    float sy = area.Y + (area.Height - 38) / 2;
+    // send btn 圆形主色
+    float sx = area.X + area.Width - 14.0f - send_w;
+    float sy = iy + (fh - send_w) / 2.0f;
     bool can_send = !g_draft.empty();
-    bool sh = inRect(g_mouse, RectF(sx, sy, 38.0f, 38.0f));
+    bool sh = inRect(g_mouse, RectF(sx, sy, send_w, send_w));
     Color sbg = !can_send ? Color(140, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB())
                           : (sh ? pal.primary_hover : pal.primary);
-    Color sglow(80, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    drawShadow(g, sx, sy, 38.0f, 38.0f, 19.0f, sglow, 4.0f, 3);
     SolidBrush sbgB(sbg);
-    g.FillEllipse(&sbgB, sx, sy, 38.0f, 38.0f);
-    icons::drawSvg(g, icons::Name::Send, sx + 10, sy + 10, 18, Color(255, 255, 255, 255));
+    g.FillEllipse(&sbgB, sx, sy, send_w, send_w);
+    icons::drawSvg(g, icons::Name::Send, sx + 10.0f, sy + 10.0f, 18.0f,
+                   Color(255, 255, 255, 255));
     if (can_send) {
-        hit(RectF(sx, sy, 38.0f, 38.0f), [](){
-            // 发消息：append 到当前流
+        hit(RectF(sx, sy, send_w, send_w), [](){
             auto& s = streamFor(g_active);
             Msg m; m.kind = MsgKind::Text; m.from = L"me"; m.author = L"";
             m.status = L"online"; m.read = false; m.time = L"now";
-            // body 必须长生命周期 — 用静态 vector
             static std::vector<std::wstring> g_my_msgs;
             g_my_msgs.push_back(g_draft);
             m.body = g_my_msgs.back().c_str();
             s.push_back(m);
             g_draft.clear(); g_draft_caret = 0;
+            g_focus_composer = true;
         }, true);
     }
 }
@@ -720,19 +607,6 @@ void paintChatPane(Graphics& g, RectF area) {
     // stream
     float comp_h = 64;
     RectF stream(area.X, area.Y + hdr_h, area.Width, area.Height - hdr_h - comp_h);
-
-    // 背景 radial 装饰
-    Color rad1(20, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    Color rad2(15, 0x7C, 0x9D, 0xD9);
-    {
-        GraphicsPath cl; cl.AddRectangle(RectF(stream.X, stream.Y, stream.Width, stream.Height));
-        g.SetClip(&cl);
-        SolidBrush b1(rad1);
-        g.FillEllipse(&b1, stream.X + stream.Width * 0.6f, stream.Y - 100.0f, 600.0f, 400.0f);
-        SolidBrush b2(rad2);
-        g.FillEllipse(&b2, stream.X - 100.0f, stream.Y + stream.Height * 0.6f, 500.0f, 400.0f);
-        g.ResetClip();
-    }
 
     auto& msgs = streamFor(g_active);
     float my = stream.Y + 12;
