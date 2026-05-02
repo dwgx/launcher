@@ -775,7 +775,8 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
             float cy = gy + row * cell;
             bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
             if (hov) fillRR(g, cx, cy, cell, cell, 6, fade(pal.bg));
-            Font f(kFontFace, cell * 0.5f, FontStyleRegular, UnitPixel);
+            // 用 Segoe UI Emoji 才能渲染彩色 emoji（kFontFace=YaHei UI 渲染成 □）
+            Font f(L"Segoe UI Emoji", cell * 0.5f, FontStyleRegular, UnitPixel);
             SolidBrush b(fade(pal.text));
             StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
             g.DrawString(items[i], -1, &f, RectF(cx, cy, cell, cell), &fmt, &b);

@@ -2,6 +2,8 @@
 // 全部 24x24 viewBox，渲染时按 size 缩放居中。
 #pragma once
 
+#include <vector>
+
 namespace icons {
 
 enum class Name {
@@ -72,25 +74,37 @@ void drawSvg(Graphics& g, Name n, float x, float y, float size, Color stroke,
         break;
     case Name::Chat:
         {
-            GraphicsPath cp;
-            cp.AddArc(sx(4), sy(4), sw(16), sw(16), 200, 320);
-            // tail
-            cp.AddLine(sx(8), sy(18), sx(4), sy(21));
-            cp.AddLine(sx(4), sy(21), sx(6), sy(15.6f));
-            g.DrawPath(&pen, &cp);
+            // 圆角矩形 + 底左尖（speech bubble）
+            float r = sw(3);
+            GraphicsPath rr;
+            rr.AddArc(sx(3), sy(4), r*2, r*2, 180, 90);            // top-left
+            rr.AddArc(sx(21)-r*2, sy(4), r*2, r*2, 270, 90);       // top-right
+            rr.AddArc(sx(21)-r*2, sy(16)-r*2, r*2, r*2, 0, 90);    // bottom-right
+            rr.AddLine(sx(11), sy(16), sx(8), sy(20));             // 底缘到尖
+            rr.AddLine(sx(8), sy(20), sx(7), sy(16));              // 尖回去
+            rr.AddArc(sx(3), sy(16)-r*2, r*2, r*2, 90, 90);        // bottom-left
+            rr.CloseFigure();
+            g.DrawPath(&pen, &rr);
         }
         break;
     case Name::Settings:
-        // 内圈
-        g.DrawEllipse(&pen, sx(9), sy(9), sw(6), sw(6));
-        // 8 齿
-        for (int i = 0; i < 8; ++i) {
-            float ang = i * 45.0f * 3.14159f / 180.0f;
-            float ix = 12 + cosf(ang) * 7.0f;
-            float iy = 12 + sinf(ang) * 7.0f;
-            float ox = 12 + cosf(ang) * 10.0f;
-            float oy = 12 + sinf(ang) * 10.0f;
-            g.DrawLine(&pen, sx(ix), sy(iy), sx(ox), sy(oy));
+        {
+            // 真齿轮：8 齿星形多边形 (16 个交替 r) + 内圆
+            const int teeth = 8;
+            const int verts = teeth * 2;
+            std::vector<PointF> pts(verts);
+            for (int i = 0; i < verts; ++i) {
+                float ang = (i * (360.0f / verts) - 90.0f) * 3.14159265f / 180.0f;
+                // 偶数索引外凸（齿尖），奇数内凹（齿根）
+                float r = (i % 2 == 0) ? 10.0f : 7.5f;
+                pts[i].X = sx(12 + cosf(ang) * r);
+                pts[i].Y = sy(12 + sinf(ang) * r);
+            }
+            GraphicsPath gp;
+            gp.AddPolygon(pts.data(), verts);
+            g.DrawPath(&pen, &gp);
+            // 内圆
+            g.DrawEllipse(&pen, sx(8.5f), sy(8.5f), sw(7.0f), sw(7.0f));
         }
         break;
     case Name::Logout:

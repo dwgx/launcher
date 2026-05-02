@@ -19,6 +19,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <wincrypt.h>
+#include <commdlg.h>
 #include <vector>
 #include <string>
 #include <functional>
@@ -36,6 +37,7 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 using namespace Gdiplus;
 
@@ -424,6 +426,34 @@ UserStatus g_status = UserStatus::Online;
 bool g_status_fold_open = false;
 Tween g_status_fold_t;
 
+// Settings seg pill tween（语言 / 主题滑块）— 全局便于主循环 tick
+Tween g_seg_lang_x, g_seg_lang_w, g_seg_theme_x, g_seg_theme_w;
+// 鼠标按下状态 — 用于按钮立体 press 效果
+bool  g_mouse_pressed = false;
+
+// 简单 toast — 右下角短暂提示
+struct Toast {
+    std::wstring text;
+    Tween t;
+    float live = 0.0f;
+    void show(const wchar_t* s) {
+        text = s;
+        live = 0.0f;
+        t.start(0.0f, 1.0f, 0.20f, 0, curve::easeOutCubic);
+    }
+    void tick(float dt) {
+        t.tick(dt);
+        if (!text.empty()) {
+            live += dt;
+            if (live > 2.5f && std::abs(t.to - 0.0f) > 0.001f) {
+                t.start(t.value(), 0.0f, 0.30f, 0, curve::easeOutCubic);
+            }
+            if (t.value() < 0.001f && t.to == 0.0f && t.done()) text.clear();
+        }
+    }
+};
+Toast g_toast;
+
 // 托盘 ID + 自定义 message
 constexpr UINT kTrayCallbackMsg = WM_APP + 100;
 constexpr UINT kTrayUid = 1;
@@ -636,14 +666,14 @@ void strokeRR(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r, Color c, REAL
     GraphicsPath p; buildRoundRect(p, x, y, w, h, r);
     Pen pen(c, stroke); g.DrawPath(&pen, &p);
 }
+// 单次画大 path，比之前 spread 次循环快 3-6 倍。
+// 视觉效果略逊但能接受，关键是性能 — 每帧 dropdown/cards/buttons 都调 drawShadow。
 void drawShadow(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r,
                 Color base, REAL dy, int spread) {
-    for (int i = spread; i > 0; --i) {
-        BYTE a = (BYTE)(base.GetA() / i);
-        Color c(a, base.GetR(), base.GetG(), base.GetB());
-        GraphicsPath p; buildRoundRect(p, x-i, y+dy+i*0.4f, w+i*2, h+i*2, r+i);
-        SolidBrush b(c); g.FillPath(&b, &p);
-    }
+    GraphicsPath p;
+    buildRoundRect(p, x - spread, y + dy, w + spread * 2, h + spread * 2, r + spread);
+    SolidBrush b(base);
+    g.FillPath(&b, &p);
 }
 void drawText_(Graphics& g, const wchar_t* text, REAL x, REAL y, REAL w,
                float size, Color color,
@@ -820,7 +850,8 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     g.TranslateTransform(-ox, -oy);
 
     Color cardC(a, pal.card.GetR(), pal.card.GetG(), pal.card.GetB());
-    drawShadow(g, dx, dy, dw, dh, 12.0f, fade(pal.shadow_card_hover), 6.0f, 4);
+    // 阴影减弱：之前 spread 4 在右侧拖出可见痕迹（用户原话"右边会出现很大的割裂"）
+    drawShadow(g, dx, dy, dw, dh, 12.0f, fade(pal.shadow_card), 4.0f, 2);
     fillRR(g, dx, dy, dw, dh, 12.0f, cardC);
     strokeRR(g, dx, dy, dw, dh, 12.0f, fade(pal.divider));
 
@@ -1236,30 +1267,45 @@ void paintSettingsView(Graphics& g, RectF area) {
     drawText_(g, W(tr("menu.settings")).c_str(), vx, vy + (1.0f - op) * 8, 400,
               22.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
 
-    // Section helper: render h2 + seg pills
-    auto draw_seg_section = [&](float& sy, const char* h2_key, auto& items, auto active_test, auto on_click) {
-        // h2 13px uppercase muted tracking
+    // Section helper: render h2 + seg pills 带滑动 active pill 动画
+    auto draw_seg_section = [&](float& sy, const char* h2_key, auto& items,
+                                 auto active_test, auto on_click,
+                                 Tween& pill_x, Tween& pill_w_t) {
         drawText_(g, W(tr(h2_key)).c_str(), vx, sy, 200,
                   9.0f, fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
         sy += 26;
-        // seg container
         const float btn_h = 30.0f, btn_pad = 4.0f;
+        // 第一遍：算每个 item 的 (x, w) 并找 active 的目标位置
         float total_w = btn_pad * 2;
+        for (auto& it : items) total_w += measureText(g, it.label, 9.5f, FontStyleBold).Width + 28 + 4;
+        total_w -= 4;
+        fillRR(g, vx, sy, total_w, btn_h + btn_pad * 2, 10.0f, fade(pal.card));
+
+        float target_x = vx + btn_pad, target_w = 0;
+        float cur_x = vx + btn_pad;
         for (auto& it : items) {
             float w = measureText(g, it.label, 9.5f, FontStyleBold).Width + 28;
-            total_w += w + 4;
+            if (active_test(it)) { target_x = cur_x; target_w = w; }
+            cur_x += w + 4;
         }
-        total_w -= 4;  // last gap
-        // seg bg
-        fillRR(g, vx, sy, total_w, btn_h + btn_pad * 2, 10.0f, fade(pal.card));
+        // 启动 / 更新滑块 tween
+        if (!pill_x.started) {
+            pill_x.start(target_x, target_x, 0.001f, 0, curve::easeOutCubic);
+            pill_w_t.start(target_w, target_w, 0.001f, 0, curve::easeOutCubic);
+        } else if (std::abs(pill_x.to - target_x) > 0.5f || std::abs(pill_w_t.to - target_w) > 0.5f) {
+            pill_x.start(pill_x.value(), target_x, 0.30f, 0, curve::easeOutQuint);
+            pill_w_t.start(pill_w_t.value(), target_w, 0.30f, 0, curve::easeOutQuint);
+        }
+        // 画滑块
+        if (pill_w_t.value() > 0.5f) {
+            fillRR(g, pill_x.value(), sy + btn_pad, pill_w_t.value(), btn_h, 7.0f, fade(pal.bg));
+        }
+        // 第二遍：画文字 + hit
         float bx = vx + btn_pad;
         for (auto& it : items) {
             float w = measureText(g, it.label, 9.5f, FontStyleBold).Width + 28;
             bool active = active_test(it);
             bool hover  = inRect(g_mouse, RectF(bx, sy + btn_pad, w, btn_h));
-            if (active) {
-                fillRR(g, bx, sy + btn_pad, w, btn_h, 7.0f, fade(pal.bg));
-            }
             Color fgc = active ? fade(pal.text) : (hover ? fade(pal.text) : fade(pal.text_muted));
             drawText_(g, it.label, bx, sy + btn_pad + 9.0f, w, 9.5f, fgc,
                       StringAlignmentCenter, FontStyleBold);
@@ -1269,6 +1315,7 @@ void paintSettingsView(Graphics& g, RectF area) {
         sy += btn_h + btn_pad * 2 + 24;
     };
 
+    extern Tween g_seg_lang_x, g_seg_lang_w, g_seg_theme_x, g_seg_theme_w;
     float sy = vy + 64;
     struct LBItem { Lang l; const wchar_t* label; };
     LBItem langs[] = { {Lang::En, L"EN"}, {Lang::ZhCN, L"中文"}, {Lang::JaJP, L"日本語"} };
@@ -1278,9 +1325,8 @@ void paintSettingsView(Graphics& g, RectF area) {
             if (g_lang != i.l) {
                 g_lang = i.l;
                 persist::saveLang((int)g_lang);
-                g_view_fade.start(0.5f, 1.0f, 0.20f, 0, curve::easeOutCubic);
             }
-        });
+        }, g_seg_lang_x, g_seg_lang_w);
 
     struct TBItem { bool dark; const wchar_t* label; };
     static std::wstring s_lab_l = W(tr("settings.theme_light"));
@@ -1294,9 +1340,8 @@ void paintSettingsView(Graphics& g, RectF area) {
             if (g_dark != i.dark) {
                 g_dark = i.dark;
                 persist::saveTheme(g_dark);
-                g_view_fade.start(0.6f, 1.0f, 0.25f, 0, curve::easeOutCubic);
             }
-        });
+        }, g_seg_theme_x, g_seg_theme_w);
 
     drawText_(g, W(tr("settings.about")).c_str(), vx, sy, 200,
               9.0f, fade(pal.text_muted), StringAlignmentNear, FontStyleBold);
@@ -1336,17 +1381,43 @@ void paintProfileView(Graphics& g, RectF area) {
     field(cy + 56, "profile.username", g_user.username, false);
     field(cy + 90, "profile.nickname", g_user.nickname, true);
 
-    // 按钮
+    // 按钮 — hover lift + active press
     float by = cy + ch - 40;
     RectF up(cx + 16, by, 130, 28);
-    fillRR(g, up.X, up.Y, up.Width, up.Height, 6.0f, fade(pal.primary));
-    drawText_(g, W(tr("profile.upload_avatar")).c_str(), up.X, up.Y + 8, up.Width, 9.0f,
+    bool up_hov = inRect(g_mouse, up);
+    bool up_press = up_hov && g_mouse_pressed;
+    float up_lift = up_hov && !up_press ? -1.0f : (up_press ? 1.0f : 0.0f);
+    fillRR(g, up.X, up.Y + up_lift, up.Width, up.Height, 6.0f, fade(up_hov ? pal.primary_hover : pal.primary));
+    drawText_(g, W(tr("profile.upload_avatar")).c_str(), up.X, up.Y + 8 + up_lift, up.Width, 9.0f,
               Color((BYTE)(255 * op), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
-    RectF pw(cx + 156, by, 130, 28);
-    fillRR(g, pw.X, pw.Y, pw.Width, pw.Height, 6.0f, fade(pal.card));
-    strokeRR(g, pw.X, pw.Y, pw.Width, pw.Height, 6.0f, fade(pal.divider));
-    drawText_(g, W(tr("profile.change_pw")).c_str(), pw.X, pw.Y + 8, pw.Width, 9.0f,
+    hit(up, [](){
+        // 弹原生文件选择 — 选完只显示 toast，真上传到后端下一波
+        OPENFILENAMEW ofn{};
+        static wchar_t fnbuf[MAX_PATH] = {0};
+        fnbuf[0] = 0;
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = g_hwnd;
+        ofn.lpstrFilter = L"图片\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0全部文件\0*.*\0";
+        ofn.lpstrFile = fnbuf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&ofn)) {
+            std::wstring msg = std::wstring(L"已选择头像（待上传）: ") + fnbuf;
+            // 截断长路径
+            if (msg.size() > 60) msg = msg.substr(0, 30) + L" … " + msg.substr(msg.size() - 25);
+            g_toast.show(msg.c_str());
+        }
+    }, true);
+
+    RectF pwb(cx + 156, by, 130, 28);
+    bool pw_hov = inRect(g_mouse, pwb);
+    bool pw_press = pw_hov && g_mouse_pressed;
+    float pw_lift = pw_hov && !pw_press ? -1.0f : (pw_press ? 1.0f : 0.0f);
+    fillRR(g, pwb.X, pwb.Y + pw_lift, pwb.Width, pwb.Height, 6.0f, fade(pw_hov ? pal.bg : pal.card));
+    strokeRR(g, pwb.X, pwb.Y + pw_lift, pwb.Width, pwb.Height, 6.0f, fade(pal.divider));
+    drawText_(g, W(tr("profile.change_pw")).c_str(), pwb.X, pwb.Y + 8 + pw_lift, pwb.Width, 9.0f,
               fade(pal.text), StringAlignmentCenter, FontStyleBold);
+    hit(pwb, [](){ g_toast.show(L"修改密码功能规划中（需后端校验旧密码）"); }, true);
 }
 
 // ====================================================================
@@ -1544,18 +1615,21 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
         fy += 62;
     }
 
-    // Submit btn-primary 44 high radius 10 + gradient shadow
+    // Submit btn-primary 44 high radius 10 + 立体 press 效果（hover 上浮 1px / press 按下 1px）
     RectF btn(cx + 30, fy + 6, cw - 60, 44);
     bool bhov = inRect(g_mouse, btn);
+    bool bpress = bhov && g_mouse_pressed;
+    float lift = bhov && !bpress ? -1.0f : (bpress ? 1.0f : 0.0f);
     Color bbg = g_auth_form.busy
         ? fade(Color(255, 0x6B, 0x6A, 0x67))
         : (bhov ? fade(pal.primary_hover) : fade(pal.primary));
-    // 阴影 0 6px 16px -6 rgba(217,119,87,.6)
-    Color glow((BYTE)(70 * op), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-    drawShadow(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, glow, 4.0f, 3);
-    fillRR(g, btn.X, btn.Y, btn.Width, btn.Height, 10.0f, bbg);
+    Color glow((BYTE)((bpress ? 30 : 70) * op),
+               pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    drawShadow(g, btn.X, btn.Y + lift + (bpress ? 0 : 2), btn.Width, btn.Height,
+               10.0f, glow, bpress ? 1.0f : 4.0f, bpress ? 1 : 3);
+    fillRR(g, btn.X, btn.Y + lift, btn.Width, btn.Height, 10.0f, bbg);
     drawText_(g, W(tr(g_auth_form.busy ? "auth.busy" : (reg ? "auth.register" : "auth.login"))).c_str(),
-              btn.X, btn.Y + 14, btn.Width, 11.0f,
+              btn.X, btn.Y + 14 + lift, btn.Width, 11.0f,
               Color((BYTE)(255 * op), 255, 255, 255),
               StringAlignmentCenter, FontStyleBold);
     if (!g_auth_form.busy) {
@@ -1587,7 +1661,9 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
         g_auth_mode = (g_auth_mode == AuthMode::Login) ? AuthMode::Register : AuthMode::Login;
         g_auth_form.error_msg.clear();
         g_auth_form.focus = 0;
-        g_auth_card_op.start(0.6f, 1.0f, 0.18f, 0.0f, curve::easeOutCubic);
+        // 横向滑入 + fade（卡片切换效果）
+        g_auth_card_op.start(0.0f, 1.0f, 0.32f, 0.0f, curve::easeOutCubic);
+        g_auth_card_y.start(20.0f, 0.0f, 0.40f, 0.0f, curve::easeOutQuint);
     }, true);
 }
 
@@ -1619,6 +1695,23 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
     paintAccountDropdown(g, Wpx);
     registerDropdownDismissHits(Wpx, Hpx);
     modal::paintCS2Modal(g, Wpx, Hpx);
+
+    // toast 在最顶层
+    if (!g_toast.text.empty() && g_toast.t.value() > 0.001f) {
+        const Palette& palc = palette();
+        float t = g_toast.t.value();
+        float tw = measureText(g, g_toast.text.c_str(), 9.5f).Width + 36.0f;
+        float th = 36.0f;
+        float tx = Wpx - tw - 24.0f;
+        float ty = Hpx - th - 24.0f - 8.0f * (1.0f - t);
+        Color bg((BYTE)(245 * t), palc.card.GetR(), palc.card.GetG(), palc.card.GetB());
+        drawShadow(g, tx, ty, tw, th, 8.0f, Color((BYTE)(60 * t), 0, 0, 0), 4.0f, 3);
+        fillRR(g, tx, ty, tw, th, 8.0f, bg);
+        strokeRR(g, tx, ty, tw, th, 8.0f, Color((BYTE)(palc.divider.GetA() * t),
+                                              palc.divider.GetR(), palc.divider.GetG(), palc.divider.GetB()));
+        Color tc((BYTE)(palc.text.GetA() * t), palc.text.GetR(), palc.text.GetG(), palc.text.GetB());
+        drawText_(g, g_toast.text.c_str(), tx + 18.0f, ty + 11.0f, tw - 36.0f, 9.5f, tc);
+    }
 }
 
 // ====================================================================
@@ -1769,18 +1862,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
         }
+        case WM_LBUTTONDOWN: {
+            g_mouse_pressed = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         case WM_LBUTTONUP: {
+            g_mouse_pressed = false;
             POINT p { LOWORD(lp), HIWORD(lp) };
-            // 任何点击都会重置 chat composer focus；hit 处理时如果落在 textarea 会再 set true
+            // 任何点击重置 chat composer focus；命中 textarea 的 hit 会再 set true
             chatv::g_focus_composer = false;
             for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
                 if (inRect(p, it->rect)) {
                     if (it->on_click) it->on_click();
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
+                    break;
                 }
             }
-            break;
+            // 无论命中与否都 invalidate，否则点 topbar 空白处 focus 视觉不更新
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         }
         case kTrayCallbackMsg: {
             UINT ev = LOWORD(lp);
@@ -2083,6 +2183,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_auth_form.username.float_t.tick(dt);
         g_auth_form.password.float_t.tick(dt);
         g_auth_form.invite.float_t.tick(dt);
+        g_seg_lang_x.tick(dt); g_seg_lang_w.tick(dt);
+        g_seg_theme_x.tick(dt); g_seg_theme_w.tick(dt);
+        g_toast.tick(dt);
 
         // 入场流程驱动
         auto resize_to_tween = [&]() {
