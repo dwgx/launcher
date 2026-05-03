@@ -432,7 +432,11 @@ struct Tween {
 // 状态
 // ====================================================================
 // 入场流程：Dot → ExpandLoading → Loading → ExpandAuth → Auth → ExpandMain → Main
-enum class Stage { Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth, ExpandMain, Main };
+// 入场流程：Dot → ExpandLoading → Loading → ExpandAuth → Auth → ShrinkSuccess
+//          → CheckSuccess → ExpandMain → Main
+// (登录成功后 480x540 卡片缩回 200x200 → 在小窗里画绿底 + 打勾动画 → 扩大到 1100x720)
+enum class Stage { Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth,
+                   ShrinkSuccess, CheckSuccess, ExpandMain, Main };
 enum class AuthMode { Login, Register };
 enum class View  { Home, Lunching, Chat, Market, Cloud, Settings, Profile };
 enum class Overlay { None, History };
@@ -1044,6 +1048,47 @@ void submitAddTag() {
     }, a, 0, nullptr);
 }
 
+// 启动拉云端头像 — GET /api/avatar/:user_id 写到 %LOCALAPPDATA%/Launcher/avatar.<ext>
+// 然后 loadAvatar 替换本地。这样换设备也能看到自己的头像。
+inline void fetchRemoteAvatar(HWND notify) {
+    if (g_session_token.empty() || g_user_id.empty()) return;
+    struct A { std::string uid; HWND h; };
+    A* a = new A{g_user_id, notify};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/avatar/" + a->uid;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (!r.ok() || r.body.empty()) { delete a; return 0; }
+        // 看 magic 推 ext (PNG=89 50 4E 47 / JPEG=FF D8 / GIF=47 49 46)
+        const char* ext = "png";
+        if (r.body.size() >= 3 && (BYTE)r.body[0] == 0xFF && (BYTE)r.body[1] == 0xD8) ext = "jpg";
+        else if (r.body.size() >= 4 && r.body[0] == 'G' && r.body[1] == 'I' && r.body[2] == 'F') ext = "gif";
+
+        wchar_t base[MAX_PATH] = {0};
+        if (!SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) { delete a; return 0; }
+        std::wstring dir = std::wstring(base) + L"\\Launcher";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        std::wstring path = dir + L"\\avatar." + std::wstring(ext, ext + strlen(ext));
+        // 删旧 avatar.* 防多种扩展名共存
+        for (const wchar_t* e : { L"png", L"jpg", L"jpeg", L"gif", L"webp", L"bmp" }) {
+            std::wstring p = dir + L"\\avatar." + e;
+            DeleteFileW(p.c_str());
+        }
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+                               nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { delete a; return 0; }
+        DWORD wn = 0;
+        WriteFile(f, r.body.data(), (DWORD)r.body.size(), &wn, nullptr);
+        CloseHandle(f);
+        // 通知 UI 线程重新 loadAvatar
+        std::wstring* p_arg = new std::wstring(std::move(path));
+        PostMessageW(a->h, WM_APP + 23, 0, (LPARAM)p_arg);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
 // ====================================================================
 // 表情包分组 sticker_packs — create / rename / delete / share
 // ====================================================================
@@ -1350,7 +1395,7 @@ const MenuEntry kMenu[] = {
     { View::Home,     "menu.home",     icons::Name::Home },
     { View::Lunching, "menu.lunching", icons::Name::Library },
     { View::Chat,     "menu.chat",     icons::Name::Chat },
-    { View::Market,   "menu.market",   icons::Name::Shield },   // 用户原话"云端上面需要一个 market"
+    { View::Market,   "menu.market",   icons::Name::Cart },     // 购物车 (Lucide shopping-cart)
     { View::Cloud,    "menu.cloud",    icons::Name::Cloud },
     { View::Settings, "menu.settings", icons::Name::Settings },
 };
@@ -2555,6 +2600,36 @@ void paintDot(Graphics& g, int Wpx, int Hpx) {
 }
 
 // ====================================================================
+// CheckSuccess 200x200：绿圆背景 + 白色打勾 + 文字"登录成功"
+// ====================================================================
+void paintCheckSuccess(Graphics& g, int Wpx, int Hpx) {
+    // 整窗绿色 (status_online)
+    Color green(255, 0x4A, 0xDE, 0x80);
+    SolidBrush bb(green);
+    GraphicsPath full; buildRoundRect(full, 0, 0, (REAL)Wpx, (REAL)Hpx, 16.0f);
+    g.FillPath(&bb, &full);
+
+    // 白色打勾 — 居中，绑定 g_check_anim
+    float ct = g_check_anim.value();
+    if (ct < 0.001f) return;
+    float ccx = Wpx / 2.0f, ccy = Hpx / 2.0f;
+    // 打勾两段（左下→中下→右上），分两段渐进
+    Pen pen(Color((BYTE)(255 * std::min(1.0f, ct * 1.5f)), 255, 255, 255), 6.0f);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
+    pen.SetLineJoin(LineJoinRound);
+    float x1 = ccx - 24, y1 = ccy + 4;
+    float x2 = ccx - 6,  y2 = ccy + 22;
+    float x3 = ccx + 28, y3 = ccy - 18;
+    float p1 = std::min(1.0f, ct * 2.0f);
+    float p2 = std::max(0.0f, (ct - 0.5f) * 2.0f);
+    g.DrawLine(&pen, x1, y1, x1 + (x2 - x1) * p1, y1 + (y2 - y1) * p1);
+    if (p2 > 0) {
+        g.DrawLine(&pen, x2, y2, x2 + (x3 - x2) * p2, y2 + (y3 - y2) * p2);
+    }
+}
+
+// ====================================================================
 // Stage 切换
 // ====================================================================
 void enterDotStage() {
@@ -2596,13 +2671,26 @@ void enterAuthStage() {
     g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
     g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
 }
-// 480x540 → 1100x720 (Auth submit 后扩到桌面级主界面)
+// 登录成功 → 卡片淡出 + 窗口缩回 200x200（小绿圆打勾的小窗）
+void enterShrinkSuccessStage() {
+    g_stage = Stage::ShrinkSuccess;
+    g_time_in_stage = 0.0f;
+    g_auth_card_op.start(g_auth_card_op.value(), 0, 0.30f, 0.0f, curve::easeOutCubic);
+    g_window_w.start(480, 200, 0.45f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(540, 200, 0.45f, 0.05f, curve::easeOutQuint);
+}
+// 200x200 小窗：纯绿底（status_online 主色） + 大白色打勾，1.0s 后扩窗
+void enterCheckSuccessStage() {
+    g_stage = Stage::CheckSuccess;
+    g_time_in_stage = 0.0f;
+    g_check_anim.start(0.0f, 1.0f, 0.55f, 0.0f, curve::easeOutBack);
+}
+// 200x200 → 1100x720 (打勾完成后扩到桌面级主界面)
 void enterExpandMainStage() {
     g_stage = Stage::ExpandMain;
     g_time_in_stage = 0.0f;
-    g_auth_card_op.start(g_auth_card_op.value(), 0, 0.20f, 0.0f, curve::easeOutCubic);
-    g_window_w.start(480, 1100, 0.50f, 0.05f, curve::easeOutQuint);
-    g_window_h.start(540, 720,  0.50f, 0.05f, curve::easeOutQuint);
+    g_window_w.start(200, 1100, 0.55f, 0.05f, curve::easeOutQuint);
+    g_window_h.start(200, 720,  0.55f, 0.05f, curve::easeOutQuint);
 }
 void enterMainStage() {
     g_stage = Stage::Main;
@@ -2934,15 +3022,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 2: {
             g_auth_form.busy = false;
             if (wp == 1) {
-                g_auth_succeeded = true;
-                g_check_anim.start(0.0f, 1.0f, 0.45f, 0, curve::easeOutBack);
-                SetTimer(hwnd, 0xA2, 850, nullptr);
-                // 登录成功后立即拉取频道映射 + 起 WS 实时接收 + 同步个人 stickers + 拉个人标签
+                // 新过渡链：缩窗 480x540 → 200x200 + 卡片 fade out → 绿底打勾 → 扩到 1100x720
+                g_auth_succeeded = false;   // 不再在 480x540 卡片里画 check 覆盖
+                enterShrinkSuccessStage();
+                // 登录成功后立即拉取频道映射 + 起 WS 实时接收 + 同步个人 stickers + 拉个人标签 + 拉头像
                 chatv::fetchOfficialChannels(hwnd);
                 chatv::startWebSocket(hwnd);
                 chatv::fetchMyStickers(hwnd);
                 fetchMyPacks(hwnd);
                 fetchUserTags(hwnd);
+                fetchRemoteAvatar(hwnd);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -3091,12 +3180,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        case WM_APP + 23: {
+            // 远程头像下载完成：lp 是 std::wstring* 的本地路径，loadAvatar + free
+            std::wstring* p = (std::wstring*)lp;
+            if (p) {
+                if (loadAvatar(*p)) g_toast.show(L"头像已从云端同步 ✓");
+                delete p;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         case WM_TIMER:
             if (wp == 0xA2) {
+                // 旧 0xA2 计时器：早期版本登录成功后用 850ms 拖延再 enterExpandMain。
+                // 新过渡链 (Shrink → Check → Expand) 全靠 stage state 驱动，不再用这个 timer。
                 KillTimer(hwnd, 0xA2);
-                g_auth_succeeded = false;
-                enterExpandMainStage();
-                InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (wp == 0xB1) {
                 const wchar_t* lines[] = {
@@ -3149,6 +3247,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (g_stage == Stage::Expanding)  paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandAuth) paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::Auth)       paintAuthView(g, Wpx, Hpx);
+            else if (g_stage == Stage::ShrinkSuccess) paintAuthView(g, Wpx, Hpx);   // 缩窗时仍画 auth 卡 fade out
+            else if (g_stage == Stage::CheckSuccess)  paintCheckSuccess(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandMain) {
                 // auto-login: Loading 卡片 fade out + 窗口扩张；非 auto-login 走 Auth 卡片 fade
                 if (g_skip_auth_after_loading) paintLoading(g, Wpx, Hpx);
@@ -3260,13 +3360,14 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
     DragAcceptFiles(g_hwnd, TRUE);   // 接收文件拖拽
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
-    // 已有 session — 立即拉官方频道映射（chat send 用 uuid）+ 起 WS 实时接收 + 同步 stickers + 拉 tags
+    // 已有 session — 立即拉官方频道映射 + WS + sticker + tags + 头像
     if (!g_session_token.empty()) {
         chatv::fetchOfficialChannels(g_hwnd);
         chatv::startWebSocket(g_hwnd);
         chatv::fetchMyStickers(g_hwnd);
         fetchMyPacks(g_hwnd);
         fetchUserTags(g_hwnd);
+        fetchRemoteAvatar(g_hwnd);
     }
 
     // 自动登录 — 注册表里有凭据就直接进 main，跳过 Auth
@@ -3377,6 +3478,14 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         } else if (g_stage == Stage::ExpandAuth) {
             resize_to_tween();
             if (g_window_w.done()) enterAuthStage();
+        } else if (g_stage == Stage::ShrinkSuccess) {
+            resize_to_tween();
+            if (g_window_w.done()) enterCheckSuccessStage();
+        } else if (g_stage == Stage::CheckSuccess) {
+            // 200x200 绿底打勾 — 等动画播完 + 短停顿 → 扩到主页
+            if (g_check_anim.done() && g_time_in_stage > 0.85f) {
+                enterExpandMainStage();
+            }
         } else if (g_stage == Stage::ExpandMain) {
             resize_to_tween();
             if (g_window_w.done()) enterMainStage();

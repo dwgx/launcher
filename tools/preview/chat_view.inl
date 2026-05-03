@@ -489,6 +489,99 @@ const Channel* activeChannel() {
     return &kChannels[2];   // general
 }
 
+// 判定一个 UTF-16 单元是否落在 emoji 范围（含高代理对的高位）。
+// emoji 范围简化：
+//   - 高代理 0xD83C..0xD83F → 任何 SMP emoji (U+1F000+) 都从这里开始
+//   - BMP 杂项符号 / 装饰符号 0x2600..0x27BF
+//   - 装饰附加 (FE0F variation selector) 也算同段
+inline bool isEmojiUnit(wchar_t c) {
+    return (c >= 0xD83C && c <= 0xD83F)
+        || (c >= 0x2600 && c <= 0x27BF)
+        || (c >= 0x2300 && c <= 0x23FF)
+        || (c == 0xFE0F);
+}
+inline bool isLowSurrogate(wchar_t c) { return c >= 0xDC00 && c <= 0xDFFF; }
+
+// 文字 + emoji 混排：YaHei UI 走 text，Segoe UI Emoji 走 emoji 段。
+// 同一 baseline 顺序绘制；返回总宽度（用于布局）。
+inline float drawTextWithEmoji(Graphics& g, const wchar_t* text, int len,
+                               float x, float y, float size_pt,
+                               Color text_color, FontStyle fs = FontStyleRegular) {
+    if (!text || len <= 0) return 0.0f;
+    Font text_font(kFontFace, size_pt, fs, UnitPoint);
+    Font emoji_font(L"Segoe UI Emoji", size_pt, FontStyleRegular, UnitPoint);
+    SolidBrush brush(text_color);
+    StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
+    // 关键：FormatFlagsMeasureTrailingSpaces 让 MeasureString 返回真实宽度
+    fmt.SetFormatFlags(StringFormatFlagsMeasureTrailingSpaces | StringFormatFlagsNoWrap);
+
+    float cur_x = x;
+    int i = 0;
+    while (i < len) {
+        bool em = isEmojiUnit(text[i]);
+        int j = i;
+        // 收集一段同类型 run
+        while (j < len) {
+            bool em_j = isEmojiUnit(text[j]);
+            if (em_j != em) break;
+            // surrogate pair 一起算
+            if (em && j + 1 < len && isLowSurrogate(text[j + 1])) j += 2;
+            else j += 1;
+        }
+        std::wstring run(text + i, text + j);
+        Font* use = em ? &emoji_font : &text_font;
+        RectF mb;
+        g.MeasureString(run.c_str(), (int)run.size(), use, PointF(0, 0), &fmt, &mb);
+        g.DrawString(run.c_str(), (int)run.size(), use,
+                     RectF(cur_x, y, mb.Width + 2.0f, size_pt * 3.0f), &fmt, &brush);
+        cur_x += mb.Width;
+        i = j;
+    }
+    return cur_x - x;
+}
+
+// 多行版本：碰到换行用本地宽度回卷。简化版 — 不做 word-break，纯按宽度切。
+inline float drawWrappedTextWithEmoji(Graphics& g, const wchar_t* text, int len,
+                                      float x, float y, float max_w, float size_pt,
+                                      Color text_color, FontStyle fs = FontStyleRegular,
+                                      float* out_height = nullptr) {
+    if (!text || len <= 0) { if (out_height) *out_height = 0; return 0; }
+    Font text_font(kFontFace, size_pt, fs, UnitPoint);
+    Font emoji_font(L"Segoe UI Emoji", size_pt, FontStyleRegular, UnitPoint);
+    SolidBrush brush(text_color);
+    StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
+    fmt.SetFormatFlags(StringFormatFlagsMeasureTrailingSpaces | StringFormatFlagsNoWrap);
+
+    float cur_x = x, cur_y = y;
+    float line_h = size_pt * 1.55f;   // 行高
+    float used_w = 0;
+    int i = 0;
+    while (i < len) {
+        // 取一个 codepoint（surrogate pair 或单 char 或 emoji 序列）
+        int unit_len = 1;
+        if (text[i] >= 0xD83C && text[i] <= 0xD83F && i + 1 < len) unit_len = 2;
+        bool em = isEmojiUnit(text[i]);
+        std::wstring ch(text + i, text + i + unit_len);
+        Font* use = em ? &emoji_font : &text_font;
+        RectF mb;
+        g.MeasureString(ch.c_str(), (int)ch.size(), use, PointF(0, 0), &fmt, &mb);
+        if (cur_x - x + mb.Width > max_w && cur_x > x) {
+            cur_x = x; cur_y += line_h;
+        }
+        g.DrawString(ch.c_str(), (int)ch.size(), use,
+                     RectF(cur_x, cur_y, mb.Width + 2.0f, size_pt * 3.0f), &fmt, &brush);
+        cur_x += mb.Width;
+        if (cur_x - x > used_w) used_w = cur_x - x;
+        i += unit_len;
+        // 显式换行
+        if (text[i - unit_len] == L'\n') {
+            cur_x = x; cur_y += line_h;
+        }
+    }
+    if (out_height) *out_height = (cur_y + line_h) - y;
+    return used_w;
+}
+
 // ============== 渲染辅助 ==============
 Color statusColor(const Palette& pal, const wchar_t* status) {
     if (wcscmp(status, L"online") == 0) return pal.status_online;
@@ -718,49 +811,54 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
         return bub_h + 10.0f;
     }
 
-    // 用 GDI+ MeasureString 精确测算
-    const float pad_l = 14.0f, pad_r = 14.0f;
-    const float pad_t = 9.0f,  pad_b = 8.0f;
+    // Telegram 风：紧凑 padding + meta 默认 inline（同行最右），文字塞不下才换行
+    const float pad_l = 10.0f, pad_r = 10.0f;
+    const float pad_t = 6.0f,  pad_b = 6.0f;
     const float content_w_max = maxw * 0.62f;
-    const float min_w = 60.0f;
     std::wstring body_w = m.body ? m.body : L"";
 
-    Font body_font(kFontFace, 9.5f, FontStyleRegular, UnitPoint);
+    Font body_font(kFontFace, 9.0f, FontStyleRegular, UnitPoint);
     StringFormat body_fmt;
     body_fmt.SetAlignment(StringAlignmentNear);
 
-    // 第一遍：单行宽度
     RectF unbounded(0, 0, 4096.0f, 4096.0f);
     RectF measured;
     g.MeasureString(body_w.c_str(), -1, &body_font, unbounded, &body_fmt, &measured);
-    float wanted_w = measured.Width + pad_l + pad_r;
+    float text_one_line_w = measured.Width;
 
     bool has_reply = m.reply_excerpt && m.reply_excerpt[0];
     bool show_author = !me && m.author && m.author[0] && !prev_same_author;
 
-    // 时间 meta 估算
-    Font meta_font(kFontFace, 7.5f, FontStyleRegular, UnitPoint);
+    // meta = 时间 + 可选双勾。Telegram 把时间紧贴文字尾巴（同行）。
+    Font meta_font(kFontFace, 7.0f, FontStyleRegular, UnitPoint);
     RectF meta_box;
     g.MeasureString(m.time ? m.time : L"", -1, &meta_font, unbounded, &body_fmt, &meta_box);
-    float meta_w = meta_box.Width + (me ? 16.0f : 0.0f);   // me 多留双勾空间
-    // 文字 + meta 不换行能塞下时
-    if (wanted_w + meta_w + 8.0f <= content_w_max) {
-        wanted_w += meta_w + 8.0f;
-    }
-    float bubble_w = std::max(min_w, std::min(wanted_w, content_w_max));
+    const float tick_w = me ? 14.0f : 0.0f;
+    float meta_w = meta_box.Width + tick_w + 4.0f;   // 4 = 文字到 meta 的 gap
 
-    // 第二遍：限定宽度后实际行高
+    // 单行能塞下：文字 + meta 同行
+    bool meta_inline = (text_one_line_w + meta_w + pad_l + pad_r) <= content_w_max;
+    float bubble_w;
+    if (meta_inline) {
+        bubble_w = text_one_line_w + meta_w + pad_l + pad_r;
+    } else {
+        // 多行：bubble 拉到内容上限，meta 单独一行右下
+        bubble_w = std::min(text_one_line_w + pad_l + pad_r, content_w_max);
+        bubble_w = std::max(bubble_w, meta_w + pad_l + pad_r);
+    }
+
+    // 第二遍：测真实换行后高度
     RectF inner_layout(0, 0, bubble_w - pad_l - pad_r, 4096.0f);
     g.MeasureString(body_w.c_str(), -1, &body_font, inner_layout, &body_fmt, &measured);
     float text_h = measured.Height;
 
-    float bubble_h = pad_t + (show_author ? 14.0f : 0.0f)
-                          + (has_reply ? 24.0f : 0.0f)
+    float bubble_h = pad_t + (show_author ? 13.0f : 0.0f)
+                          + (has_reply ? 22.0f : 0.0f)
                           + text_h
-                          + 16.0f   /* meta line */
+                          + (meta_inline ? 0.0f : 12.0f)
                           + pad_b;
 
-    const float gutter = 38.0f;
+    const float gutter = 36.0f;
     float bubble_x;
     if (me) {
         bubble_x = x + maxw - pad_r - bubble_w;
@@ -768,11 +866,11 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
         bubble_x = x + gutter;
     }
 
-    // 头像（仅非自己 + 非连续）
+    // 头像（仅非自己 + 非连续）— 缩到 12 半径 (24x24)
     if (!me && !prev_same_author) {
-        drawAvatar(g, x, y + bubble_h - 28.0f, 14.0f, m.author, m.status, pal);
+        drawAvatar(g, x, y + bubble_h - 24.0f, 12.0f, m.author, m.status, pal);
         int idx = msg_index;
-        hit(RectF(x, y + bubble_h - 28.0f, 28.0f, 28.0f), [idx](){
+        hit(RectF(x, y + bubble_h - 24.0f, 24.0f, 24.0f), [idx](){
             auto& s = chatv::streamFor(g_active);
             if (idx >= 0 && idx < (int)s.size() && s[idx].author && s[idx].author[0]) {
                 std::wstring at = std::wstring(L"@") + s[idx].author + L" ";
@@ -782,52 +880,54 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
         }, true);
     }
 
-    // 气泡背景
+    // 气泡背景 — 12 圆角，连续作者去掉一角让消息成"柱"
     Color cardC = me ? pal.primary : pal.card;
-    fillRR(g, bubble_x, y, bubble_w, bubble_h, 14.0f, cardC);
+    fillRR(g, bubble_x, y, bubble_w, bubble_h, 12.0f, cardC);
 
     float ty = y + pad_t;
 
-    // 引用条
     if (has_reply) {
         Color repBar = me ? Color(255, 255, 255, 255)
                           : Color(255, pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
-        fillRR(g, bubble_x + pad_l, ty + 1.0f, 3.0f, 18.0f, 1.5f, repBar);
+        fillRR(g, bubble_x + pad_l, ty + 1.0f, 2.5f, 16.0f, 1.5f, repBar);
         Color repNameC = me ? Color(255, 255, 255, 255) : pal.primary;
         Color repTextC = me ? Color(220, 255, 255, 255) : pal.text_muted;
-        drawText_(g, m.reply_author, bubble_x + pad_l + 8.0f, ty, bubble_w - pad_l - pad_r - 8.0f,
-                  7.5f, repNameC, StringAlignmentNear, FontStyleBold);
-        drawText_(g, m.reply_excerpt, bubble_x + pad_l + 8.0f, ty + 10.0f,
-                  bubble_w - pad_l - pad_r - 8.0f,
-                  7.5f, repTextC, StringAlignmentNear);
-        ty += 24.0f;
+        drawText_(g, m.reply_author, bubble_x + pad_l + 7.0f, ty, bubble_w - pad_l - pad_r - 7.0f,
+                  7.0f, repNameC, StringAlignmentNear, FontStyleBold);
+        drawText_(g, m.reply_excerpt, bubble_x + pad_l + 7.0f, ty + 9.0f,
+                  bubble_w - pad_l - pad_r - 7.0f, 7.0f, repTextC, StringAlignmentNear);
+        ty += 22.0f;
     }
-
-    // 作者名
     if (show_author) {
         drawText_(g, m.author, bubble_x + pad_l, ty, bubble_w - pad_l - pad_r,
-                  8.0f, pal.primary, StringAlignmentNear, FontStyleBold);
-        ty += 14.0f;
+                  7.5f, pal.primary, StringAlignmentNear, FontStyleBold);
+        ty += 13.0f;
     }
 
-    // 正文
+    // 正文 — emoji + 文字混排（emoji 走 Segoe UI Emoji 防"找不到字符"方框）
     Color textC = me ? Color(255, 255, 255, 255) : pal.text;
-    SolidBrush textB(textC);
-    RectF text_rect(bubble_x + pad_l, ty, bubble_w - pad_l - pad_r, text_h + 4.0f);
-    g.DrawString(body_w.c_str(), -1, &body_font, text_rect, &body_fmt, &textB);
+    drawWrappedTextWithEmoji(g, body_w.c_str(), (int)body_w.size(),
+                             bubble_x + pad_l, ty,
+                             bubble_w - pad_l - pad_r, 9.0f, textC);
 
-    // meta（时间 + 双勾）右下角
-    Color metaC = me ? Color(220, 255, 255, 255) : pal.text_muted;
-    float meta_y = y + bubble_h - 14.0f;
-    drawText_(g, m.time, bubble_x, meta_y, bubble_w - pad_r - (me ? 16.0f : 0.0f),
+    // meta — inline 时在文字尾巴右侧；否则单独一行右下
+    Color metaC = me ? Color(210, 255, 255, 255) : pal.text_muted;
+    float meta_y;
+    if (meta_inline) {
+        meta_y = ty + (text_h - meta_box.Height) * 0.5f + 1.0f;   // 跟文字基线对齐
+    } else {
+        meta_y = y + bubble_h - 12.0f;
+    }
+    drawText_(g, m.time, bubble_x, meta_y, bubble_w - pad_r - tick_w,
               7.0f, metaC, StringAlignmentFar);
     if (me) {
         Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
         icons::drawSvg(g, icons::Name::Check2,
-                       bubble_x + bubble_w - pad_r - 14.0f, meta_y - 2.0f, 12.0f, tickC);
+                       bubble_x + bubble_w - pad_r - 12.0f,
+                       meta_y - 1.0f, 11.0f, tickC);
     }
 
-    return bubble_h + 8.0f;
+    return bubble_h + 4.0f;
 }
 
 // (旧版 sticker/gif/link/video 分支已移除 — sample 数据清空后用不到。
@@ -907,8 +1007,10 @@ void paintComposer(Graphics& g, RectF area) {
             g.FillRectangle(&sel_b, fx + pad_l + bb_pre.Width, text_y - 1.0f,
                             bb_in.Width, 16.0f);
         }
-        drawText_(g, g_composer.text.c_str(), fx + pad_l, text_y, fw - pad_l * 2.0f,
-                  9.5f, pal.text);
+        // emoji + 文字混排：emoji codepoint 走 Segoe UI Emoji，否则 YaHei
+        // (caret 测量仍用 YaHei 单字体，emoji 字符的 cursor 位置可能略偏，可接受)
+        drawTextWithEmoji(g, g_composer.text.c_str(), (int)g_composer.text.size(),
+                          fx + pad_l, text_y, 9.5f, pal.text);
     }
     // caret blink
     if (g_focus_composer && !g_composer.hasSelection()) {

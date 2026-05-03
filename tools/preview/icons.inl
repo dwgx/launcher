@@ -11,6 +11,7 @@ enum class Name {
     Eye, EyeOff, X, History, Search, Send, Phone, Video, More,
     Smile, Paperclip, Check, Check2, User, Moon, Shield, Bell,
     Reply, At, Link, Play, Trash, Edit, Plus, Hash,
+    Cart,   // 购物车 — 用于 Market 侧栏
 };
 
 // 在 [x,y, x+size, y+size] 区域画 24x24 viewBox 路径
@@ -387,6 +388,26 @@ void drawSvg(Graphics& g, Name n, float x, float y, float size, Color stroke,
         g.DrawLine(&pen, sx(17), sy(4), sx(15), sy(20));
         g.DrawLine(&pen, sx(4), sy(9), sx(20), sy(9));
         g.DrawLine(&pen, sx(4), sy(15), sx(20), sy(15));
+        break;
+    case Name::Cart:
+        // Lucide shopping-cart 风：把手 + 篮筐 + 两个轮子
+        // 把手：(2,3)→(5,3)→(6,7)；篮筐顶弧 (6,7)→(21,7) 平直，底回 (8,17)→(19,17)
+        {
+            // 把手 (左上斜把)
+            g.DrawLine(&pen, sx(3), sy(3), sx(6), sy(3));
+            g.DrawLine(&pen, sx(6), sy(3), sx(7), sy(7));
+            // 篮筐上沿 — 直线 (7,7)→(21,7)
+            g.DrawLine(&pen, sx(7), sy(7), sx(21), sy(7));
+            // 篮筐右斜下 (21,7)→(18,15)
+            g.DrawLine(&pen, sx(21), sy(7), sx(18), sy(15));
+            // 篮筐左斜下 (7,7)→(8.5,15)
+            g.DrawLine(&pen, sx(7), sy(7), sx(8), sy(15));
+            // 篮筐底沿 (8,15)→(18,15)
+            g.DrawLine(&pen, sx(8), sy(15), sx(18), sy(15));
+            // 两轮子
+            g.DrawEllipse(&pen, sx(8) - sw(1.5f), sy(19) - sw(1.5f), sw(3), sw(3));
+            g.DrawEllipse(&pen, sx(17) - sw(1.5f), sy(19) - sw(1.5f), sw(3), sw(3));
+        }
         break;
     }
 }
