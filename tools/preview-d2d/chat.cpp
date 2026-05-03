@@ -672,6 +672,12 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             bx += bw + 4;
             if (bx > px + pw - 80) break;
         }
+        // 当前 pack id（用于导入到正确的 pack）
+        std::string cur_pid;
+        if (active_pack >= 0 && active_pack < (int)packs.size()) {
+            cur_pid = packs[active_pack].id;
+        }
+
         // + 新建
         LayoutRect newp{ px + pw - 64, py + 50, 50, 24 };
         bool nh = newp.contains(g_mouse);
@@ -686,6 +692,26 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
             PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
         }, true);
+
+        // ↥ 导入文件夹（有 pack 时）
+        if (!cur_pid.empty()) {
+            LayoutRect imp{ px + pw - 64 - 60, py + 50, 56, 24 };
+            bool ih = imp.contains(g_mouse);
+            prim::fillRR(ctx, imp.x, imp.y, imp.w, imp.h, 4,
+                         br.solidA(pal.text, t * (ih ? 0.18f : 0.08f)));
+            prim::drawText_(ctx, L"↥ 导入", hint_fmt,
+                            imp.x, imp.y + 5, imp.w, 16,
+                            br.solidA(pal.text, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            // PostMessage 让 main 弹文件夹对话框（避免在 paint 里阻塞 UI）
+            std::string pid = cur_pid;
+            hit(imp, [pid](){
+                static std::string g_pending_import_pid;
+                g_pending_import_pid = pid;
+                PostMessageW(GetActiveWindow(), WM_APP + 34,
+                             (WPARAM)&g_pending_import_pid, 0);
+            }, true);
+        }
 
         // grid 5 列 sticker
         const auto& cur_pack = packs[active_pack];

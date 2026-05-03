@@ -265,4 +265,129 @@ void installPack(HWND notify, const std::string& short_name) {
     }, a, 0, nullptr);
 }
 
+void importFromFolder(HWND notify, const std::wstring& folder_path,
+                      const std::string& pack_id) {
+    struct A { std::wstring folder; std::string pid; HWND h; };
+    auto* a = new A{ folder_path, pack_id, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        // 扫描文件夹
+        std::vector<std::wstring> files;
+        std::wstring pattern = a->folder + L"\\*";
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::wstring name = fd.cFileName;
+                auto dot = name.find_last_of(L'.');
+                if (dot == std::wstring::npos) continue;
+                std::wstring ext = name.substr(dot);
+                for (auto& c : ext) c = (wchar_t)towlower(c);
+                if (ext == L".png" || ext == L".jpg" || ext == L".jpeg"
+                    || ext == L".gif" || ext == L".webp" || ext == L".bmp") {
+                    files.push_back(a->folder + L"\\" + name);
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+
+        std::wstring cache = cacheDir();
+        int success = 0;
+        std::vector<std::wstring> downloaded;
+        for (const auto& path : files) {
+            // 读文件
+            HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                   nullptr, OPEN_EXISTING, 0, nullptr);
+            if (f == INVALID_HANDLE_VALUE) continue;
+            DWORD sz = GetFileSize(f, nullptr);
+            if (sz == 0 || sz > 8 * 1024 * 1024) { CloseHandle(f); continue; }
+            std::vector<BYTE> bytes(sz);
+            DWORD rd = 0;
+            ReadFile(f, bytes.data(), sz, &rd, nullptr);
+            CloseHandle(f);
+
+            // mime + filename
+            std::string mime = "image/png";
+            std::wstring ext = path.substr(path.find_last_of(L'.'));
+            for (auto& c : ext) c = (wchar_t)towlower(c);
+            if (ext == L".jpg" || ext == L".jpeg") mime = "image/jpeg";
+            else if (ext == L".gif")  mime = "image/gif";
+            else if (ext == L".webp") mime = "image/webp";
+            else if (ext == L".bmp")  mime = "image/bmp";
+
+            auto sl = path.find_last_of(L"\\/");
+            std::wstring fn = (sl != std::wstring::npos) ? path.substr(sl + 1) : path;
+
+            // 1. 上传 media
+            auto mr = net::uploadMultipart(L"/api/media/upload",
+                                            g_session_token, L"file",
+                                            fn, mime, bytes);
+            if (!mr.ok()) continue;
+            std::string media_id = std::to_string(net::jsonInt(mr.body, "media_id"));
+            if (media_id == "0") {
+                std::string mid_str = net::jsonStr(mr.body, "media_id");
+                if (!mid_str.empty()) media_id = mid_str;
+            }
+            std::string sha = net::jsonStr(mr.body, "sha256");
+
+            // 2. 创建 sticker (含 pack_id)
+            std::string body = "{\"session_token\":\"" + g_session_token
+                             + "\",\"pack_id\":\"" + a->pid
+                             + "\",\"media_id\":" + media_id + "}";
+            auto sr = net::postJson(L"/api/sticker", body);
+            if (!sr.ok()) continue;
+
+            // 3. 写本地缓存 (sha + ext)
+            if (!sha.empty() && !cache.empty()) {
+                std::wstring local = cache
+                    + std::wstring(sha.begin(), sha.end())
+                    + ext;
+                if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    HANDLE wf = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
+                                             nullptr, CREATE_ALWAYS, 0, nullptr);
+                    if (wf != INVALID_HANDLE_VALUE) {
+                        DWORD wn = 0;
+                        WriteFile(wf, bytes.data(), (DWORD)bytes.size(), &wn, nullptr);
+                        CloseHandle(wf);
+                    }
+                }
+                downloaded.push_back(local);
+            }
+            success++;
+        }
+
+        // 加进对应 pack
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (auto& p : g_packs) {
+                if (p.id == a->pid) {
+                    for (auto& s : downloaded) {
+                        bool dup = false;
+                        for (auto& e : p.stickers) if (e == s) { dup = true; break; }
+                        if (!dup) p.stickers.push_back(s);
+                    }
+                    break;
+                }
+            }
+        }
+        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+void importFromFolderUi(HWND notify, const std::string& pack_id) {
+    BROWSEINFOW bi{};
+    bi.hwndOwner = notify;
+    bi.lpszTitle = L"选择含 .png/.jpg/.gif/.webp 的文件夹（批量导入到表情包）";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+    wchar_t path[MAX_PATH] = {0};
+    if (SHGetPathFromIDListW(pidl, path)) {
+        importFromFolder(notify, path, pack_id);
+    }
+    CoTaskMemFree(pidl);
+}
+
 }  // namespace launcher::d2d::sticker

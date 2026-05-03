@@ -36,6 +36,17 @@ void sharePack(HWND notify, const std::string& pack_id, bool is_public);
 void deletePack(HWND notify, const std::string& pack_id);
 void installPack(HWND notify, const std::string& short_name);
 
+// 导入文件夹 — 扫描 *.png/*.jpg/*.jpeg/*.gif/*.webp/*.bmp 异步逐张上传：
+//   POST /api/media/upload → media_id
+//   POST /api/sticker      → sticker_id (含 pack_id)
+//   写本地缓存 → 加进 g_packs[pack_id 对应] 的 stickers
+// 完成后 PostMessage WM_APP+29 (wp = 上传成功数)
+void importFromFolder(HWND notify, const std::wstring& folder_path,
+                      const std::string& pack_id);
+
+// 弹 SHBrowseForFolder + 调 importFromFolder
+void importFromFolderUi(HWND notify, const std::string& pack_id);
+
 // sticker 缓存目录 = %LOCALAPPDATA%/Launcher/stickers/
 std::wstring cacheDir();
 

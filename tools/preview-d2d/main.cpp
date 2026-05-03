@@ -279,6 +279,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 33: {                    // market listings fetched
             return 0;
         }
+        case WM_APP + 29: {                    // sticker import 完成；wp = 成功数
+            wchar_t buf[64];
+            if (wp > 0) {
+                swprintf_s(buf, L"已导入 %d 张表情 ✓", (int)wp);
+                toast::show(buf);
+                sticker::fetchMyPacks(hwnd);   // 重拉
+            } else {
+                toast::show(L"未上传任何文件（检查文件夹）");
+            }
+            return 0;
+        }
+        case WM_APP + 34: {                    // chat picker → 弹文件夹对话框 + 上传
+            auto* pid = (std::string*)wp;
+            if (pid && !pid->empty()) {
+                sticker::importFromFolderUi(hwnd, *pid);
+            }
+            return 0;
+        }
         case tray::kTrayCallbackMsg: {
             if (tray::onCallback(hwnd, wp, lp)) return 0;
             return 0;

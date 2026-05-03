@@ -12,6 +12,8 @@
 #include "palette.h"
 #include "net.h"
 #include "user_state.h"
+#include "hwid.h"
+#include "persist.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -162,7 +164,11 @@ void paintAuthView(D2DApp& app, float W, float H) {
 
     bool reg = (stages::g_auth_mode == AuthMode::Register);
     const float cw = 380.0f;
-    const float ch = reg ? 460.0f : 380.0f;
+    // 高度按 fields 数动态算：header 100 + fields*62 + btn 60 + (error 32) + switch 28 + bottom 24
+    int fields = reg ? 3 : 2;
+    const float ch = 100.0f + fields * 62.0f + 60.0f
+                   + (g_form.error_msg.empty() ? 0.0f : 32.0f)
+                   + 28.0f + 24.0f;
     const float cx = (W - cw) * 0.5f;
     const float cy = (H - ch) * 0.5f + stages::g_auth_card_y.value();
     float op = stages::g_auth_card_op.value();
@@ -251,17 +257,19 @@ void paintAuthView(D2DApp& app, float W, float H) {
                         br.solidA(0xFF8A80, op));
     }
 
-    // ===== Switch link (Login ↔ Register) =====
+    // ===== Switch link (Login ↔ Register) — 紧跟在 btn / error 下方 =====
     auto* link_normal = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     auto* link_bold   = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
                                            DWRITE_FONT_WEIGHT_BOLD);
     const wchar_t* prompt = reg ? kSwitchToLogin : kSwitchToReg;
     const wchar_t* link_label = reg ? kSwitchGoLogin : kSwitchGoReg;
+    float link_y = btn.y + btn.h + 16.0f
+                 + (g_form.error_msg.empty() ? 0.0f : 32.0f);
     prim::drawText_(ctx, prompt, link_normal,
-                    cx + 30, cy + ch - 36, 160, 18,
+                    cx + 30, link_y, 160, 18,
                     br.solidA(pal.text_muted, op));
     float link_w = measureW(app, link_label, link_bold) + 6.0f;
-    LayoutRect link{ cx + 30 + 130, cy + ch - 36, link_w, 18 };
+    LayoutRect link{ cx + 30 + 130, link_y, link_w, 18 };
     bool lhov = link.contains(g_mouse);
     prim::drawText_(ctx, link_label, link_bold,
                     link.x, link.y + 1, link.w, 18,
@@ -377,15 +385,22 @@ void handleSubmit(HWND hwnd) {
         std::unique_ptr<SubmitArg> a((SubmitArg*)lp);
         std::string u = net::jsonEscape(a->user);
         std::string p = net::jsonEscape(a->pass);
+        std::string hwid = hwidHex();             // 64 hex SHA-256，后端强制
         std::string body;
         const wchar_t* path;
         if (a->reg) {
             std::string inv = net::jsonEscape(a->invite);
-            body = "{\"username\":\"" + u + "\",\"password\":\"" + p
-                 + "\",\"invite_code\":\"" + inv + "\"}";
+            body = "{\"username\":\"" + u
+                 + "\",\"password\":\"" + p
+                 + "\",\"hwid_hex\":\"" + hwid
+                 + "\",\"client_ver\":\"0.1\""
+                 + ",\"invite_code\":\"" + inv + "\"}";
             path = L"/api/auth/register";
         } else {
-            body = "{\"username\":\"" + u + "\",\"password\":\"" + p + "\"}";
+            body = "{\"username\":\"" + u
+                 + "\",\"password\":\"" + p
+                 + "\",\"hwid_hex\":\"" + hwid
+                 + "\",\"client_ver\":\"0.1\"}";
             path = L"/api/auth/login";
         }
         auto resp = net::postJson(path, body);
@@ -397,11 +412,16 @@ void handleSubmit(HWND hwnd) {
                 g_pending_uid           = utf8ToW(net::jsonStr(resp.body, "uid"));
                 g_pending_nick          = utf8ToW(net::jsonStr(resp.body, "nickname"));
                 g_pending_error.clear();
+                // DPAPI 加密保存凭据，下次自动登录用
+                persist::saveCreds(a->user, a->pass);
             } else {
-                std::string msg = net::jsonStr(resp.body, "error");
+                // 把 body 直接当错误消息（GDI+ Preview 同款做法），更接近后端真实错误
+                std::string msg = resp.body;
                 if (msg.empty()) {
-                    msg = (resp.status == 0) ? "无法连接服务器，检查网络" : "登录失败";
+                    msg = (resp.status == 0) ? "无法连接服务器（154.40.36.22:1337）"
+                                              : "登录失败";
                 }
+                if (msg.size() > 80) msg = msg.substr(0, 80);
                 g_pending_error = utf8ToW(msg);
             }
         }

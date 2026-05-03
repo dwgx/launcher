@@ -69,13 +69,25 @@ void drawAvatarPill(D2DApp& app, float ax, float ay, float ar, float op) {
     if (!g_avatar_path.empty()) {
         auto* bmp = app.images().fromFile(g_avatar_path);
         if (bmp) {
-            ctx->PushAxisAlignedClip(D2D1::RectF(ax, ay, ax + ar * 2, ay + ar * 2),
-                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            // 圆形裁剪用 layer 更准；矩形 clip 配 fillCircle 之后画 bitmap 简化处理
-            ctx->DrawBitmap(bmp, D2D1::RectF(ax, ay, ax + ar * 2, ay + ar * 2),
-                            op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            ctx->PopAxisAlignedClip();
-            return;
+            // 真圆形裁剪：BitmapBrush 配 FillEllipse — 比 PushLayer geometry mask 更轻量
+            // BitmapBrush 自动按 destination ellipse 裁剪 + linear interpolation 平滑
+            D2D1_BITMAP_BRUSH_PROPERTIES bp = D2D1::BitmapBrushProperties(
+                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            ComPtr<ID2D1BitmapBrush> bb;
+            if (SUCCEEDED(ctx->CreateBitmapBrush(bmp, bp, &bb))) {
+                D2D1_SIZE_F sz = bmp->GetSize();
+                if (sz.width > 0 && sz.height > 0) {
+                    float scale_x = (ar * 2) / sz.width;
+                    float scale_y = (ar * 2) / sz.height;
+                    auto m = D2D1::Matrix3x2F::Scale({scale_x, scale_y}, {0, 0})
+                           * D2D1::Matrix3x2F::Translation(ax, ay);
+                    bb->SetTransform(m);
+                    bb->SetOpacity(op);
+                    ctx->FillEllipse(D2D1::Ellipse({ax + ar, ay + ar}, ar, ar), bb.Get());
+                    return;
+                }
+            }
         }
     }
     // 占位：主色圆 + 首字母
