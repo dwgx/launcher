@@ -14,6 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <mmsystem.h>     // timeBeginPeriod (winmm)
 #include <objidl.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
@@ -45,6 +46,7 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "winmm.lib")    // timeBeginPeriod 高精度定时器
 
 using namespace Gdiplus;
 
@@ -2928,6 +2930,10 @@ void showTrayMenu(HWND hwnd) {
 // ====================================================================
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_ERASEBKGND:
+            // 我们 WM_PAINT 一定会用 backbuffer 全画一遍，OS 不要再做默认擦除
+            // (每帧默认一次 1100×720 白擦 浪费 ~1ms，120Hz 下尤其感受明显)
+            return 1;
         case WM_NCHITTEST: {
             POINT p { LOWORD(lp), HIWORD(lp) };
             ScreenToClient(hwnd, &p);
@@ -3504,7 +3510,6 @@ ULONG_PTR g_gdiplus_token = 0;
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     // Per-Monitor DPI Aware V2 — 必须在创建任何窗口之前调用。
-    // OS 不会再对窗口做 bitmap-stretch（高 DPI 模糊根因）。
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     {
         HDC sdc = GetDC(nullptr);
@@ -3512,6 +3517,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         ReleaseDC(nullptr, sdc);
         if (dpi_x > 0) g_dpi_scale = (float)dpi_x / 96.0f;
     }
+    // 高精度定时器：默认 Windows 调度 tick = 15.6ms，Sleep(8) 实际睡 16ms
+    // → 动画看起来 60FPS 不是 120FPS，弹出来明显一顿一顿。
+    // timeBeginPeriod(1) 把 tick 拉到 1ms，Sleep(8) 真 8ms。配对的
+    // timeEndPeriod(1) 在退出主循环后调（不调也行，进程退出 OS 会还原）。
+    timeBeginPeriod(1);
 
     detectSystemLanguage();
 
@@ -3686,11 +3696,15 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         modal::g_confirm().t.tick(dt);
 
         // 入场流程驱动 — Tween 都是逻辑像素，SetWindowPos 要物理像素
+        // SWP_NOSENDCHANGING + SWP_DEFERERASE：动画期不让 OS 跟应用反复
+        // 协商 size 也不擦背景，省掉每帧 SetWindowPos 的 WM_GETMINMAXINFO /
+        // WM_NCCALCSIZE 来回 → 缩窗动画立刻顺
         auto resize_to_tween = [&]() {
             int w = dpi_px(g_window_w.value());
             int h = dpi_px(g_window_h.value());
             int x = (sw - w) / 2, y = (sh - h) / 2;
-            SetWindowPos(g_hwnd, nullptr, x, y, w, h, SWP_NOZORDER);
+            SetWindowPos(g_hwnd, nullptr, x, y, w, h,
+                         SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_DEFERERASE);
         };
         if (g_stage == Stage::Dot && g_time_in_stage > 0.45f) {
             enterExpandLoadingStage();
