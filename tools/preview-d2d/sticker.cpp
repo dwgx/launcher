@@ -72,21 +72,36 @@ void fetchMyPacks(HWND notify) {
         }
         {
             std::lock_guard<std::mutex> lk(g_mtx);
-            // Merge: 保留系统 + 我的 + 已有 user packs 的 stickers（避免空白窗）
-            // tmp 是后端最新 metadata，但 stickers 数组可能还没拉，merge 旧的
             std::unordered_map<std::string, Pack> by_id;
             for (auto& p : g_packs) if (!p.id.empty()) by_id[p.id] = p;
 
             std::vector<Pack> merged;
-            for (auto& p : g_packs) if (p.is_system || p.name == L"我的表情") merged.push_back(p);
+            // 系统 emoji 永远第一
+            for (auto& p : g_packs) if (p.is_system) merged.push_back(p);
+
+            // 加 backend 返回的 packs（含真"我的表情" 如果有）
+            bool found_mine = false;
             for (auto& np : tmp) {
                 auto it = by_id.find(np.id);
                 if (it != by_id.end()) {
                     np.stickers = std::move(it->second.stickers);
                     np.sticker_ids = std::move(it->second.sticker_ids);
                 }
+                if (np.name == L"我的表情") found_mine = true;
                 merged.push_back(std::move(np));
             }
+
+            // backend 没"我的表情" → 保留本地 placeholder（ensureMyStickersPack
+            // 会异步创建，下次 fetchMyPacks 就有了）。避免重复"我的表情"。
+            if (!found_mine) {
+                for (auto& p : g_packs) {
+                    if (!p.is_system && p.name == L"我的表情" && p.id.empty()) {
+                        merged.insert(merged.begin() + 1, p);
+                        break;
+                    }
+                }
+            }
+
             g_packs = std::move(merged);
         }
         PostMessageW(a->h, WM_APP + 22, 0, 0);

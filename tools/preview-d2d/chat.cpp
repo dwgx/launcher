@@ -64,9 +64,103 @@ std::vector<Msg>& streamFor(const std::wstring& slug) {
     return it->second;
 }
 
+static std::unordered_map<std::wstring, bool> g_history_loaded;
+
 void switchChannel(const std::wstring& slug) {
     g_active = slug;
     g_focus_composer = false;
+    // 第一次切到这个频道 → 异步拉历史
+    if (!g_history_loaded[slug]) {
+        g_history_loaded[slug] = true;
+        fetchHistory(GetActiveWindow(), slug);
+    }
+}
+
+namespace {
+struct HistArg { std::wstring slug; std::string chat_id; HWND h; };
+std::mutex g_pending_hist_mtx;
+std::unordered_map<std::wstring, std::vector<Msg>> g_pending_history;
+
+std::wstring utf8wHist(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(n - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
+}
+}
+
+void fetchHistory(HWND notify, const std::wstring& slug) {
+    if (g_session_token.empty()) return;
+    std::string chat_id;
+    for (auto& c : g_channels) if (c.slug == slug) { chat_id = c.id; break; }
+    if (chat_id.empty()) return;
+
+    auto* a = new HistArg{ slug, chat_id, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<HistArg> a((HistArg*)lp);
+        std::string url = "/api/chat/history?session_token=" + g_session_token
+                        + "&chat_id=" + a->chat_id + "&limit=100";
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        if (!r.ok()) return 0;
+        // 简单解析 [{"kind":"text","from":"...","author":"...","body":"...","time":"..."}, ...]
+        std::vector<Msg> msgs;
+        size_t pos = 0;
+        while (true) {
+            auto ob = r.body.find('{', pos);
+            if (ob == std::string::npos) break;
+            auto cb = r.body.find('}', ob);
+            if (cb == std::string::npos) break;
+            std::string obj = r.body.substr(ob, cb - ob + 1);
+            Msg m;
+            std::string kind = net::jsonStr(obj, "kind");
+            if (kind == "sticker") m.kind = MsgKind::Sticker;
+            else if (kind == "image") m.kind = MsgKind::Image;
+            else if (kind == "gif") m.kind = MsgKind::Gif;
+            else if (kind == "video") m.kind = MsgKind::Video;
+            else if (kind == "system") m.kind = MsgKind::System;
+            else m.kind = MsgKind::Text;
+            m.from = utf8wHist(net::jsonStr(obj, "from"));
+            m.author = utf8wHist(net::jsonStr(obj, "author"));
+            m.body = utf8wHist(net::jsonStr(obj, "body"));
+            m.time = utf8wHist(net::jsonStr(obj, "time"));
+            m.status = L"online";
+            msgs.push_back(std::move(m));
+            pos = cb + 1;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_pending_hist_mtx);
+            g_pending_history[a->slug] = std::move(msgs);
+        }
+        // PostMessage 让主线程把 pending 替换到 streamFor
+        auto* slug_p = new std::wstring(a->slug);
+        PostMessageW(a->h, WM_APP + 45, 0, (LPARAM)slug_p);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 主线程调（WM_APP+45）— merge 历史到 streamFor
+void applyHistoryResult(const std::wstring& slug) {
+    std::vector<Msg> msgs;
+    {
+        std::lock_guard<std::mutex> lk(g_pending_hist_mtx);
+        auto it = g_pending_history.find(slug);
+        if (it == g_pending_history.end()) return;
+        msgs = std::move(it->second);
+        g_pending_history.erase(it);
+    }
+    auto& s = streamFor(slug);
+    // 历史消息插到流的开头（之前实时收到的"me"放在后面）
+    if (s.empty()) {
+        s = std::move(msgs);
+    } else {
+        // 简单 merge：历史在前，本地实时在后
+        std::vector<Msg> merged = std::move(msgs);
+        for (auto& m : s) merged.push_back(std::move(m));
+        s = std::move(merged);
+    }
 }
 
 static Channel* activeChannel() {
@@ -235,15 +329,16 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                         br.solid(0xFFFFFFFF),
                         DWRITE_TEXT_ALIGNMENT_CENTER,
                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        // 注册头像 hit (左键插 @mention，右键看主页 — me 自己除外)
+        // 注册头像 hit (左键看主页 — me 自己除外；右键也看主页)
         if (m.from != L"me" && !m.from.empty()) {
             g_avatar_hits.push_back({ { x, ay, ar * 2, ar * 2 }, m.from });
             std::wstring fcopy = m.from;
             hit({ x, ay, ar * 2, ar * 2 }, [fcopy](){
-                // 左键插 @
-                std::wstring at = L"@" + fcopy + L" ";
-                g_composer.replaceSelection(at);
-                g_focus_composer = true;
+                // 左键 → 看主页（PostMessage WM_APP+37）
+                static std::wstring g_pending_peer;
+                g_pending_peer = fcopy;
+                PostMessageW(GetActiveWindow(), WM_APP + 37, 0,
+                             (LPARAM)&g_pending_peer);
             }, true);
         }
     }
@@ -388,24 +483,31 @@ namespace {
 struct SendArg {
     std::string session_token;
     std::string chat_id;
-    std::wstring text;
+    std::string kind;          // text / sticker / image / gif
+    std::wstring body;
     HWND hwnd;
 };
 }
 
-static void sendTextMessage(HWND hwnd, const std::wstring& text) {
+static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kind = "text") {
     if (g_session_token.empty()) return;
     auto* ch = activeChannel();
     if (ch->id.empty()) return;     // 还没拿到 backend uuid
-    auto* a = new SendArg{ g_session_token, ch->id, text, hwnd };
+    auto* a = new SendArg{ g_session_token, ch->id, kind, body, hwnd };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<SendArg> a((SendArg*)lp);
-        std::string body = "{\"session_token\":\"" + a->session_token
-                         + "\",\"chat_id\":\"" + a->chat_id
-                         + "\",\"kind\":\"text\",\"text\":\"" + net::jsonEscape(a->text) + "\"}";
-        net::postJson(L"/api/chat/send", body);
+        std::string b = "{\"session_token\":\"" + a->session_token
+                      + "\",\"chat_id\":\"" + a->chat_id
+                      + "\",\"kind\":\"" + a->kind
+                      + "\",\"text\":\"" + net::jsonEscape(a->body) + "\"}";
+        net::postJson(L"/api/chat/send", b);
         return 0;
     }, a, 0, nullptr);
+}
+
+// 兼容老调用名
+static void sendTextMessage(HWND hwnd, const std::wstring& text) {
+    sendChatMessage(hwnd, text, "text");
 }
 
 // ============== Composer ==============
@@ -819,16 +921,22 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                     // ✕ 优先 hit（注册顺序：先 sticker，再 ✕，dispatch reverse 后 ✕ 优先）
                     hit(sr, [path](){
                         Msg m;
-                        m.kind = MsgKind::Sticker;
+                        // GIF 路径用 Gif kind，其他用 Sticker
+                        auto sd2 = path.find_last_of(L'.');
+                        bool is_g = (sd2 != std::wstring::npos
+                                     && (path.substr(sd2) == L".gif"
+                                         || path.substr(sd2) == L".GIF"));
+                        m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
                         m.body = path;
                         m.time = L"now";
                         streamFor(g_active).push_back(std::move(m));
+                        sendChatMessage(GetActiveWindow(), path,
+                                        is_g ? "gif" : "sticker");
                         g_picker_open = false;
                         g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                     }, true);
                     hit(xb, [path](){
-                        // PostMessage 主线程调 sticker::deleteSticker
                         static std::wstring g_pending_del;
                         g_pending_del = path;
                         PostMessageW(GetActiveWindow(), WM_APP + 40,
@@ -837,11 +945,17 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 } else {
                     hit(sr, [path](){
                         Msg m;
-                        m.kind = MsgKind::Sticker;
+                        auto sd2 = path.find_last_of(L'.');
+                        bool is_g = (sd2 != std::wstring::npos
+                                     && (path.substr(sd2) == L".gif"
+                                         || path.substr(sd2) == L".GIF"));
+                        m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
                         m.body = path;
                         m.time = L"now";
                         streamFor(g_active).push_back(std::move(m));
+                        sendChatMessage(GetActiveWindow(), path,
+                                        is_g ? "gif" : "sticker");
                         g_picker_open = false;
                         g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                     }, true);
@@ -916,7 +1030,19 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
 // ============== 事件 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
-    return dispatchClick(dip);
+    bool consumed = dispatchClick(dip);
+    // composer focus 自动 dismiss — 点 composer 之外（且未命中 hits）就 unfocus
+    // bounds 检查 + composer hit 自己会重设 focus = true，所以这里只在没 consumed 时清
+    if (g_focus_composer && !g_composer.bounds.contains(dip)) {
+        g_focus_composer = false;
+    }
+    // picker 自动 dismiss — 点击没命中 picker 内部任何 hit (即 consumed=false 表示
+    // 点击的是空白区域，picker 区域内的 hits 也会 consume)
+    if (g_picker_open && !consumed) {
+        g_picker_open = false;
+        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    }
+    return consumed;
 }
 
 bool onMouseRDown(HWND hwnd, POINT dip) {

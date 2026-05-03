@@ -59,6 +59,7 @@ void geoIP(HWND notify);
 struct PeerProfile {
     std::wstring uid, username, nickname, status, status_text, bio;
     std::wstring avatar_path;
+    std::vector<std::wstring> tags;     // 个人标签
     bool loaded = false;
     std::wstring err;
 };

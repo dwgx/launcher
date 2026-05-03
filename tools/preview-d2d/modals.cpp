@@ -138,8 +138,13 @@ void drawField(D2DApp& app, InputBox& box, float x, float y, float w, float h,
         float pre_w = measureW(app, box.displaySlice(0, box.cursor), fmt);
         int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
-            prim::drawLine(ctx, x + 12 + pre_w, y + 8,
-                           x + 12 + pre_w, y + h - 8,
+            // caret 高度固定 18px (跟字号匹配)，不跟 ih 走 — 防止大 textarea
+            // (h=140) 时 caret 画 110px 长竖线
+            float cx = x + 12 + pre_w;
+            float cy_top = y + 10;
+            float cy_bot = cy_top + 18.0f;
+            if (cy_bot > y + h - 4) cy_bot = y + h - 4;
+            prim::drawLine(ctx, cx, cy_top, cx, cy_bot,
                            br.solidA(pal.primary, op), 1.5f);
         }
     }
@@ -871,36 +876,64 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
                         br.solidA(pal.text_muted, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
     } else {
-        // nickname + status dot
+        // nickname
         prim::drawText_(ctx, peer.nickname.empty() ? peer.uid : peer.nickname, h1,
                         cx, cy + 150, cw, 26,
                         br.solidA(pal.text, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
-        // uid + username
-        wchar_t handle[128];
-        swprintf_s(handle, L"@%.32ls  ·  UID %.16ls",
-                   peer.username.c_str(), peer.uid.c_str());
-        prim::drawText_(ctx, handle, mt,
-                        cx, cy + 178, cw, 18,
-                        br.solidA(pal.text_muted, t),
-                        DWRITE_TEXT_ALIGNMENT_CENTER);
-
+        // 在线状态 dot + label (status: online/busy/away/sleep/offline)
+        {
+            const wchar_t* st_label = L"离线";
+            uint32_t st_color = 0xFF6B6A67;
+            if (peer.status == L"online")  { st_label = L"在线"; st_color = 0xFF4ADE80; }
+            else if (peer.status == L"busy"){ st_label = L"繁忙"; st_color = 0xFFE34B4B; }
+            else if (peer.status == L"away"){ st_label = L"离开"; st_color = 0xFFF5A524; }
+            else if (peer.status == L"sleep"){st_label = L"睡眠"; st_color = 0xFF8B7BD9; }
+            float dot_x = cx + cw * 0.5f - 36, dot_y = cy + 184;
+            prim::fillCircle(ctx, dot_x, dot_y + 4, 4, br.solidA(st_color, t));
+            prim::drawText_(ctx, st_label, mt,
+                            dot_x + 10, dot_y - 2, 80, 14,
+                            br.solidA(st_color, t));
+            // uid 在右
+            wchar_t handle[64];
+            swprintf_s(handle, L"UID %.16ls", peer.uid.c_str());
+            prim::drawText_(ctx, handle, mt,
+                            dot_x + 60, dot_y - 2, 100, 14,
+                            br.solidA(pal.text_muted, t));
+        }
         // status text
         if (!peer.status_text.empty()) {
             prim::drawText_(ctx, peer.status_text, sub,
-                            cx + 24, cy + 210, cw - 48, 40,
-                            br.solidA(pal.text_muted, t),
+                            cx + 24, cy + 210, cw - 48, 22,
+                            br.solidA(pal.text, t),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        // tags chips
+        if (!peer.tags.empty()) {
+            float tx = cx + 24, ty_ = cy + 240;
+            auto* chip_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+            for (auto& tag : peer.tags) {
+                DWRITE_TEXT_METRICS tm{};
+                app.texts().measure(chip_fmt, tag, 8192, 256, &tm);
+                float tw = tm.width + 20;
+                if (tx + tw > cx + cw - 24) { tx = cx + 24; ty_ += 28; }
+                if (ty_ > cy + 280) break;
+                prim::fillRR(ctx, tx, ty_, tw, 22, 11, br.solidA(pal.surface, t));
+                prim::drawText_(ctx, tag, chip_fmt,
+                                tx + 10, ty_ + 4, tw - 20, 14,
+                                br.solidA(pal.text, t));
+                tx += tw + 6;
+            }
         }
         // bio
         if (!peer.bio.empty()) {
             prim::drawText_(ctx, L"个人签名", mt,
-                            cx + 24, cy + 270, cw - 48, 16,
+                            cx + 24, cy + 296, cw - 48, 16,
                             br.solidA(pal.text_muted, t));
-            prim::fillRR(ctx, cx + 24, cy + 290, cw - 48, 80, 8.0f,
+            prim::fillRR(ctx, cx + 24, cy + 316, cw - 48, 80, 8.0f,
                          br.solidA(pal.surface, t));
             prim::drawText_(ctx, peer.bio, sub,
-                            cx + 36, cy + 300, cw - 72, 64,
+                            cx + 36, cy + 326, cw - 72, 64,
                             br.solidA(pal.text, t));
         }
     }

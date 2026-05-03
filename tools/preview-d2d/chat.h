@@ -65,4 +65,10 @@ void applyOfficialResult();
 // 拖拽文件进 chat → 添加 image bubble + 上传后端
 void appendMedia(const std::wstring& path);
 
+// 拉某频道历史消息 (GET /api/chat/history?session_token=&chat_id=) → WM_APP+45
+void fetchHistory(HWND notify, const std::wstring& slug);
+
+// 主线程 WM_APP+45 调 — 把后台拉到的历史 merge 到 streamFor(slug)
+void applyHistoryResult(const std::wstring& slug);
+
 }  // namespace launcher::d2d::chat

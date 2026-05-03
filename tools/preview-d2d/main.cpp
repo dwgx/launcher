@@ -182,6 +182,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 5: {                     // Chat official channels result
             chat::applyOfficialResult();
+            // 拉到 chat_id 后立即 fetchHistory 当前频道
+            chat::fetchHistory(hwnd, chat::g_active);
             return 0;
         }
         case WM_APP + 10: {                    // WS message arrived
@@ -263,8 +265,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 27: {                    // pack delete result
-            if (wp) toast::show(L"已删除表情包");
-            else    toast::show(L"删除失败");
+            if (wp) {
+                toast::show(L"已删除表情包");
+                sticker::fetchMyPacks(hwnd);    // 立即刷新 picker 让 pack 消失
+            } else toast::show(L"删除失败");
             return 0;
         }
         case WM_APP + 28: {                    // pack install result
@@ -354,6 +358,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 41: {                    // chat picker → 我的表情想导入
             toast::show(L"请先切到/新建一个表情包分组再导入");
+            return 0;
+        }
+        case WM_APP + 45: {                    // chat history fetched (lp = std::wstring* slug)
+            std::unique_ptr<std::wstring> p((std::wstring*)lp);
+            if (p) chat::applyHistoryResult(*p);
             return 0;
         }
         case WM_APP + 35: {                    // profile update result

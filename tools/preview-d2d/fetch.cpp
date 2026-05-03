@@ -249,6 +249,22 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
                 g_peer.status      = utf8ToW(net::jsonStr(r.body, "status"));
                 g_peer.status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
                 g_peer.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
+                g_peer.tags.clear();
+                // 简单解析 "tags":["a","b",...]
+                auto p1 = r.body.find("\"tags\":[");
+                if (p1 != std::string::npos) {
+                    size_t pos = p1 + 8;
+                    while (true) {
+                        auto q1 = r.body.find('"', pos);
+                        if (q1 == std::string::npos) break;
+                        auto q2 = r.body.find('"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        g_peer.tags.push_back(utf8ToW(
+                            r.body.substr(q1 + 1, q2 - q1 - 1)));
+                        pos = q2 + 1;
+                        if (pos < r.body.size() && r.body[pos] == ']') break;
+                    }
+                }
                 g_peer.loaded = true;
             } else {
                 g_peer.err = utf8ToW(r.body.empty() ? "无法连接" : r.body.substr(0, 80));
