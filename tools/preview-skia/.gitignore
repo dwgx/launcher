@@ -1,0 +1,4 @@
+LauncherSkiaPoC.exe
+*.obj
+*.pdb
+skia-*.png

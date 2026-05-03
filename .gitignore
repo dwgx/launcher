@@ -2,6 +2,7 @@
 build/
 out/
 cmake-build-*/
+third_party/skia/      # ~250MB 预编译，scripts/fetch-skia.ps1 自动拉
 **/CMakeCache.txt
 **/CMakeFiles/
 **/cmake_install.cmake
