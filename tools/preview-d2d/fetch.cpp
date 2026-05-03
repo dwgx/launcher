@@ -260,6 +260,27 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
     }, a, 0, nullptr);
 }
 
+void geoIP(HWND notify) {
+    auto* a = new VoidArg{ notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<VoidArg> a((VoidArg*)lp);
+        // ip-api.com 免费 IP 地理位置，无需 API key (45 req/min)
+        // 返回 {"country":"China","countryCode":"CN","region":"BJ","city":"Beijing",...}
+        // 启用 VPN 时返回 VPN 出口的国家
+        auto r = net::requestAny(L"ip-api.com", 80, L"/json/", false);
+        if (!r.ok()) return 0;
+        std::string code = net::jsonStr(r.body, "countryCode");
+        if (code.empty()) return 0;
+        // 转 wstring 写到 g_geo_country
+        if (code.size() < 16) {
+            for (size_t i = 0; i < code.size(); ++i) g_geo_country[i] = (wchar_t)code[i];
+            g_geo_country[code.size()] = 0;
+        }
+        PostMessageW(a->h, WM_APP + 38, 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
 void uploadAvatar(HWND notify, const std::wstring& path) {
     if (g_session_token.empty() || path.empty()) return;
     auto* a = new AvatarArg{ path, notify };

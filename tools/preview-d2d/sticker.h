@@ -47,6 +47,9 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
 // 弹 SHBrowseForFolder + 调 importFromFolder
 void importFromFolderUi(HWND notify, const std::string& pack_id);
 
+// 用户名下所有 sticker（含全部自创 pack）总数 — 后端限 50/user
+int totalUserStickers();
+
 // sticker 缓存目录 = %LOCALAPPDATA%/Launcher/stickers/
 std::wstring cacheDir();
 

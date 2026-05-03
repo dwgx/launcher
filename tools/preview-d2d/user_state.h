@@ -36,6 +36,9 @@ extern std::wstring g_avatar_path;
 extern std::vector<std::wstring> g_user_tags;
 extern std::mutex g_user_tags_mtx;
 
+// 异步 IP 地理位置 — fetch::geoIP() 启动后查 ip-api.com，写到这里
+extern wchar_t g_geo_country[16];   // e.g. L"CN", L"US"，空表示未知
+
 // Loading 阶段实时滚动日志（autologin 模式）
 extern std::vector<std::wstring> g_login_log;
 inline void logLine(const wchar_t* s) {

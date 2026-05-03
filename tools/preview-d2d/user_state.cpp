@@ -14,6 +14,8 @@ std::wstring g_avatar_path;
 std::vector<std::wstring> g_user_tags;
 std::mutex g_user_tags_mtx;
 
+wchar_t g_geo_country[16] = {0};
+
 std::vector<std::wstring> g_login_log;
 
 }  // namespace launcher::d2d

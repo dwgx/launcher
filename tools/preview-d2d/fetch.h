@@ -52,6 +52,9 @@ void marketListings(HWND notify);
 // fields = JSON object 片段，e.g. "\"bio\":\"...\""
 void profileUpdate(HWND notify, const std::string& fields);
 
+// GET ip-api.com/json/ — 异步查 IP 地理位置 → 写 g_geo_country (WM_APP+38)
+void geoIP(HWND notify);
+
 // GET /api/profile/:uid — 拿别人的资料 (nickname/status/bio/avatar)
 struct PeerProfile {
     std::wstring uid, username, nickname, status, status_text, bio;

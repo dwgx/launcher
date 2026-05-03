@@ -231,10 +231,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 25: {                    // pack contents fetched
             return 0;
         }
-        case WM_APP + 26: {                    // pack share result
+        case WM_APP + 26: {                    // pack share result; lp = std::string* short_name (if pub)
             if (wp) {
-                toast::show(L"分享设置已更新");
-                sticker::fetchMyPacks(hwnd);
+                if (lp) {
+                    auto* sn = (std::string*)lp;
+                    std::wstring link = L"launcher://pack/";
+                    for (char c : *sn) link.push_back((wchar_t)c);
+                    if (OpenClipboard(hwnd)) {
+                        EmptyClipboard();
+                        size_t bytes = (link.size() + 1) * sizeof(wchar_t);
+                        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                        if (h) {
+                            memcpy(GlobalLock(h), link.c_str(), bytes);
+                            GlobalUnlock(h);
+                            SetClipboardData(CF_UNICODETEXT, h);
+                        }
+                        CloseClipboard();
+                    }
+                    toast::show(L"分享链接已复制到剪贴板 ✓");
+                } else {
+                    toast::show(L"已取消分享");
+                }
+                // 不重拉 packs（避免 active tab 索引错乱）— sharePack 内部已写回 short_name
             } else toast::show(L"分享失败");
             return 0;
         }
@@ -295,8 +313,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 34: {                    // chat picker → 弹文件夹对话框 + 上传
             auto* pid = (std::string*)wp;
             if (pid && !pid->empty()) {
+                int total = sticker::totalUserStickers();
+                if (total >= 50) {
+                    toast::show(L"已达上限（50/用户）— 删些再导入");
+                    return 0;
+                }
                 sticker::importFromFolderUi(hwnd, *pid);
             }
+            return 0;
+        }
+        case WM_APP + 38: {                    // geoIP fetched → 重 paint Home 显示国家
             return 0;
         }
         case WM_APP + 35: {                    // profile update result
@@ -414,6 +440,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     }
 
     stages::enterDotStage();
+    // 启动后异步查 IP 地理位置（公网 IP / VPN 出口国家）
+    fetch::geoIP(hwnd);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 

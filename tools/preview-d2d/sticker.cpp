@@ -72,13 +72,22 @@ void fetchMyPacks(HWND notify) {
         }
         {
             std::lock_guard<std::mutex> lk(g_mtx);
-            // 保留系统 + 我的，重建其他
-            std::vector<Pack> kept;
-            for (auto& p : g_packs) {
-                if (p.is_system || p.name == L"我的表情") kept.push_back(p);
+            // Merge: 保留系统 + 我的 + 已有 user packs 的 stickers（避免空白窗）
+            // tmp 是后端最新 metadata，但 stickers 数组可能还没拉，merge 旧的
+            std::unordered_map<std::string, Pack> by_id;
+            for (auto& p : g_packs) if (!p.id.empty()) by_id[p.id] = p;
+
+            std::vector<Pack> merged;
+            for (auto& p : g_packs) if (p.is_system || p.name == L"我的表情") merged.push_back(p);
+            for (auto& np : tmp) {
+                auto it = by_id.find(np.id);
+                if (it != by_id.end()) {
+                    np.stickers = std::move(it->second.stickers);
+                    np.sticker_ids = std::move(it->second.sticker_ids);
+                }
+                merged.push_back(std::move(np));
             }
-            for (auto& p : tmp) kept.push_back(std::move(p));
-            g_packs = std::move(kept);
+            g_packs = std::move(merged);
         }
         PostMessageW(a->h, WM_APP + 22, 0, 0);
         // 拉每个 pack 的内容
@@ -228,7 +237,23 @@ void sharePack(HWND notify, const std::string& pack_id, bool is_public) {
                          + "\",\"pack_id\":\"" + a->id
                          + "\",\"is_public\":" + (a->pub ? "true" : "false") + "}";
         auto r = net::postJson(L"/api/sticker/pack/share", body);
-        PostMessageW(a->h, WM_APP + 26, r.ok() ? 1 : 0, 0);
+        // 拿 short_name + is_public，写回 g_packs
+        static std::string g_pending_sn;   // 主线程读 lp 拿
+        g_pending_sn.clear();
+        if (r.ok()) {
+            std::string sn = net::jsonStr(r.body, "short_name");
+            if (!sn.empty()) {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                for (auto& p : g_packs) if (p.id == a->id) {
+                    p.short_name = sn;
+                    p.is_public = a->pub;
+                    break;
+                }
+                if (a->pub) g_pending_sn = sn;     // 主线程复制到剪贴板
+            }
+        }
+        PostMessageW(a->h, WM_APP + 26, r.ok() ? 1 : 0,
+                     g_pending_sn.empty() ? 0 : (LPARAM)&g_pending_sn);
         return 0;
     }, a, 0, nullptr);
 }
@@ -388,6 +413,16 @@ void importFromFolderUi(HWND notify, const std::string& pack_id) {
         importFromFolder(notify, path, pack_id);
     }
     CoTaskMemFree(pidl);
+}
+
+int totalUserStickers() {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    int n = 0;
+    for (auto& p : g_packs) {
+        if (p.is_system) continue;
+        n += (int)p.stickers.size();
+    }
+    return n;
 }
 
 }  // namespace launcher::d2d::sticker

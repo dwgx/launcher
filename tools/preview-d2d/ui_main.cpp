@@ -37,14 +37,14 @@ Tween  g_seg_lang_x, g_seg_lang_w, g_seg_theme_x, g_seg_theme_w;
 
 namespace {
 
-struct MenuEntry { stages::View view; const wchar_t* label; icons::Name icon; };
+struct MenuEntry { stages::View view; const char* label_key; icons::Name icon; };
 constexpr MenuEntry kMenu[] = {
-    { stages::View::Home,     L"主页",    icons::Name::Home },
-    { stages::View::Lunching, L"启动",    icons::Name::Library },
-    { stages::View::Chat,     L"聊天",    icons::Name::Chat },
-    { stages::View::Market,   L"市场",    icons::Name::Cart },
-    { stages::View::Cloud,    L"云端",    icons::Name::Cloud },
-    { stages::View::Settings, L"设置",    icons::Name::Settings },
+    { stages::View::Home,     "menu.home",     icons::Name::Home },
+    { stages::View::Lunching, "menu.lunching", icons::Name::Library },
+    { stages::View::Chat,     "menu.chat",     icons::Name::Chat },
+    { stages::View::Market,   "menu.market",   icons::Name::Cart },
+    { stages::View::Cloud,    "menu.cloud",    icons::Name::Cloud },
+    { stages::View::Settings, "menu.settings", icons::Name::Settings },
 };
 
 float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
@@ -188,7 +188,8 @@ void paintSidebar(D2DApp& app, float H) {
         uint32_t tc = active ? pal.primary : (hover ? pal.text : pal.text_muted);
 
         icons::drawIcon(app, m.icon, item.x + 12.0f, item.y + 9.0f, 20.0f, tc);
-        prim::drawText_(ctx, m.label, item_fmt,
+        std::wstring lbl = trW(m.label_key);
+        prim::drawText_(ctx, lbl, item_fmt,
                         item.x + 44.0f, item.y + 11.0f, item.w - 50.0f, 18.0f,
                         br.solid(tc));
 
@@ -273,7 +274,8 @@ void paintAccountDropdown(D2DApp& app, float W) {
     icons::drawIcon(app, icons::Name::Edit, dx + 14, iy + 6, 14,
                     fadeArgb(pal.text_muted, t));
     if (g_user.status_text.empty()) {
-        prim::drawText_(ctx, L"添加状态消息…", sm_fmt,
+        std::wstring add = trW("acc.add_status");
+        prim::drawText_(ctx, add, sm_fmt,
                         dx + 32, iy + 7, dw - 60, 16,
                         br.solidA(pal.text_faint, t));
     } else {
@@ -324,24 +326,24 @@ void paintAccountDropdown(D2DApp& app, float W) {
         iy += 8;
     }
 
-    struct Item { const wchar_t* label; icons::Name icon; std::function<void()> click; bool danger; };
+    struct Item { const char* label_key; icons::Name icon; std::function<void()> click; bool danger; };
     Item items[] = {
-        { L"个人资料", icons::Name::User, [](){
+        { "acc.profile", icons::Name::User, [](){
             switchView(stages::View::Profile);
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
-        { L"登录历史", icons::Name::History, [](){
+        { "acc.history", icons::Name::History, [](){
             modal::openHistory();
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
-        { L"修改密码", icons::Name::Shield, [](){
+        { "acc.password", icons::Name::Shield, [](){
             modal::openChangePw();
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
-        { L"退出登录", icons::Name::Logout, [](){
+        { "acc.signout", icons::Name::Logout, [](){
             modal::openConfirm(L"退出登录", L"将清除本机会话，下次启动需重新登录。",
                 [](){
                     fetch::logout(g_session_token);
@@ -376,7 +378,8 @@ void paintAccountDropdown(D2DApp& app, float W) {
         }
         uint32_t tc = it.danger ? 0xE34B4B : pal.text;
         icons::drawIcon(app, it.icon, r.x + 10, r.y + 7, 16, fadeArgb(tc, t));
-        prim::drawText_(ctx, it.label, item_fmt,
+        std::wstring lbl = trW(it.label_key);
+        prim::drawText_(ctx, lbl, item_fmt,
                         r.x + 32, r.y + 8, r.w - 40, 18,
                         br.solidA(tc, t));
         hit(r, it.click, true);
@@ -426,13 +429,17 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     float vx = ax + 32, vy = ay + 28;
     float ty = vy + (1.0f - op) * 8.0f;
 
-    // greet + sub
-    wchar_t greet[256];
-    swprintf_s(greet, L"你好，%ls", g_user.nickname.c_str());
-    prim::drawText_(ctx, greet, h1,
-                    vx, ty, aw - 64, 36,
-                    br.solidA(pal.text, op));
-    prim::drawText_(ctx, L"欢迎回来", sub,
+    // greet + sub - i18n
+    {
+        std::wstring greet_tpl = trW("home.greet");
+        // 替换 {nickname}
+        auto p = greet_tpl.find(L"{nickname}");
+        if (p != std::wstring::npos) greet_tpl.replace(p, 10, g_user.nickname);
+        prim::drawText_(ctx, greet_tpl, h1,
+                        vx, ty, aw - 64, 36,
+                        br.solidA(pal.text, op));
+    }
+    prim::drawText_(ctx, trW("home.subtitle"), sub,
                     vx, ty + 36, aw - 64, 18,
                     br.solidA(pal.text_muted, op));
 
@@ -460,39 +467,54 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     fx, cy + 56, cw - (fx - cx) - 22, 18,
                     br.solidA(statusColor(g_status), op));
 
-    // 3 stat 卡（订阅 / 时间 / PC 名）
+    // 3 stat 卡（订阅 / 时间 / PC 名）— 时间精确到秒 + 时区 + VPN/国家
     float sw_ = (cw - 40) / 3.0f;
     float sy_ = cy + ch + 20;
-    struct Stat { const wchar_t* label; const wchar_t* val; bool primary; };
+    struct Stat { std::wstring label; std::wstring val; bool primary; };
     SYSTEMTIME st{};
     GetLocalTime(&st);
-    wchar_t tbuf[32];
-    swprintf_s(tbuf, L"%02d:%02d", st.wHour, st.wMinute);
+    // 计算时区（系统时区 - UTC offset）
+    TIME_ZONE_INFORMATION tzi{};
+    GetTimeZoneInformation(&tzi);
+    int tz_min = -tzi.Bias;     // Bias 是 UTC-Local，所以 -Bias = local offset
+    wchar_t tbuf[64];
+    if (g_geo_country[0] != 0) {
+        // 如果有 VPN/国家信息，附加显示
+        swprintf_s(tbuf, L"%02d:%02d:%02d  UTC%+d  %ls",
+                   st.wHour, st.wMinute, st.wSecond, tz_min / 60,
+                   g_geo_country);
+    } else {
+        swprintf_s(tbuf, L"%02d:%02d:%02d  UTC%+d",
+                   st.wHour, st.wMinute, st.wSecond, tz_min / 60);
+    }
     wchar_t pcname[64] = {0}; DWORD pcsz = 64;
     GetComputerNameW(pcname, &pcsz);
     Stat stats[] = {
-        { L"当前时间", tbuf, false },
-        { L"本机名",   pcname, false },
-        { L"订阅",     g_user.expires.c_str(), true },
+        { trW("home.time"),         tbuf, false },
+        { trW("home.host"),         pcname, false },
+        { trW("home.subscription"), g_user.expires, true },
     };
     float spx = cx;
     for (auto& s : stats) {
         prim::drawShadow(ctx, br, spx, sy_, sw_, 84, 12.0f, pal.shadow_card, op * 0.7f, 2.0f, 2);
         if (s.primary) {
-            // 主色渐变占位 — 简化为主色 fill
             prim::fillRR(ctx, spx, sy_, sw_, 84, 12.0f, br.solidA(pal.primary, op));
-            prim::drawText_(ctx, s.label, meta_fmt,
+            prim::drawText_(ctx, s.label.c_str(), meta_fmt,
                             spx + 16, sy_ + 14, sw_ - 32, 14,
                             br.solidA(0xFFFFFF, op * 0.85f));
-            prim::drawText_(ctx, s.val, val_fmt,
+            prim::drawText_(ctx, s.val.c_str(), val_fmt,
                             spx + 16, sy_ + 38, sw_ - 32, 28,
                             br.solidA(0xFFFFFF, op));
         } else {
             prim::fillRR(ctx, spx, sy_, sw_, 84, 12.0f, br.solidA(pal.card, op));
-            prim::drawText_(ctx, s.label, meta_fmt,
+            prim::drawText_(ctx, s.label.c_str(), meta_fmt,
                             spx + 16, sy_ + 14, sw_ - 32, 14,
                             br.solidA(pal.text_muted, op));
-            prim::drawText_(ctx, s.val, val_fmt,
+            // 时间字段字号缩小一点（要装时区）
+            float val_size = (s.label == trW("home.time")) ? ptToDip(9.5f) : ptToDip(11.0f);
+            auto* val_fmt2 = app.texts().format(L"Microsoft YaHei UI", val_size,
+                                                 DWRITE_FONT_WEIGHT_BOLD);
+            prim::drawText_(ctx, s.val.c_str(), val_fmt2,
                             spx + 16, sy_ + 38, sw_ - 32, 28,
                             br.solidA(pal.text, op));
         }

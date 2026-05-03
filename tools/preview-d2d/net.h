@@ -112,6 +112,50 @@ inline Resp request(const wchar_t* verb, const wchar_t* path,
     return r;
 }
 
+// 任意 host 的简化 GET — 用于 IP 地理查询、CDN 等。
+// secure=false 走 80 端口 HTTP，true 走 443 HTTPS（skip-verify）。
+inline Resp requestAny(const wchar_t* host, INTERNET_PORT port,
+                       const wchar_t* path, bool secure) {
+    Resp r;
+    HINTERNET ses = sharedSession();
+    if (!ses) return r;
+    HINTERNET con = WinHttpConnect(ses, host, port, 0);
+    if (!con) return r;
+    HINTERNET req = WinHttpOpenRequest(con, L"GET", path, nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!req) { WinHttpCloseHandle(con); return r; }
+    if (secure) {
+        DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+                   | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+                   | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+        WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+    }
+    if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(con); return r;
+    }
+    if (!WinHttpReceiveResponse(req, nullptr)) {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(con); return r;
+    }
+    DWORD status = 0; DWORD szs = sizeof(status);
+    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        nullptr, &status, &szs, nullptr);
+    r.status = status;
+    DWORD avail = 0;
+    while (WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
+        std::vector<char> buf(avail);
+        DWORD nrd = 0;
+        if (!WinHttpReadData(req, buf.data(), avail, &nrd)) break;
+        r.body.append(buf.data(), nrd);
+        if (nrd == 0) break;
+    }
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(con);
+    return r;
+}
+
 inline Resp postJson(const wchar_t* path, const std::string& json,
                      const std::string& session_token = "") {
     std::wstring extra;
