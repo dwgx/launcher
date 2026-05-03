@@ -565,8 +565,8 @@ inline float drawTextWithEmoji(Graphics& g, const wchar_t* text, int len,
                                float x, float y, float size_pt,
                                Color text_color, FontStyle fs = FontStyleRegular) {
     if (!text || len <= 0) return 0.0f;
-    Font text_font(kFontFace, size_pt, fs, UnitPoint);
-    Font emoji_font(L"Segoe UI Emoji", size_pt, FontStyleRegular, UnitPoint);
+    Font text_font(kFontFace, pt2px(size_pt), fs, UnitPixel);
+    Font emoji_font(L"Segoe UI Emoji", pt2px(size_pt), FontStyleRegular, UnitPixel);
     SolidBrush brush(text_color);
     StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
     // 关键：FormatFlagsMeasureTrailingSpaces 让 MeasureString 返回真实宽度
@@ -603,8 +603,8 @@ inline float drawWrappedTextWithEmoji(Graphics& g, const wchar_t* text, int len,
                                       Color text_color, FontStyle fs = FontStyleRegular,
                                       float* out_height = nullptr) {
     if (!text || len <= 0) { if (out_height) *out_height = 0; return 0; }
-    Font text_font(kFontFace, size_pt, fs, UnitPoint);
-    Font emoji_font(L"Segoe UI Emoji", size_pt, FontStyleRegular, UnitPoint);
+    Font text_font(kFontFace, pt2px(size_pt), fs, UnitPixel);
+    Font emoji_font(L"Segoe UI Emoji", pt2px(size_pt), FontStyleRegular, UnitPixel);
     SolidBrush brush(text_color);
     StringFormat fmt; fmt.SetAlignment(StringAlignmentNear);
     fmt.SetFormatFlags(StringFormatFlagsMeasureTrailingSpaces | StringFormatFlagsNoWrap);
@@ -899,7 +899,7 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
     const float content_w_max = maxw * 0.62f;
     std::wstring body_w = m.body ? m.body : L"";
 
-    Font body_font(kFontFace, 9.0f, FontStyleRegular, UnitPoint);
+    Font body_font(kFontFace, pt2px(9.0f), FontStyleRegular, UnitPixel);
     StringFormat body_fmt;
     body_fmt.SetAlignment(StringAlignmentNear);
 
@@ -912,7 +912,7 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
     bool show_author = !me && m.author && m.author[0] && !prev_same_author;
 
     // meta = 时间 + 可选双勾。Telegram 把时间紧贴文字尾巴（同行）。
-    Font meta_font(kFontFace, 7.0f, FontStyleRegular, UnitPoint);
+    Font meta_font(kFontFace, pt2px(7.0f), FontStyleRegular, UnitPixel);
     RectF meta_box;
     g.MeasureString(m.time ? m.time : L"", -1, &meta_font, unbounded, &body_fmt, &meta_box);
     const float tick_w = me ? 14.0f : 0.0f;
@@ -1586,7 +1586,7 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
             g.ResetClip();
         } else {
             wchar_t init[2] = { ps[i].name.empty() ? L'?' : (wchar_t)towupper(ps[i].name[0]), 0 };
-            Font af(kFontFace, 14.0f, FontStyleBold, UnitPoint);
+            Font af(kFontFace, pt2px(14.0f), FontStyleBold, UnitPixel);
             SolidBrush ab(fade(pal.text_muted));
             StringFormat afmt; afmt.SetAlignment(StringAlignmentCenter); afmt.SetLineAlignment(StringAlignmentCenter);
             g.DrawString(init, -1, &af, tr, &afmt, &ab);
@@ -1612,7 +1612,7 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
         bool hov = inRect(g_mouse, tr);
         if (hov) fillRR(g, tr.X, tr.Y, tr.Width, tr.Height, 8, fade(pal.bg));
         strokeRR(g, tr.X, tr.Y, tr.Width, tr.Height, 8, fade(pal.divider), 1.0f);
-        Font af(kFontFace, 18.0f, FontStyleBold, UnitPoint);
+        Font af(kFontFace, pt2px(18.0f), FontStyleBold, UnitPixel);
         SolidBrush ab(fade(pal.text_muted));
         StringFormat afmt; afmt.SetAlignment(StringAlignmentCenter); afmt.SetLineAlignment(StringAlignmentCenter);
         g.DrawString(L"+", -1, &af, tr, &afmt, &ab);

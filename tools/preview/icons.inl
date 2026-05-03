@@ -21,6 +21,8 @@ void drawSvg(Graphics& g, Name n, float x, float y, float size, Color stroke,
     pen.SetStartCap(LineCapRound);
     pen.SetEndCap(LineCapRound);
     pen.SetLineJoin(LineJoinRound);
+    // Why Inset: 跟 strokeRR 同样的理由 — Center 半像素跨界让 stroke 雾化
+    pen.SetAlignment(PenAlignmentInset);
     SolidBrush fill(stroke);
 
     // 缩放：把 24x24 viewBox 映射到 [x,y,size,size]

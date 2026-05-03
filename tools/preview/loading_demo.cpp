@@ -797,6 +797,18 @@ struct AuthForm {
 // ====================================================================
 // Font cache — 关键性能优化。GDI+ 每次创建 Font 会触发 GDI 字体匹配，
 // 每帧重建会卡到飞起。按 (size, style) 缓存指针，运行期不释放。
+// ====================================================================
+// DPI awareness — Per-Monitor V2
+// ====================================================================
+// 全部内部坐标按 96 DPI 逻辑像素算，WM_PAINT 起点 g.ScaleTransform(scale)
+// 把逻辑映射到物理。鼠标坐标在收到 WM_*MOVE 时除以 scale 转回逻辑。
+// 字体改 UnitPixel(size_pt * 96/72)，避开 GDI+ 的 UnitPoint 自动 DPI 缩放
+// 跟 ScaleTransform 双倍叠加问题。
+float g_dpi_scale = 1.0f;
+inline int dpi_px(float logical) { return (int)(logical * g_dpi_scale + 0.5f); }
+// pt → 等价 96 DPI 像素 (1pt = 1/72 inch, 96 DPI = 96 px/inch → pt * 96/72)
+inline float pt2px(float pt) { return pt * (96.0f / 72.0f); }
+
 namespace fontcache {
 struct Key {
     int size_q;
@@ -813,24 +825,55 @@ inline Font* get(float size_pt, FontStyle style = FontStyleRegular) {
     auto& m = cacheMap();
     auto it = m.find(k);
     if (it != m.end()) return it->second;
-    Font* f = new Font(kFontFace, size_pt, style, UnitPoint);
+    // UnitPixel(size = pt * 96/72) → 在 96 DPI 等价 UnitPoint(pt) 同样大小。
+    // 这样后续 g.ScaleTransform(dpi_scale) 会按物理像素正确放大，不会双倍。
+    float size_px = size_pt * (96.0f / 72.0f);
+    Font* f = new Font(kFontFace, size_px, style, UnitPixel);
     m.emplace(k, f);
     return f;
 }
 }  // namespace fontcache
 
 void buildRoundRect(GraphicsPath& p, REAL x, REAL y, REAL w, REAL h, REAL r) {
-    // 钳一下：调用方有时传 r=999 表示"全圆/胶囊"，但 4 段 arc 用 r*2 做 bounding box，
-    // r > min(w,h)/2 时 arc 椭圆会超出 rect 几个量级，path 退化成扭曲怪形 →
-    // 在右上角 hover 那 84x32 pill 上能看到一片渲染撕裂。这里钳到 min(w,h)/2。
+    // 钳：r=999 表示胶囊，arc 椭圆超出 rect 会 path 退化撕裂。
     REAL rmax = (w < h ? w : h) * 0.5f;
     if (r > rmax) r = rmax;
     if (r < 0) r = 0;
     p.Reset();
-    p.AddArc(x, y, r*2, r*2, 180, 90);
-    p.AddArc(x+w-r*2, y, r*2, r*2, 270, 90);
-    p.AddArc(x+w-r*2, y+h-r*2, r*2, r*2, 0, 90);
-    p.AddArc(x, y+h-r*2, r*2, r*2, 90, 90);
+    if (r < 0.5f) {
+        // 几乎方角直接 AddRectangle 省事
+        p.AddRectangle(RectF(x, y, w, h));
+        return;
+    }
+    // Why bezier 替代 arc：GDI+ AddArc 内部用多段 quadratic 拼椭圆，跟相邻 line
+    // 的接缝处偶尔露 1px 缝隙（暗色 UI 上看得见）。三次 bezier 用 magic 0.55228
+    // 近似 1/4 圆，stroke join 全在控制点上，跟 line 接缝完美连续。
+    const REAL k = r * 0.5522847498307933f;   // (4/3)*tan(π/8)
+    p.StartFigure();
+    // 顶边 + top-right corner
+    p.AddLine(x + r, y, x + w - r, y);
+    p.AddBezier(x + w - r,     y,
+                x + w - r + k, y,
+                x + w,         y + r - k,
+                x + w,         y + r);
+    // 右边 + bottom-right corner
+    p.AddLine(x + w, y + r, x + w, y + h - r);
+    p.AddBezier(x + w,         y + h - r,
+                x + w,         y + h - r + k,
+                x + w - r + k, y + h,
+                x + w - r,     y + h);
+    // 底边 + bottom-left corner
+    p.AddLine(x + w - r, y + h, x + r, y + h);
+    p.AddBezier(x + r,     y + h,
+                x + r - k, y + h,
+                x,         y + h - r + k,
+                x,         y + h - r);
+    // 左边 + top-left corner
+    p.AddLine(x, y + h - r, x, y + r);
+    p.AddBezier(x,         y + r,
+                x,         y + r - k,
+                x + r - k, y,
+                x + r,     y);
     p.CloseFigure();
 }
 void fillRR(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r, Color c) {
@@ -839,7 +882,19 @@ void fillRR(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r, Color c) {
 }
 void strokeRR(Graphics& g, REAL x, REAL y, REAL w, REAL h, REAL r, Color c, REAL stroke=1.0f) {
     GraphicsPath p; buildRoundRect(p, x, y, w, h, r);
-    Pen pen(c, stroke); g.DrawPath(&pen, &p);
+    // Why Inset: 默认 PenAlignmentCenter 把 stroke 横跨整数像素边界，1px 描边会被
+    // GDI+ 抗锯齿成 2px 半透 → 模糊。Inset 把 stroke 钉到 path 内侧，1px 真 1px。
+    Pen pen(c, stroke);
+    pen.SetAlignment(PenAlignmentInset);
+    pen.SetLineJoin(LineJoinRound);
+    g.DrawPath(&pen, &p);
+}
+// 通用 1px 分隔线辅助 — 自动 +0.5 对齐 grid，避免半像素糊
+inline void drawHairline(Graphics& g, REAL x1, REAL y1, REAL x2, REAL y2, Color c) {
+    Pen pen(c, 1.0f);
+    pen.SetAlignment(PenAlignmentInset);
+    // 偏 0.5 让 1px 落在像素中心（GDI+ AA 几何对齐惯用法）
+    g.DrawLine(&pen, x1 + 0.5f, y1 + 0.5f, x2 + 0.5f, y2 + 0.5f);
 }
 // 单次画大 path，比之前 spread 次循环快 3-6 倍。
 // 视觉效果略逊但能接受，关键是性能 — 每帧 dropdown/cards/buttons 都调 drawShadow。
@@ -856,7 +911,13 @@ void drawText_(Graphics& g, const wchar_t* text, REAL x, REAL y, REAL w,
     SolidBrush b(color);
     StringFormat fmt; fmt.SetAlignment(ha);
     RectF r(x, y, w, size * 3);
+    // Why: ClearType 在 9pt+ 大字号上显锐（次像素 RGB 三色条带）；但 < 9pt
+    // 的小字号在暗色背景下 ClearType 会拖紫色 fringe，看着糊。灰度 AntiAlias
+    // 在小字号 / 暗色 UI 上更干净。每次 draw 临时切换 + 还原。
+    auto prev = g.GetTextRenderingHint();
+    if (size < 9.0f) g.SetTextRenderingHint(TextRenderingHintAntiAlias);
     g.DrawString(text, -1, fontcache::get(size, fs), r, &fmt, &b);
+    if (size < 9.0f) g.SetTextRenderingHint(prev);
 }
 RectF measureText(Graphics& g, const wchar_t* text, float size, FontStyle fs = FontStyleRegular) {
     RectF bbox;
@@ -1544,7 +1605,7 @@ void paintTopbar(Graphics& g, int Wpx) {
     } else {
         SolidBrush avbg(pal.primary);
         g.FillEllipse(&avbg, ax, ay, ar*2, ar*2);
-        Font af(kFontFace, 8.5f, FontStyleBold, UnitPoint);
+        Font af(kFontFace, pt2px(8.5f), FontStyleBold, UnitPixel);
         SolidBrush avf(Color(255, 255, 255, 255));
         StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
         RectF avrect(ax, ay, ar*2, ar*2);
@@ -1610,7 +1671,7 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     } else {
         SolidBrush avbg(fade(pal.primary));
         g.FillEllipse(&avbg, dx + 12, dy + 12, ar*2, ar*2);
-        Font af(kFontFace, 9.5f, FontStyleBold, UnitPoint);
+        Font af(kFontFace, pt2px(9.5f), FontStyleBold, UnitPixel);
         SolidBrush avf(Color((BYTE)(255 * t), 255, 255, 255));
         StringFormat avfmt; avfmt.SetAlignment(StringAlignmentCenter); avfmt.SetLineAlignment(StringAlignmentCenter);
         wchar_t init[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
@@ -1728,9 +1789,10 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
               g_auth_form.focus = 0;
               g_auth_form.error_msg.clear();
               g_stage = Stage::Auth;
-              // 缩窗到 Auth 卡片大小
+              // 缩窗到 Auth 卡片大小（DPI 感知：480x540 是逻辑，转物理）
               int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-              SetWindowPos(g_hwnd, nullptr, (sw - 480) / 2, (sh - 540) / 2, 480, 540, SWP_NOZORDER);
+              int aw = dpi_px(480), ah = dpi_px(540);
+              SetWindowPos(g_hwnd, nullptr, (sw - aw) / 2, (sh - ah) / 2, aw, ah, SWP_NOZORDER);
               g_auth_card_op.start(0, 1, 0.40f, 0.05f, curve::easeOutCubic);
               g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
         }, true },
@@ -1853,7 +1915,7 @@ void paintHomeView(Graphics& g, RectF area) {
     } else {
         SolidBrush avBg(fade(pal.primary));
         g.FillEllipse(&avBg, avx, avy, avR*2, avR*2);
-        Font af(kFontFace, 22.0f, FontStyleBold, UnitPoint);
+        Font af(kFontFace, pt2px(22.0f), FontStyleBold, UnitPixel);
         SolidBrush avF(Color((BYTE)(255 * op), 255, 255, 255));
         StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
         RectF avr(avx, avy, avR*2, avR*2);
@@ -2096,7 +2158,7 @@ void paintLunchingView(Graphics& g, RectF area) {
         g.SetClip(&card);
         g.FillPath(&rad, &cover);
         g.ResetClip();
-        Font cf(kFontFace, 22.0f, FontStyleBold, UnitPoint);
+        Font cf(kFontFace, pt2px(22.0f), FontStyleBold, UnitPixel);
         SolidBrush csB(Color((BYTE)(220 * op), 0xF5, 0xC4, 0x4C));
         StringFormat csF; csF.SetAlignment(StringAlignmentNear);
         g.DrawString(L"CS", -1, &cf, RectF(gx + 14, gy - lift + 12, 60, 30), &csF, &csB);
@@ -2438,7 +2500,7 @@ void paintAuthView(Graphics& g, int Wpx, int Hpx) {
     float lr = 14.0f, lx = cx + 30, ly = cy + 32;
     SolidBrush lbg(fade(pal.primary));
     g.FillEllipse(&lbg, lx, ly, lr*2, lr*2);
-    Font lf(kFontFace, 12.0f, FontStyleBold, UnitPoint);
+    Font lf(kFontFace, pt2px(12.0f), FontStyleBold, UnitPixel);
     SolidBrush lf_b(Color((BYTE)(255 * op), 255, 255, 255));
     StringFormat lfmt; lfmt.SetAlignment(StringAlignmentCenter); lfmt.SetLineAlignment(StringAlignmentCenter);
     RectF lr_rect(lx, ly, lr*2, lr*2);
@@ -2869,6 +2931,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NCHITTEST: {
             POINT p { LOWORD(lp), HIWORD(lp) };
             ScreenToClient(hwnd, &p);
+            // 物理 → 逻辑（hits 注册时是逻辑坐标系）
+            p.x = (LONG)(p.x / g_dpi_scale);
+            p.y = (LONG)(p.y / g_dpi_scale);
             // 每帧的 g_hits 区域 不可拖；其他区域全部 HTCAPTION 整窗拖
             for (auto& h : g_hits) {
                 if (h.draggable_off && inRect(p, h.rect)) return HTCLIENT;
@@ -2876,10 +2941,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return HTCAPTION;
         }
         case WM_MOUSEMOVE: {
-            int nx = LOWORD(lp), ny = HIWORD(lp);
+            // 收到的是物理坐标 (DPI-aware 后)，转回逻辑供 hit-test 用
+            int nx = (int)((short)LOWORD(lp) / g_dpi_scale);
+            int ny = (int)((short)HIWORD(lp) / g_dpi_scale);
             if (nx == g_mouse.x && ny == g_mouse.y) break;
             g_mouse.x = nx; g_mouse.y = ny;
-            // hover 状态需要实时更新；GDI+ dirty region 会 batch invalidate
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
         }
@@ -2890,8 +2956,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONUP: {
             g_mouse_pressed = false;
-            POINT p { LOWORD(lp), HIWORD(lp) };
-            // 任何点击重置 chat composer focus；命中 textarea 的 hit 会再 set true
+            POINT p { (LONG)((short)LOWORD(lp) / g_dpi_scale),
+                      (LONG)((short)HIWORD(lp) / g_dpi_scale) };
             chatv::g_focus_composer = false;
             for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
                 if (inRect(p, it->rect)) {
@@ -2899,7 +2965,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
             }
-            // 无论命中与否都 invalidate，否则点 topbar 空白处 focus 视觉不更新
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3338,29 +3403,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: {
             PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc; GetClientRect(hwnd, &rc);
-            int Wpx = rc.right - rc.left, Hpx = rc.bottom - rc.top;
-            // Backbuffer 缓存：避免每帧 CreateCompatibleBitmap/DC（GDI 资源昂贵）。
+            int Wphys = rc.right - rc.left, Hphys = rc.bottom - rc.top;
+            // 内部坐标全部按 96 DPI 逻辑像素算 — 把物理尺寸折回逻辑用作 paint 入参
+            int Wpx = (int)(Wphys / g_dpi_scale + 0.5f);
+            int Hpx = (int)(Hphys / g_dpi_scale + 0.5f);
+            // Backbuffer 缓存：避免每帧 CreateDIBSection/DC（GDI 资源昂贵）。
             // 窗口尺寸变化时才重建。
+            // Why DIBSection 32bpp 而非 CreateCompatibleBitmap：
+            //   * CreateCompatibleBitmap 创出的 DDB 跟显卡格式（多数 32bpp 但不保证）
+            //   * GDI+ Graphics(HDC) 在 DDB 上做半透合成时 alpha 通道会被丢
+            //   * 显式 32bpp DIB（pre-multiplied 视图）→ AA 边缘/阴影/halo 真半透叠加
             static HDC s_mem = nullptr;
             static HBITMAP s_bmp = nullptr;
             static HBITMAP s_old = nullptr;
             static int s_w = 0, s_h = 0;
-            if (!s_mem || s_w != Wpx || s_h != Hpx) {
+            // backbuffer 按物理像素分配，跟窗口客户区一致
+            if (!s_mem || s_w != Wphys || s_h != Hphys) {
                 if (s_mem) {
                     SelectObject(s_mem, s_old);
                     DeleteObject(s_bmp);
                     DeleteDC(s_mem);
                 }
                 s_mem = CreateCompatibleDC(hdc);
-                s_bmp = CreateCompatibleBitmap(hdc, Wpx, Hpx);
+                BITMAPINFO bi{};
+                bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+                bi.bmiHeader.biWidth       = Wphys;
+                bi.bmiHeader.biHeight      = -Hphys;       // 负 = top-down
+                bi.bmiHeader.biPlanes      = 1;
+                bi.bmiHeader.biBitCount    = 32;
+                bi.bmiHeader.biCompression = BI_RGB;
+                void* pBits = nullptr;
+                s_bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &pBits, nullptr, 0);
                 s_old = (HBITMAP)SelectObject(s_mem, s_bmp);
-                s_w = Wpx; s_h = Hpx;
+                s_w = Wphys; s_h = Hphys;
             }
             Graphics g(s_mem);
-            g.SetSmoothingMode(SmoothingModeAntiAlias);
+            g.SetSmoothingMode(SmoothingModeHighQuality);     // 比 AntiAlias 多一层亚像素
             g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
             g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
             g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+            g.SetCompositingQuality(CompositingQualityHighQuality);
+            // DPI 缩放：所有内部坐标按 96 DPI 逻辑像素算，这里一次性映射到物理。
+            // 字体已经在 fontcache 用 UnitPixel(pt2px) 算 96 DPI 逻辑大小，
+            // ScaleTransform 把它放大到物理。
+            g.ScaleTransform(g_dpi_scale, g_dpi_scale);
             if (g_stage == Stage::Dot)             paintDot(g, Wpx, Hpx);
             else if (g_stage == Stage::ExpandLoading) paintLoading(g, Wpx, Hpx);
             else if (g_stage == Stage::Loading)    paintLoading(g, Wpx, Hpx);
@@ -3375,7 +3461,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 else paintAuthView(g, Wpx, Hpx);
             }
             else                                    paintMain(g, Wpx, Hpx);
-            BitBlt(hdc, 0, 0, Wpx, Hpx, s_mem, 0, 0, SRCCOPY);
+            BitBlt(hdc, 0, 0, Wphys, Hphys, s_mem, 0, 0, SRCCOPY);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -3417,6 +3503,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 ULONG_PTR g_gdiplus_token = 0;
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
+    // Per-Monitor DPI Aware V2 — 必须在创建任何窗口之前调用。
+    // OS 不会再对窗口做 bitmap-stretch（高 DPI 模糊根因）。
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    {
+        HDC sdc = GetDC(nullptr);
+        int dpi_x = GetDeviceCaps(sdc, LOGPIXELSX);
+        ReleaseDC(nullptr, sdc);
+        if (dpi_x > 0) g_dpi_scale = (float)dpi_x / 96.0f;
+    }
+
     detectSystemLanguage();
 
     // 持久化 — 从隐秘注册表加载 lang / theme（覆盖系统默认）
@@ -3478,9 +3574,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     RegisterClassExW(&wc);
 
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    // 入场：Dot 40x40 → Loading 200x200 → Auth 480x540 → Main 1100x720
-    int initW = skip_loading ? 1100 : 40;
-    int initH = skip_loading ? 720  : 40;
+    // 入场：Dot 40x40 → Loading 200x200 → Auth 480x540 → Main 1100x720（逻辑像素）
+    int initW_log = skip_loading ? 1100 : 40;
+    int initH_log = skip_loading ? 720  : 40;
+    // 转物理像素（DPI-aware 后所有 size 参数都是物理）
+    int initW = dpi_px((float)initW_log);
+    int initH = dpi_px((float)initH_log);
 
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | (skip_loading ? 0 : WS_EX_TOPMOST),
@@ -3521,8 +3620,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     if (skip_loading && !skip_auth) {
         enterAuthStage();
     } else if (skip_loading) {
-        // 调试快进
-        SetWindowPos(g_hwnd, nullptr, (sw - 1100) / 2, (sh - 720) / 2, 1100, 720, SWP_NOZORDER);
+        // 调试快进 — 1100x720 逻辑转物理
+        int mw = dpi_px(1100), mh = dpi_px(720);
+        SetWindowPos(g_hwnd, nullptr, (sw - mw) / 2, (sh - mh) / 2, mw, mh, SWP_NOZORDER);
         enterMainStage();
         g_main_opacity.elapsed = 999;
         g_sidebar_x.elapsed = 999;
@@ -3585,10 +3685,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         modal::g_rename_pack().input.float_t.tick(dt);
         modal::g_confirm().t.tick(dt);
 
-        // 入场流程驱动
+        // 入场流程驱动 — Tween 都是逻辑像素，SetWindowPos 要物理像素
         auto resize_to_tween = [&]() {
-            int w = (int)g_window_w.value();
-            int h = (int)g_window_h.value();
+            int w = dpi_px(g_window_w.value());
+            int h = dpi_px(g_window_h.value());
             int x = (sw - w) / 2, y = (sh - h) / 2;
             SetWindowPos(g_hwnd, nullptr, x, y, w, h, SWP_NOZORDER);
         };
@@ -3643,7 +3743,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
 
         if (needs_paint) {
             InvalidateRect(g_hwnd, nullptr, FALSE);
-            Sleep(16);   // 60 FPS
+            Sleep(8);    // 120 FPS — 现代显示器普遍 120/144Hz，60FPS 拖动会有微卡
         } else {
             // 真静止：完全不主动 invalidate，等鼠标 / 键盘事件触发。
             // WaitMessage 阻塞到下一个消息，CPU = 0

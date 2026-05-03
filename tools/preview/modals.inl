@@ -697,7 +697,7 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
             Color((BYTE)(255 * t), 0x1F, 0x1C, 0x19));
         GraphicsPath cp; buildRoundRect(cp, mx, my, mw, cover_h + 16, 16);
         g.FillPath(&base, &cp);
-        Font cf(kFontFace, 60.0f, FontStyleBold, UnitPoint);
+        Font cf(kFontFace, pt2px(60.0f), FontStyleBold, UnitPixel);
         SolidBrush csb(fade(Color(255, 0xF5, 0xC4, 0x4C)));
         StringFormat csf; csf.SetAlignment(StringAlignmentCenter); csf.SetLineAlignment(StringAlignmentCenter);
         g.DrawString(L"CS", -1, &cf, RectF(mx, my, mw, cover_h), &csf, &csb);
@@ -912,7 +912,7 @@ void paintHistoryModalNew(Graphics& g, int Wpx, int Hpx) {
         wchar_t ipline[128]; swprintf_s(ipline, 128, L"%ls · %ls", r.ip, r.loc);
         drawText_(g, ipline, mx + 24, ry + 30, mw - 168, 8.0f, fade(pal.text_muted));
         // when (mono)
-        Font mf(L"DejaVu Sans Mono", 9.0f, FontStyleRegular, UnitPoint);
+        Font mf(L"DejaVu Sans Mono", pt2px(9.0f), FontStyleRegular, UnitPixel);
         SolidBrush mb(fade(pal.text_muted));
         StringFormat mfmt; mfmt.SetAlignment(StringAlignmentFar);
         g.DrawString(r.when, -1, &mf, RectF(mx + mw - 140, ry + 18, 116, 16), &mfmt, &mb);
