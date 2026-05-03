@@ -13,6 +13,7 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <mmsystem.h>
+#include <dwmapi.h>
 #include <gl/GL.h>
 #include <chrono>
 #include <cmath>
@@ -22,6 +23,10 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+// WGL 扩展函数指针 — 用于开 vsync。glext 不在 Windows SDK 里所以手写。
+typedef BOOL(WINAPI*PFNWGLSWAPINTERVALEXTPROC)(int);
 
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
@@ -77,7 +82,15 @@ static bool initGL(HWND hwnd) {
     if (!pf || !SetPixelFormat(g_hdc, pf, &pfd)) return false;
     g_glrc = wglCreateContext(g_hdc);
     if (!g_glrc) return false;
-    return wglMakeCurrent(g_hdc, g_glrc) == TRUE;
+    if (!wglMakeCurrent(g_hdc, g_glrc)) return false;
+
+    // 关键：vsync 锁定 — SwapBuffers 内部 block 到下次 vblank
+    // 60Hz 屏 16.67ms / 帧；120Hz 8.33ms / 帧；240Hz 4.17ms / 帧。
+    // OS 帮我们定节奏，比 Sleep 准、比忙等省 CPU。
+    auto wglSwapIntervalEXT = (PFNWGLSWAPINTERVALEXTPROC)
+        wglGetProcAddress("wglSwapIntervalEXT");
+    if (wglSwapIntervalEXT) wglSwapIntervalEXT(1);
+    return true;
 }
 
 // ---------- Skia state ----------
@@ -230,6 +243,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
+    // 帧循环 — 现代正确写法：
+    //   1) PeekMessage 非阻塞处理输入
+    //   2) render() 全 GPU 画
+    //   3) SwapBuffers 内部锁 vsync（不会忙等，OS 帮 block 到 vblank）
+    //   4) DwmFlush 等 DWM 把这帧真上屏，避免我们提前画好下一帧排队
+    //   5) 不要 Sleep — vsync + DwmFlush 已经定准节奏
     MSG msg{};
     while (true) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -238,7 +257,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             DispatchMessageW(&msg);
         }
         render();
-        Sleep(8);
+        SwapBuffers(g_hdc);
+        DwmFlush();
     }
 end:
     g_surf.reset();
