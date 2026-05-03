@@ -292,11 +292,11 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                 bub_h = bub_w * aspect;
                 if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
             }
-            ctx->PushAxisAlignedClip(D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
-                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // 真圆角 mask（之前 PushAxisAlignedClip 只裁矩形 4 角是直的）
+            prim::pushLayerRR(ctx, app.factory(), bub_x, bub_y, bub_w, bub_h, 12.0f);
             ctx->DrawBitmap(draw_bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
                             1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            ctx->PopAxisAlignedClip();
+            prim::popLayer(ctx);
             prim::strokeRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
                            br.solidA(pal.divider, 0.5f), 1.0f);
         } else {
@@ -341,12 +341,25 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
 
     if (m.kind == MsgKind::Sticker) {
         float bub_w = 100, bub_h = 100;
-        auto* bmp = app.images().fromFile(m.body);
-        if (bmp) {
-            ctx->DrawBitmap(bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
+        // sticker 也支持 GIF
+        ID2D1Bitmap* sbmp = nullptr;
+        auto sd = m.body.find_last_of(L'.');
+        bool s_is_gif = (sd != std::wstring::npos
+                         && (m.body.substr(sd) == L".gif"
+                             || m.body.substr(sd) == L".GIF"));
+        if (s_is_gif) {
+            auto* sa = app.gifs().fromFile(m.body);
+            if (sa) sbmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
+        }
+        if (!sbmp) sbmp = app.images().fromFile(m.body);
+        if (sbmp) {
+            // sticker 圆角更大
+            prim::pushLayerRR(ctx, app.factory(), bub_x, bub_y, bub_w, bub_h, 16.0f);
+            ctx->DrawBitmap(sbmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
                             1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            prim::popLayer(ctx);
         } else {
-            prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
+            prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 16.0f,
                          br.solid(pal.surface));
         }
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
@@ -786,9 +799,13 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 }
                 if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp);
                 if (sticker_bmp) {
+                    // grid cell 圆角裁剪
+                    prim::pushLayerRR(ctx, app.factory(),
+                                      ex + 4, ey + 4, cell - 8, cell - 8, 8.0f);
                     ctx->DrawBitmap(sticker_bmp,
                         D2D1::RectF(ex + 4, ey + 4, ex + cell - 4, ey + cell - 4),
                         t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    prim::popLayer(ctx);
                 }
                 std::wstring path = cur_pack.stickers[i];
                 // hover 时右上角 ✕ 删除按钮

@@ -406,7 +406,6 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     float cover_h = 220;
     bool wv_ready = webview::isReady();
     if (wv_ready && t > 0.95f) {
-        // WebView2 子窗口接管 cover 区域（物理像素 = DIP × dpi/96）
         float scale = app.dpi() / 96.0f;
         int wl = (int)((cx + 8) * scale);
         int wt = (int)((cy + 8) * scale);
@@ -414,16 +413,14 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
         int wb = (int)((cy + cover_h) * scale);
         webview::setBounds(wl, wt, wr, wb);
         webview::show(true);
-        // D2D 这里只画一个圆角占位，WebView2 会盖在上面
         prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(pal.surface, t));
     } else {
-        // WebView2 没就绪时画静态 CS2 头图
         webview::show(false);
         auto cs2_path = cs2HeaderPath();
         auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
         if (cover_bmp) {
-            ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy, cx + cw, cy + cover_h),
-                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // 真圆角顶部裁剪 — pushLayerRR 而不是矩形 PushAxisAlignedClip
+            prim::pushLayerRR(ctx, app.factory(), cx, cy, cw, cover_h, 16.0f);
             D2D1_SIZE_F sz = cover_bmp->GetSize();
             float scale_ = (std::max)(cw / sz.width, cover_h / sz.height);
             float dw = sz.width * scale_, dh = sz.height * scale_;
@@ -432,7 +429,7 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
                             t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             prim::fillRect(ctx, cx, cy + cover_h - 80, cw, 80,
                            br.solidA(0x000000, 0.55f * t));
-            ctx->PopAxisAlignedClip();
+            prim::popLayer(ctx);
         } else {
             prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
         }

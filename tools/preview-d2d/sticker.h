@@ -54,6 +54,11 @@ int totalUserStickers();
 // (后端可能没此端点；客户端本地删除立即生效，后端失败 silent)
 void deleteSticker(HWND notify, const std::wstring& path);
 
+// 启动后调 — 如果 g_packs 里"我的表情"(name=='我的表情') 还没真 backend pack id，
+// 自动 POST /api/sticker/pack 创建一个名为"我的表情"的 pack，把 id 写回。
+// 这样"我的表情" tab 也能直接走 importFromFolder。
+void ensureMyStickersPack(HWND notify);
+
 // sticker 缓存目录 = %LOCALAPPDATA%/Launcher/stickers/
 std::wstring cacheDir();
 

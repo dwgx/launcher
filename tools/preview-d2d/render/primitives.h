@@ -15,6 +15,7 @@
 #include <d2d1_1.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wrl/client.h>
 #include <string_view>
 #include <algorithm>
 #include <cstdint>
@@ -94,6 +95,32 @@ inline void drawLine(ID2D1DeviceContext* ctx, float x1, float y1, float x2, floa
     if (!b) return;
     ctx->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), b, thick, style);
 }
+
+// 圆角矩形裁剪 mask — 用 ID2D1RoundedRectangleGeometry + PushLayer，比
+// PushAxisAlignedClip 多了真圆角 (PushAxisAlignedClip 只能矩形 4 直角)。
+// 用法：
+//   pushLayerRR(ctx, factory, x, y, w, h, 12);
+//   ctx->DrawBitmap(bmp, dest, 1.0f, ...);   // bitmap 自动按圆角裁
+//   popLayer(ctx);
+inline void pushLayerRR(ID2D1DeviceContext* ctx, ID2D1Factory1* factory,
+                        float x, float y, float w, float h, float r) {
+    if (!ctx || !factory) return;
+    float rmax = (std::min)(w, h) * 0.5f;
+    if (r > rmax) r = rmax;
+    if (r < 0.0f) r = 0.0f;
+    Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> geo;
+    factory->CreateRoundedRectangleGeometry(
+        D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), r, r), &geo);
+    if (!geo) return;
+    D2D1_LAYER_PARAMETERS lp = D2D1::LayerParameters(
+        D2D1::InfiniteRect(),
+        geo.Get(),
+        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        D2D1::IdentityMatrix(),
+        1.0f, nullptr, D2D1_LAYER_OPTIONS_NONE);
+    ctx->PushLayer(lp, nullptr);
+}
+inline void popLayer(ID2D1DeviceContext* ctx) { if (ctx) ctx->PopLayer(); }
 
 // 6 层假高斯阴影 — 跟 GDI+ Preview drawShadow 同款。D2D 1.1 Effects 真高斯
 // 留 Phase 2.2 优化（需 off-screen bitmap target）。

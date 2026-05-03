@@ -600,22 +600,17 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto cs2_path = cs2HeaderPath();
     auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
     if (cover) {
-        // 圆角裁剪 + cover fill
-        ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy + lift, cx + 240, cy + 140 + lift),
-                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // 真圆角 mask（之前 PushAxisAlignedClip 让 4 角是直的）
+        prim::pushLayerRR(ctx, app.factory(), cx, cy + lift, 240, 140, 12.0f);
         D2D1_SIZE_F sz = cover->GetSize();
         float scale = (std::max)(240.0f / sz.width, 140.0f / sz.height);
         float dw = sz.width * scale, dh = sz.height * scale;
         float dx = cx + (240 - dw) * 0.5f, dy = cy + lift + (140 - dh) * 0.5f;
         ctx->DrawBitmap(cover, D2D1::RectF(dx, dy, dx + dw, dy + dh),
                         op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        // 底部黑色渐变 + 标题
         prim::fillRect(ctx, cx, cy + lift + 80, 240, 60,
                        br.solidA(0x000000, op * 0.55f));
-        ctx->PopAxisAlignedClip();
-        // 圆角描边覆盖回去（裁剪后矩形角丢了）
-        prim::strokeRR(ctx, cx, cy + lift, 240, 140, 12.0f,
-                       br.solidA(0xFFFFFF, op * 0.05f));
+        prim::popLayer(ctx);
     } else {
         prim::fillRR(ctx, cx, cy + lift, 240, 140, 12.0f, br.solidA(0xC96442, op));
     }

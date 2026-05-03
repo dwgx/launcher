@@ -396,7 +396,10 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
                 }
             }
         }
-        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, 0);
+        // 把 pack_id 透传回主线程，让 picker 切到这个 pack 显示新导入的图
+        static std::string g_pending_imp_pid;
+        g_pending_imp_pid = a->pid;
+        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, (LPARAM)&g_pending_imp_pid);
         return 0;
     }, a, 0, nullptr);
 }
@@ -423,6 +426,39 @@ int totalUserStickers() {
         n += (int)p.stickers.size();
     }
     return n;
+}
+
+void ensureMyStickersPack(HWND notify) {
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (auto& p : g_packs) {
+            if (!p.is_system && p.name == L"我的表情" && !p.id.empty()) return;
+        }
+    }
+    // 没找到带 id 的"我的表情" → 后端创建一个
+    struct A { HWND h; };
+    auto* a = new A{ notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        if (g_session_token.empty()) return 0;
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"name\":\"" + net::jsonEscape(L"我的表情") + "\"}";
+        auto r = net::postJson(L"/api/sticker/pack", body);
+        if (r.ok()) {
+            std::string id = net::jsonStr(r.body, "id");
+            if (!id.empty()) {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                for (auto& p : g_packs) {
+                    if (!p.is_system && p.name == L"我的表情") {
+                        p.id = id;
+                        break;
+                    }
+                }
+            }
+        }
+        PostMessageW(a->h, WM_APP + 42, 0, 0);
+        return 0;
+    }, a, 0, nullptr);
 }
 
 void deleteSticker(HWND notify, const std::wstring& path) {

@@ -201,7 +201,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 19: {                    // pack create result
             modal::onCreatePackResult(wp != 0);
-            if (wp) toast::show(L"表情包已创建");
+            if (wp) {
+                toast::show(L"表情包已创建");
+                // 立即重拉 packs 列表，新 pack 出现在 picker（不用重启客户端）
+                sticker::fetchMyPacks(hwnd);
+            }
             return 0;
         }
         case WM_APP + 20: {                    // pack rename result
@@ -223,6 +227,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 22: {                    // sticker packs fetched
+            // 拉完检查 / 自动创建 "我的表情" pack（如果 backend 没有）
+            sticker::ensureMyStickersPack(hwnd);
             return 0;
         }
         case WM_APP + 24: {                    // my stickers fetched
@@ -297,14 +303,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 33: {                    // market listings fetched
             return 0;
         }
-        case WM_APP + 29: {                    // sticker import 完成；wp = 成功数
+        case WM_APP + 29: {                    // sticker import 完成；wp=成功数 lp=pack_id
             wchar_t buf[64];
             if (wp > 0) {
                 swprintf_s(buf, L"已导入 %d 张表情 ✓", (int)wp);
                 toast::show(buf);
-                // 不重拉 packs — 重拉会清空当前 pack 的本地 stickers 又异步重新拉，
-                // 在 1 秒空白期间用户看不到刚导入的图。importFromFolder 内部已经把
-                // 路径加进 g_packs[pid].stickers 了，本地状态已经是最新。
+                // 切 picker active tab 到这个 pack（让用户立刻看到导入的图）
+                if (lp) {
+                    auto* pid = (std::string*)lp;
+                    int idx = -1;
+                    for (size_t i = 0; i < sticker::g_packs.size(); ++i) {
+                        if (sticker::g_packs[i].id == *pid) { idx = (int)i; break; }
+                    }
+                    if (idx >= 0) {
+                        chat::g_picker_tab = 1 + idx;     // 0 = emoji, 1+ = pack idx
+                        if (!chat::g_picker_open) {
+                            chat::g_picker_open = true;
+                            chat::g_picker_t.start(0, 1, 0.22f, 0, curve::easeOutBack);
+                        }
+                    }
+                }
             } else {
                 toast::show(L"未上传任何文件（检查文件夹）");
             }
