@@ -35,6 +35,17 @@ pub fn push_to(_state: &AppState, user_id: Uuid, payload: &serde_json::Value) {
     }
 }
 
+// 广播给所有在线用户（用于状态变化等全局事件）
+pub fn broadcast_all(_state: &AppState, payload: &serde_json::Value) {
+    let body = match serde_json::to_string(payload) { Ok(s) => s, Err(_) => return };
+    let h = HUB.lock().unwrap();
+    for (_uid, senders) in h.iter() {
+        for s in senders {
+            let _ = s.send(body.clone());
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct WsQ { pub session_token: String }
 

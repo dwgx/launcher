@@ -312,3 +312,108 @@ pub async fn login_history(
         geo_city:     r.geo_city,
     }).collect()))
 }
+
+// =====================================================================
+// 用户状态 (online/busy/away/sleep/offline)
+// 客户端切状态时调一次；其他用户通过 chat history / WS push 看到。
+// =====================================================================
+#[derive(Deserialize)]
+pub struct SetStatusReq {
+    pub session_token: String,
+    pub status:        String,
+}
+
+pub async fn set_status(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<SetStatusReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let uid = auth_user(&s, &req.session_token).await?;
+    let valid = ["online", "busy", "away", "sleep", "offline"];
+    if !valid.contains(&req.status.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "invalid status".into()));
+    }
+    sqlx::query!(
+        "UPDATE users SET status = $1, last_seen = now() WHERE id = $2",
+        req.status, uid)
+        .execute(&s.db).await.map_err(internal)?;
+
+    // WS 广播：通知所有在线用户该 user 状态变了
+    let payload = serde_json::json!({
+        "type": "status",
+        "user_id": uid.to_string(),
+        "status": req.status
+    });
+    crate::ws::broadcast_all(&s, &payload);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// =====================================================================
+// 个人标签 — Home view "+添加" chip 后端持久化
+// 表: user_tags (user_id UUID, tag TEXT, sort_order INT, PK(user_id, tag))
+// =====================================================================
+const TAG_PER_USER_LIMIT: i64 = 20;
+const TAG_MAX_CHARS: usize = 24;
+
+#[derive(Serialize)]
+pub struct TagsResp { pub tags: Vec<String> }
+
+pub async fn list_tags(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<ProfileQuery>,
+) -> Result<Json<TagsResp>, (StatusCode, String)> {
+    let uid = auth_user(&s, &q.session_token).await?;
+    let rows = sqlx::query_scalar!(
+        "SELECT tag FROM user_tags WHERE user_id = $1 ORDER BY sort_order, tag", uid)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    Ok(Json(TagsResp { tags: rows }))
+}
+
+#[derive(Deserialize)]
+pub struct AddTagReq { pub session_token: String, pub tag: String }
+
+pub async fn add_tag(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<AddTagReq>,
+) -> Result<Json<TagsResp>, (StatusCode, String)> {
+    let uid = auth_user(&s, &req.session_token).await?;
+    let trimmed = req.tag.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > TAG_MAX_CHARS {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("tag length 1-{}", TAG_MAX_CHARS)));
+    }
+    let count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM user_tags WHERE user_id = $1", uid)
+        .fetch_one(&s.db).await.map_err(internal)?
+        .unwrap_or(0);
+    if count >= TAG_PER_USER_LIMIT {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE,
+            format!("最多 {} 个标签", TAG_PER_USER_LIMIT)));
+    }
+    sqlx::query!(
+        r#"INSERT INTO user_tags (user_id, tag, sort_order)
+           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#,
+        uid, trimmed, (count + 1) as i32 * 10)
+        .execute(&s.db).await.map_err(internal)?;
+
+    let rows = sqlx::query_scalar!(
+        "SELECT tag FROM user_tags WHERE user_id = $1 ORDER BY sort_order, tag", uid)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    Ok(Json(TagsResp { tags: rows }))
+}
+
+#[derive(Deserialize)]
+pub struct RemoveTagReq { pub session_token: String, pub tag: String }
+
+pub async fn remove_tag(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<RemoveTagReq>,
+) -> Result<Json<TagsResp>, (StatusCode, String)> {
+    let uid = auth_user(&s, &req.session_token).await?;
+    sqlx::query!(
+        "DELETE FROM user_tags WHERE user_id = $1 AND tag = $2", uid, req.tag.trim())
+        .execute(&s.db).await.map_err(internal)?;
+    let rows = sqlx::query_scalar!(
+        "SELECT tag FROM user_tags WHERE user_id = $1 ORDER BY sort_order, tag", uid)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    Ok(Json(TagsResp { tags: rows }))
+}

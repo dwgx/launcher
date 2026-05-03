@@ -308,6 +308,147 @@ pub async fn uninstall(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---------- 重命名 pack ----------
+#[derive(Deserialize)]
+pub struct RenamePackReq {
+    pub session_token: String,
+    pub pack_id:       Uuid,
+    pub new_name:      String,
+}
+
+pub async fn rename_pack(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<RenamePackReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let trimmed = req.new_name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 24 {
+        return Err((StatusCode::BAD_REQUEST, "name 1-24 chars".into()));
+    }
+    let pack = sqlx::query!(
+        "SELECT creator_id FROM sticker_packs WHERE id = $1", req.pack_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
+    if pack.creator_id != Some(me) {
+        return Err((StatusCode::FORBIDDEN, "not your pack".into()));
+    }
+    sqlx::query!(
+        "UPDATE sticker_packs SET name = $1 WHERE id = $2", trimmed, req.pack_id)
+        .execute(&s.db).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- 删除 pack ----------
+// 级联：sticker_pack_items / user_sticker_packs 由 FK ON DELETE CASCADE 收
+// （0005_chat.sql 里 sticker_pack_items.pack_id REFERENCES sticker_packs ON DELETE CASCADE）
+#[derive(Deserialize)]
+pub struct DeletePackReq {
+    pub session_token: String,
+    pub pack_id:       Uuid,
+}
+
+pub async fn delete_pack(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<DeletePackReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let pack = sqlx::query!(
+        "SELECT creator_id FROM sticker_packs WHERE id = $1", req.pack_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
+    if pack.creator_id != Some(me) {
+        return Err((StatusCode::FORBIDDEN, "not your pack".into()));
+    }
+    // 先把这个 pack 里 user 创建的孤儿 stickers 也删掉（user 视图里"删除分组 = 云端也删"）
+    sqlx::query!(
+        r#"DELETE FROM stickers
+           WHERE creator_id = $1
+             AND id IN (SELECT sticker_id FROM sticker_pack_items WHERE pack_id = $2)
+             AND id NOT IN (SELECT sticker_id FROM sticker_pack_items WHERE pack_id != $2)"#,
+        me, req.pack_id)
+        .execute(&s.db).await.ok();
+    sqlx::query!("DELETE FROM sticker_packs WHERE id = $1", req.pack_id)
+        .execute(&s.db).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- 分享 pack ----------
+// 切 is_public = true，并自动生成 short_name (8 字 base32) 供分享链接
+#[derive(Deserialize)]
+pub struct SharePackReq {
+    pub session_token: String,
+    pub pack_id:       Uuid,
+    pub is_public:     Option<bool>,   // 默认 true
+}
+
+#[derive(Serialize)]
+pub struct ShareResp {
+    pub short_name: String,
+    pub is_public:  bool,
+}
+
+pub async fn share_pack(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<SharePackReq>,
+) -> Result<Json<ShareResp>, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let pack = sqlx::query!(
+        "SELECT creator_id, short_name FROM sticker_packs WHERE id = $1", req.pack_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
+    if pack.creator_id != Some(me) {
+        return Err((StatusCode::FORBIDDEN, "not your pack".into()));
+    }
+
+    let want_public = req.is_public.unwrap_or(true);
+    // 已有 short_name 就复用；没有就生成（pack_id 取前 8 字 base32-friendly）
+    let short = match pack.short_name {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            // 用 pack_id (uuid hex) 前 12 字符做 short_name — 简单稳定
+            let raw = req.pack_id.simple().to_string();
+            raw[..12].to_string()
+        }
+    };
+    sqlx::query!(
+        r#"UPDATE sticker_packs SET is_public = $1, short_name = $2 WHERE id = $3"#,
+        want_public, short, req.pack_id)
+        .execute(&s.db).await.map_err(internal)?;
+    Ok(Json(ShareResp { short_name: short, is_public: want_public }))
+}
+
+// ---------- 我自己上传的 stickers（无关 pack）----------
+// 客户端启动时拉一次：把同账号在另一台机器上传的图也同步到本地 userPack。
+#[derive(Deserialize)]
+pub struct MyStickersQ { pub session_token: String }
+
+pub async fn my_stickers(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<MyStickersQ>,
+) -> Result<Json<Vec<StickerOut>>, (StatusCode, String)> {
+    let me = auth_user(&s, &q.session_token).await?;
+    let rows = sqlx::query!(
+        r#"SELECT s.id, s.media_id, s.emoji_alias, s.label, s.is_animated,
+                  m.sha256, m.mime
+           FROM stickers s JOIN media_files m ON m.id = s.media_id
+           WHERE s.creator_id = $1
+           ORDER BY s.created_at DESC"#, me)
+        .fetch_all(&s.db).await.map_err(internal)?;
+
+    Ok(Json(rows.into_iter().map(|r| {
+        let ext = match r.mime.as_str() {
+            "image/png" => "png", "image/jpeg" => "jpg", "image/gif" => "gif",
+            "image/webp" => "webp", _ => "bin"
+        };
+        StickerOut {
+            id: r.id.to_string(), media_id: r.media_id,
+            media_url: format!("/api/media/{}/file.{}", r.sha256, ext),
+            emoji_alias: r.emoji_alias, label: r.label,
+            is_animated: r.is_animated,
+        }
+    }).collect()))
+}
+
 // ---------- 我的 packs ----------
 #[derive(Deserialize)]
 pub struct MyPacksQ { pub session_token: String }

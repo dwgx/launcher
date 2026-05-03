@@ -284,13 +284,17 @@ pub async fn send(
         edited_at: None, deleted: false,
     };
 
-    // 推送给所有成员（包括自己, 让多端同步）
-    let members = sqlx::query_scalar!(
-        "SELECT user_id FROM chat_members WHERE chat_id = $1", req.chat_id)
-        .fetch_all(&s.db).await.map_err(internal)?;
+    // 推送：官方频道无 chat_members 行，要广播给所有在线 WS；非官方走成员表
     let payload = serde_json::json!({ "type": "message", "data": &out });
-    for uid in members {
-        ws::push_to(&s, uid, &payload);
+    if chat_meta.kind == "channel" && chat_meta.is_official {
+        ws::broadcast_all(&s, &payload);
+    } else {
+        let members = sqlx::query_scalar!(
+            "SELECT user_id FROM chat_members WHERE chat_id = $1", req.chat_id)
+            .fetch_all(&s.db).await.map_err(internal)?;
+        for uid in members {
+            ws::push_to(&s, uid, &payload);
+        }
     }
     Ok(Json(out))
 }

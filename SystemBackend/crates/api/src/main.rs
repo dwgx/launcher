@@ -89,7 +89,12 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/profile/password",      post(profile::change_password))
         .route("/profile/avatar",        post(profile::upload_avatar))
         .route("/profile/login-history", get(profile::login_history))
+        .route("/profile/status",        post(profile::set_status))
         .route("/avatar/:id",            get(profile::get_avatar))
+        // user_tags chips
+        .route("/profile/tags",          get(profile::list_tags))
+        .route("/profile/tags/add",      post(profile::add_tag))
+        .route("/profile/tags/remove",   post(profile::remove_tag))
         // media
         .route("/media/upload",          post(media::upload))
         .route("/media/:sha/:name",      get(media::download))
@@ -111,8 +116,12 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/sticker/pack/remove",   post(sticker::remove_from_pack))
         .route("/sticker/pack/install",  post(sticker::install))
         .route("/sticker/pack/uninstall",post(sticker::uninstall))
+        .route("/sticker/pack/rename",   post(sticker::rename_pack))
+        .route("/sticker/pack/delete",   post(sticker::delete_pack))
+        .route("/sticker/pack/share",    post(sticker::share_pack))
         .route("/sticker/packs/public",  get(sticker::list_public_packs))
         .route("/sticker/packs/mine",    get(sticker::my_packs))
+        .route("/sticker/mine",          get(sticker::my_stickers))
         // market
         .route("/market/categories",     get(market::list_categories))
         .route("/market/listings",       get(market::list_listings))

@@ -42,6 +42,10 @@ pub async fn heartbeat(
         }
     }
 
+    // 心跳即"在线"信号 — 刷 last_seen，离线判定靠 (now() - last_seen)
+    sqlx::query!("UPDATE users SET last_seen = now() WHERE id = $1", row.user_id)
+        .execute(&s.db).await.ok();
+
     Ok(Json(HeartbeatResp {
         server_time: Utc::now().timestamp(),
         session_valid_until: row.expires_at.timestamp(),
