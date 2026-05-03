@@ -15,6 +15,7 @@
 #include "persist.h"
 #include "toast.h"
 #include "ws_user.h"
+#include "i18n.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -555,25 +556,57 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
+    auto* item_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
+                                        DWRITE_FONT_WEIGHT_BOLD);
+    auto* meta = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+
     prim::drawText_(ctx, L"市场", h1,
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
     prim::drawText_(ctx, L"CS2 .cfg / 配置 / 模板", sub,
                     ax + 32, ay + 64, aw - 64, 22,
                     br.solidA(pal.text_muted, op));
-    // 占位 listing 卡
-    for (int i = 0; i < 3; ++i) {
-        float cy = ay + 100 + i * 96;
-        prim::drawShadow(ctx, br, ax + 32, cy, aw - 64, 80, 12.0f, pal.shadow_card, op, 2.0f, 2);
-        prim::fillRR(ctx, ax + 32, cy, aw - 64, 80, 12.0f, br.solidA(pal.card, op));
-        wchar_t buf[64];
-        swprintf_s(buf, L"商品 #%d", i + 1);
-        prim::drawText_(ctx, buf, sub,
-                        ax + 56, cy + 20, aw - 96, 22,
-                        br.solidA(pal.text, op));
-        prim::drawText_(ctx, L"接 /api/market/listings 后填充", sub,
-                        ax + 56, cy + 44, aw - 96, 22,
+
+    std::vector<fetch::Listing> listings;
+    {
+        std::lock_guard<std::mutex> lk(fetch::g_market_mtx);
+        listings = fetch::g_market_listings;
+    }
+    if (listings.empty()) {
+        // 占位 — 启动后异步拉
+        prim::drawText_(ctx, L"商品加载中…", sub,
+                        ax + 32, ay + 100, aw - 64, 22,
                         br.solidA(pal.text_muted, op));
+        return;
+    }
+    int n = (int)listings.size();
+    int per_row = 2;
+    float card_w = (aw - 96) / per_row;
+    float card_h = 110;
+    for (int i = 0; i < n; ++i) {
+        int row = i / per_row, col = i % per_row;
+        float cx = ax + 32 + col * (card_w + 16);
+        float cy = ay + 100 + row * (card_h + 16);
+        if (cy > ay + ah) break;
+        LayoutRect cr{ cx, cy, card_w, card_h };
+        bool hov = cr.contains(g_mouse);
+        prim::drawShadow(ctx, br, cx, cy + (hov ? -1.0f : 0.0f),
+                         card_w, card_h, 12.0f, pal.shadow_card,
+                         op, hov ? 3.0f : 2.0f, hov ? 3 : 2);
+        prim::fillRR(ctx, cx, cy + (hov ? -1.0f : 0.0f),
+                     card_w, card_h, 12.0f, br.solidA(pal.card, op));
+        prim::drawText_(ctx, listings[i].title, item_fmt,
+                        cx + 16, cy + 16, card_w - 32, 22,
+                        br.solidA(pal.text, op));
+        prim::drawText_(ctx, listings[i].summary, meta,
+                        cx + 16, cy + 42, card_w - 32, 36,
+                        br.solidA(pal.text_muted, op));
+        wchar_t price_buf[32];
+        swprintf_s(price_buf, L"%d 积分  ·  by %.16ls",
+                   listings[i].price, listings[i].seller.c_str());
+        prim::drawText_(ctx, price_buf, meta,
+                        cx + 16, cy + card_h - 26, card_w - 32, 18,
+                        br.solidA(pal.primary, op));
     }
 }
 
@@ -637,8 +670,32 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     vx + pill_w_t, sy_ + 9, pill_w_t, 18,
                     br.solidA(theme_dark ? pal.text : pal.text_muted, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
-    hit(LayoutRect{ vx, sy_, pill_w_t, seg_h }, [](){ g_dark = false; }, true);
-    hit(LayoutRect{ vx + pill_w_t, sy_, pill_w_t, seg_h }, [](){ g_dark = true; }, true);
+    hit(LayoutRect{ vx, sy_, pill_w_t, seg_h },
+        [](){ g_dark = false; persist::saveTheme(false); }, true);
+    hit(LayoutRect{ vx + pill_w_t, sy_, pill_w_t, seg_h },
+        [](){ g_dark = true; persist::saveTheme(true); }, true);
+    sy_ += seg_h + 28;
+
+    // 语言 seg control (3 段)
+    prim::drawText_(ctx, L"语言", lab_fmt,
+                    vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
+    sy_ += 24;
+    float lseg_w = 360;
+    prim::fillRR(ctx, vx, sy_, lseg_w, seg_h, 8.0f, br.solidA(pal.surface, op));
+    int cur_lang = (int)g_lang;
+    float lp_w = lseg_w / 3.0f;
+    prim::fillRR(ctx, vx + cur_lang * lp_w + 2, sy_ + 2, lp_w - 4, seg_h - 4, 6.0f,
+                 br.solidA(pal.card, op));
+    const wchar_t* langs[3] = { L"English", L"简体中文", L"日本語" };
+    for (int i = 0; i < 3; ++i) {
+        prim::drawText_(ctx, langs[i], sub,
+                        vx + i * lp_w, sy_ + 9, lp_w, 18,
+                        br.solidA(i == cur_lang ? pal.text : pal.text_muted, op),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        int li = i;
+        hit(LayoutRect{ vx + i * lp_w, sy_, lp_w, seg_h },
+            [li](){ g_lang = (Lang)li; persist::saveLang(li); }, true);
+    }
     sy_ += seg_h + 28;
 
     // 关于

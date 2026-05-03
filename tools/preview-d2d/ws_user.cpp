@@ -56,7 +56,6 @@ void drain() {
         local.swap(g_inbox);
     }
     for (auto& m : local) {
-        // 简单解析 {"type":"chat",...}
         std::string type = net::jsonStr(m, "type");
         if (type == "chat") {
             std::string chat_id = net::jsonStr(m, "chat_id");
@@ -64,22 +63,39 @@ void drain() {
             std::string body = net::jsonStr(m, "body");
             std::string from = net::jsonStr(m, "from");
             std::string author = net::jsonStr(m, "author");
-            // 找 chat_id 对应的 slug
             for (auto& c : chat::g_channels) {
                 if (c.id == chat_id) {
                     chat::Msg msg;
-                    msg.kind = chat::MsgKind::Text;
                     msg.from = utf8ToW(from);
                     msg.author = utf8ToW(author);
                     msg.body = utf8ToW(body);
                     msg.time = L"now";
                     msg.status = L"online";
+                    if (kind == "text" || kind.empty()) {
+                        msg.kind = chat::MsgKind::Text;
+                    } else if (kind == "sticker") {
+                        msg.kind = chat::MsgKind::Sticker;
+                    } else if (kind == "image") {
+                        msg.kind = chat::MsgKind::Image;
+                    } else if (kind == "gif") {
+                        msg.kind = chat::MsgKind::Gif;
+                    } else if (kind == "video") {
+                        msg.kind = chat::MsgKind::Video;
+                    } else if (kind == "system") {
+                        msg.kind = chat::MsgKind::System;
+                    } else if (kind == "pack_share") {
+                        // 暂作 system 显示
+                        msg.kind = chat::MsgKind::System;
+                        msg.body = L"分享了表情包：" + msg.body;
+                    } else {
+                        msg.kind = chat::MsgKind::Text;
+                    }
                     chat::streamFor(c.slug).push_back(std::move(msg));
                     break;
                 }
             }
         }
-        // type == "status" 等留扩展
+        // type == "status"  — 留扩展（更新对应 user 的 status dot）
     }
 }
 

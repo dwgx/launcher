@@ -12,6 +12,9 @@
 
 namespace launcher::d2d::fetch {
 
+std::vector<Listing> g_market_listings;
+std::mutex g_market_mtx;
+
 namespace {
 struct StrArg { std::wstring s; HWND h; };
 struct VoidArg { HWND h; };
@@ -156,6 +159,39 @@ void loginHistory(HWND notify) {
         // 把整个 body 透传（modal 里再解析）
         auto* p = new std::string(std::move(r.body));
         PostMessageW(a->h, WM_APP + 30, 1, (LPARAM)p);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+void marketListings(HWND notify) {
+    auto* a = new VoidArg{ notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<VoidArg> a((VoidArg*)lp);
+        // 公共端点，不需 session
+        auto r = net::request(L"GET", L"/api/market/listings", {}, L"");
+        if (!r.ok()) return 0;
+        std::vector<Listing> tmp;
+        size_t pos = 0;
+        while (true) {
+            auto ob = r.body.find('{', pos);
+            if (ob == std::string::npos) break;
+            auto cb = r.body.find('}', ob);
+            if (cb == std::string::npos) break;
+            std::string obj = r.body.substr(ob, cb - ob + 1);
+            Listing l;
+            l.id     = net::jsonStr(obj, "id");
+            l.title  = utf8ToW(net::jsonStr(obj, "title"));
+            l.seller = utf8ToW(net::jsonStr(obj, "seller"));
+            l.price  = (int)net::jsonInt(obj, "price");
+            l.summary= utf8ToW(net::jsonStr(obj, "summary"));
+            if (!l.id.empty()) tmp.push_back(std::move(l));
+            pos = cb + 1;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_market_mtx);
+            g_market_listings = std::move(tmp);
+        }
+        PostMessageW(a->h, WM_APP + 33, 0, 0);
         return 0;
     }, a, 0, nullptr);
 }

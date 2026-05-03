@@ -7,7 +7,7 @@ pushd "%~dp0"
 cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE /I. ^
    d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp ^
    chat.cpp modals.cpp persist.cpp toast.cpp i18n.cpp fetch.cpp ws_user.cpp ^
-   tray.cpp main.cpp /link ^
+   tray.cpp sticker.cpp main.cpp /link ^
    /SUBSYSTEM:WINDOWS /OUT:LauncherD2D.exe
 set RC=%ERRORLEVEL%
 del /q *.obj 2>nul

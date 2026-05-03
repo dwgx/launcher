@@ -7,6 +7,7 @@
 #include "net.h"
 #include "hit.h"
 #include "stages.h"
+#include "sticker.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -642,25 +643,146 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             }, true);
         }
     } else {
-        // 表情包占位 — 接通 fetchMyPacks 后填充
-        prim::drawText_(ctx, L"表情包同步中…", hint_fmt,
-                        px + 14, py + 60, pw - 28, 18,
-                        br.solidA(pal.text_muted, t));
-        // 新建按钮
-        LayoutRect newp{ px + 14, py + 90, 100, 28 };
+        // 表情包面板：tab head + 当前 pack stickers grid
+        auto& packs = sticker::g_packs;
+        // 顶部 pack tabs（横向滑动）
+        float bx = px + 14;
+        float by = py + 50;
+        int active_pack = (g_picker_tab >= 1 && g_picker_tab - 1 < (int)packs.size())
+            ? g_picker_tab - 1 : 0;
+        if (active_pack >= (int)packs.size()) active_pack = 0;
+        for (int i = 0; i < (int)packs.size() && i < 8; ++i) {
+            const auto& p = packs[i];
+            wchar_t buf[32];
+            swprintf_s(buf, L"%.10ls", p.name.c_str());
+            float bw = (std::min)(60.0f, measureW(app, buf, hint_fmt) + 16.0f);
+            LayoutRect tab_r{ bx, by, bw, 24 };
+            bool ph = tab_r.contains(g_mouse);
+            bool pa = (i == active_pack);
+            if (pa || ph) {
+                prim::fillRR(ctx, bx, by, bw, 24, 4.0f,
+                             br.solidA(pal.primary, t * (pa ? 0.18f : 0.08f)));
+            }
+            prim::drawText_(ctx, buf, hint_fmt,
+                            bx + 4, by + 5, bw - 8, 16,
+                            br.solidA(pa ? pal.primary : pal.text_muted, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            int idx = i;
+            hit(tab_r, [idx](){ g_picker_tab = 1 + idx; }, true);
+            bx += bw + 4;
+            if (bx > px + pw - 80) break;
+        }
+        // + 新建
+        LayoutRect newp{ px + pw - 64, py + 50, 50, 24 };
         bool nh = newp.contains(g_mouse);
-        prim::fillRR(ctx, newp.x, newp.y, newp.w, newp.h, 6,
+        prim::fillRR(ctx, newp.x, newp.y, newp.w, newp.h, 4,
                      br.solidA(pal.primary, t * (nh ? 1.0f : 0.85f)));
-        prim::drawText_(ctx, L"+ 新建", tab_fmt,
-                        newp.x, newp.y + 5, newp.w, 18,
+        prim::drawText_(ctx, L"+ 新建", hint_fmt,
+                        newp.x, newp.y + 5, newp.w, 16,
                         br.solidA(0xFFFFFF, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
         hit(newp, [](){
             g_picker_open = false;
             g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
-            // modals.h 的 openCreatePack — 但 chat.cpp 不能 #include modals.h（循环），改用 PostMessage
             PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
         }, true);
+
+        // grid 5 列 sticker
+        const auto& cur_pack = packs[active_pack];
+        if (cur_pack.stickers.empty()) {
+            prim::drawText_(ctx,
+                cur_pack.name == L"系统 emoji"
+                    ? L"切到 表情 标签" : L"还没贴纸 — 拖文件 / 上传 / 安装",
+                hint_fmt,
+                px + 14, py + 110, pw - 28, 18,
+                br.solidA(pal.text_muted, t),
+                DWRITE_TEXT_ALIGNMENT_CENTER);
+        } else {
+            int cols = 5;
+            float cell = 60.0f;
+            float gx = px + 14, gy = py + 84;
+            for (size_t i = 0; i < cur_pack.stickers.size(); ++i) {
+                int row = (int)(i / cols), col = (int)(i % cols);
+                float ex = gx + col * (cell + 4), ey = gy + row * (cell + 4);
+                if (ey + cell > py + ph - 8) break;
+                LayoutRect sr{ ex, ey, cell, cell };
+                bool sh_ = sr.contains(g_mouse);
+                if (sh_) {
+                    prim::fillRR(ctx, ex, ey, cell, cell, 6,
+                                 br.solidA(pal.primary, t * 0.12f));
+                }
+                auto* bmp = app.images().fromFile(cur_pack.stickers[i]);
+                if (bmp) {
+                    ctx->DrawBitmap(bmp,
+                        D2D1::RectF(ex + 4, ey + 4, ex + cell - 4, ey + cell - 4),
+                        t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                }
+                std::wstring path = cur_pack.stickers[i];
+                hit(sr, [path](){
+                    Msg m;
+                    m.kind = MsgKind::Sticker;
+                    m.from = L"me";
+                    m.body = path;
+                    m.time = L"now";
+                    streamFor(g_active).push_back(std::move(m));
+                    g_picker_open = false;
+                    g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                }, true);
+            }
+        }
+
+        // 操作行：分享 / 重命名 / 删除（仅非系统 + 有 id 时）
+        if (active_pack > 0 && !cur_pack.id.empty()) {
+            float oy = py + ph - 36;
+            std::string pid = cur_pack.id;
+            std::wstring pname = cur_pack.name;
+            bool pub = cur_pack.is_public;
+
+            LayoutRect rb{ px + 14, oy, 80, 24 };
+            bool rh = rb.contains(g_mouse);
+            prim::fillRR(ctx, rb.x, rb.y, rb.w, rb.h, 4,
+                         br.solidA(pal.text, t * (rh ? 0.10f : 0.05f)));
+            prim::drawText_(ctx, L"重命名", hint_fmt,
+                            rb.x, rb.y + 5, rb.w, 16,
+                            br.solidA(pal.text, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            hit(rb, [pid, pname](){
+                g_picker_open = false;
+                g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                // PostMessage 给 main 让 main 调 modal::openRenamePack
+                static std::pair<std::string, std::wstring> g_pending;
+                g_pending = { pid, pname };
+                PostMessageW(GetActiveWindow(), WM_APP + 31,
+                             (WPARAM)&g_pending.first, (LPARAM)&g_pending.second);
+            }, true);
+
+            LayoutRect sb{ px + 100, oy, 80, 24 };
+            bool s_h = sb.contains(g_mouse);
+            prim::fillRR(ctx, sb.x, sb.y, sb.w, sb.h, 4,
+                         br.solidA(pub ? 0x4ADE80 : pal.text, t * (s_h ? 0.18f : 0.08f)));
+            prim::drawText_(ctx, pub ? L"已分享 ✓" : L"分享", hint_fmt,
+                            sb.x, sb.y + 5, sb.w, 16,
+                            br.solidA(pub ? 0x4ADE80 : pal.text, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            hit(sb, [pid, pub](){
+                sticker::sharePack(GetActiveWindow(), pid, !pub);
+            }, true);
+
+            LayoutRect db{ px + 186, oy, 80, 24 };
+            bool dh = db.contains(g_mouse);
+            prim::fillRR(ctx, db.x, db.y, db.w, db.h, 4,
+                         br.solidA(0xE34B4B, t * (dh ? 0.18f : 0.08f)));
+            prim::drawText_(ctx, L"删除", hint_fmt,
+                            db.x, db.y + 5, db.w, 16,
+                            br.solidA(0xE34B4B, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            hit(db, [pid, pname](){
+                static std::pair<std::string, std::wstring> g_pending_del;
+                g_pending_del = { pid, pname };
+                PostMessageW(GetActiveWindow(), WM_APP + 32,
+                             (WPARAM)&g_pending_del.first, (LPARAM)&g_pending_del.second);
+            }, true);
+        }
     }
 }
 

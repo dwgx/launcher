@@ -29,6 +29,8 @@
 #include "i18n.h"
 #include "steam.h"
 #include "hwid.h"
+#include "sticker.h"
+#include <utility>
 
 #pragma comment(lib, "user32.lib")
 
@@ -47,13 +49,16 @@ static bool inAuthOrMain() {
         || stages::g_stage == stages::Stage::Main;
 }
 
-// 启动后异步：tags + 头像云同步
+// 启动后异步：tags + 头像云同步 + sticker packs/stickers + market
 static void afterLogin(HWND hwnd) {
     persist::saveSession(g_session_token, g_user_id);
     ws::start(hwnd);
     chat::fetchOfficialChannels(hwnd);
     fetch::userTags(hwnd);
     fetch::remoteAvatar(hwnd);
+    sticker::fetchMyPacks(hwnd);
+    sticker::fetchMyStickers(hwnd);
+    fetch::marketListings(hwnd);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -217,9 +222,61 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP + 22: {                    // sticker packs fetched
+            return 0;
+        }
+        case WM_APP + 24: {                    // my stickers fetched
+            return 0;
+        }
+        case WM_APP + 25: {                    // pack contents fetched
+            return 0;
+        }
+        case WM_APP + 26: {                    // pack share result
+            if (wp) {
+                toast::show(L"分享设置已更新");
+                sticker::fetchMyPacks(hwnd);
+            } else toast::show(L"分享失败");
+            return 0;
+        }
+        case WM_APP + 27: {                    // pack delete result
+            if (wp) toast::show(L"已删除表情包");
+            else    toast::show(L"删除失败");
+            return 0;
+        }
+        case WM_APP + 28: {                    // pack install result
+            if (wp) {
+                toast::show(L"已安装表情包");
+                sticker::fetchMyPacks(hwnd);
+            } else toast::show(L"安装失败");
+            return 0;
+        }
         case WM_APP + 30: {                    // login history result; lp = std::string*
             std::unique_ptr<std::string> p((std::string*)lp);
             if (p) modal::onHistoryResult(*p);
+            return 0;
+        }
+        case WM_APP + 31: {                    // chat picker → rename pack
+            auto* pid = (std::string*)wp;
+            auto* nm = (std::wstring*)lp;
+            if (pid && nm) modal::openRenamePack(*pid, *nm);
+            return 0;
+        }
+        case WM_APP + 32: {                    // chat picker → delete pack confirm
+            auto* pid = (std::string*)wp;
+            auto* nm = (std::wstring*)lp;
+            if (pid && nm) {
+                std::string id_copy = *pid;
+                std::wstring nm_copy = *nm;
+                modal::openConfirm(L"删除表情包",
+                    L"确认删除「" + nm_copy + L"」？分享出去的也会失效。",
+                    [id_copy](){
+                        sticker::deletePack(GetActiveWindow(), id_copy);
+                    },
+                    L"删除", L"取消", true);
+            }
+            return 0;
+        }
+        case WM_APP + 33: {                    // market listings fetched
             return 0;
         }
         case tray::kTrayCallbackMsg: {

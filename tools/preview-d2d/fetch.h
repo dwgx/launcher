@@ -6,6 +6,8 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <string>
+#include <vector>
+#include <mutex>
 
 namespace launcher::d2d::fetch {
 
@@ -32,5 +34,18 @@ void loginHistory(HWND notify);
 
 // 头像上传 — 异步 multipart POST /api/profile/avatar → WM_APP+3 (wp = success)
 void uploadAvatar(HWND notify, const std::wstring& path);
+
+struct Listing {
+    std::string  id;
+    std::wstring title;
+    std::wstring seller;
+    int          price = 0;       // credits
+    std::wstring summary;
+};
+extern std::vector<Listing> g_market_listings;
+extern std::mutex g_market_mtx;
+
+// GET /api/market/listings → 写 g_market_listings + WM_APP+33
+void marketListings(HWND notify);
 
 }  // namespace launcher::d2d::fetch
