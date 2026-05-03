@@ -1048,7 +1048,81 @@ void submitAddTag() {
 // 表情包分组 sticker_packs — create / rename / delete / share
 // ====================================================================
 
+// 拉一个 pack 的 sticker 内容并下载到本地缓存（GET /api/sticker/pack/:id）
+inline void fetchPackContents(HWND notify, const std::string& pack_id) {
+    if (g_session_token.empty() || pack_id.empty()) return;
+    struct A { std::string id; HWND h; };
+    A* a = new A{pack_id, notify};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/sticker/pack/" + a->id;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (!r.ok()) { delete a; return 0; }
+
+        // 找到 stickers 数组里的每一个 media_url 字段，下载到 stickers cache
+        std::wstring dir = chatv::stickerCacheDir();
+        if (dir.empty()) { delete a; return 0; }
+
+        // 找到对应的 Pack 对象
+        auto& ps = chatv::packs();
+        chatv::Pack* target = nullptr;
+        for (auto& p : ps) if (p.id == a->id) { target = &p; break; }
+        if (!target) { delete a; return 0; }
+
+        size_t pos = 0;
+        std::vector<std::wstring> downloaded;
+        // body 形如 {"id":"...","name":"...","stickers":[{"id":"...","media_url":"/api/media/<sha>/file.<ext>",...},...]}
+        // 只关心 media_url
+        while (true) {
+            pos = r.body.find("\"media_url\":\"", pos);
+            if (pos == std::string::npos) break;
+            pos += 13;
+            size_t e = r.body.find('"', pos);
+            if (e == std::string::npos) break;
+            std::string url_path = r.body.substr(pos, e - pos);
+            pos = e;
+
+            // 提取 sha + ext 组件
+            auto p1 = url_path.find("/api/media/");
+            if (p1 == std::string::npos) continue;
+            p1 += 11;
+            auto p2 = url_path.find('/', p1);
+            if (p2 == std::string::npos) continue;
+            std::string sha = url_path.substr(p1, p2 - p1);
+            auto dot = url_path.find_last_of('.');
+            std::string ext = (dot != std::string::npos) ? url_path.substr(dot + 1) : "bin";
+            std::wstring fname = std::wstring(sha.begin(), sha.end())
+                + L"." + std::wstring(ext.begin(), ext.end());
+            std::wstring local = dir + fname;
+            if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::wstring wpath(url_path.begin(), url_path.end());
+                auto dr = net::request(L"GET", wpath.c_str(), "", L"");
+                if (!dr.ok()) continue;
+                HANDLE f = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
+                                       nullptr, CREATE_ALWAYS, 0, nullptr);
+                if (f == INVALID_HANDLE_VALUE) continue;
+                DWORD wn = 0;
+                WriteFile(f, dr.body.data(), (DWORD)dr.body.size(), &wn, nullptr);
+                CloseHandle(f);
+            }
+            if (chatv::loadMedia(local)) downloaded.push_back(local);
+        }
+
+        // 把这些 sticker 路径注入到 target.stickers（去重）
+        for (auto& p : downloaded) {
+            bool dup = false;
+            for (auto& s : target->stickers) if (s == p) { dup = true; break; }
+            if (!dup) target->stickers.push_back(p);
+        }
+        PostMessageW(a->h, WM_APP + 18, (WPARAM)(int)downloaded.size(), 0);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
 // 拉取自己的 pack 列表 (GET /api/sticker/packs/mine) 并填进 chatv::packs()
+// 然后逐个 pack 调 fetchPackContents 拿里面的 stickers
 inline void fetchMyPacks(HWND notify) {
     if (g_session_token.empty()) return;
     struct A { HWND h; };
@@ -1060,12 +1134,12 @@ inline void fetchMyPacks(HWND notify) {
         auto r = net::request(L"GET", wurl.c_str(), "", L"");
         if (!r.ok()) { delete a; return 0; }
         // body 形如 [{"id":"uuid","name":"foo","short_name":"bar","install_count":0,"cover_url":null}, ...]
-        // 顺序解析每个 object 的 id + name
         auto& ps = chatv::packs();
         // 保留 ps[0]（系统 emoji）+ "我的表情" 默认；其他清空重建
         std::vector<chatv::Pack> kept;
         for (auto& p : ps) if (p.is_system || p.name == L"我的表情") kept.push_back(p);
         ps = std::move(kept);
+        std::vector<std::string> new_ids;
         size_t pos = 0;
         while (true) {
             auto ip = r.body.find("\"id\":\"", pos);
@@ -1081,16 +1155,18 @@ inline void fetchMyPacks(HWND notify) {
             int wn = MultiByteToWideChar(CP_UTF8, 0, name_utf8.c_str(), -1, nullptr, 0);
             std::wstring name(wn > 0 ? wn - 1 : 0, 0);
             if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, name_utf8.c_str(), -1, name.data(), wn);
-            // 已存在则跳过
             bool dup = false;
             for (auto& p : ps) if (p.id == id) { dup = true; break; }
             if (!dup) {
                 chatv::Pack p; p.id = id; p.name = std::move(name);
                 ps.push_back(std::move(p));
+                new_ids.push_back(id);
             }
             pos = ne;
         }
         PostMessageW(a->h, WM_APP + 18, 1, 0);
+        // 逐个拉 pack 的 stickers
+        for (auto& id : new_ids) fetchPackContents(a->h, id);
         delete a;
         return 0;
     }, a, 0, nullptr);
@@ -2709,7 +2785,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             chatv::Msg m; m.kind = chatv::MsgKind::Text;
                             m.from = L"me"; m.author = L""; m.status = L"online";
                             m.read = false; m.time = L"now";
-                            static std::vector<std::wstring> g_my_txts;
+                            // Why deque：vector::push_back 重分配会移动 wstring 对象，短串
+                            // SSO 内嵌在对象内 → 已有 c_str() 指向旧地址 → bubble "牙T" / 方框
+                            // 之类的 garbage。deque 保证 push_back 不让已有元素失效。
+                            static std::deque<std::wstring> g_my_txts;
                             g_my_txts.push_back(chatv::g_composer.text);
                             m.body = g_my_txts.back().c_str();
                             s.push_back(m);
@@ -2898,8 +2977,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 11: {
-            // 拉取 official channels 完成
-            if (wp == 1) g_toast.show(L"频道映射已同步");
+            // 拉取 official channels 完成 — 顺便拉一次当前频道的历史
+            if (wp == 1) {
+                chatv::fetchHistory(hwnd, chatv::g_active);
+            }
             return 0;
         }
         case WM_APP + 12: {

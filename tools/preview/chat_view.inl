@@ -106,9 +106,9 @@ inline std::wstring basename(const std::wstring& p) {
     return (pos == std::wstring::npos) ? p : p.substr(pos + 1);
 }
 
-// 长生命周期 path 字符串
-inline std::vector<std::wstring>& mediaPathStore() {
-    static std::vector<std::wstring> v; return v;
+// 长生命周期 path 字符串 — deque 防 push_back 移走 SSO 短串导致 c_str() 变垃圾
+inline std::deque<std::wstring>& mediaPathStore() {
+    static std::deque<std::wstring> v; return v;
 }
 
 // ============== 状态 ==============
@@ -215,14 +215,16 @@ inline void parseAndEnqueue(const std::string& body, HWND notify_hwnd) {
     std::wstring slug = uuidToSlug(chat_id);
     if (slug.empty()) return;   // 非官方频道（暂不显示）
 
-    // 是自己发的？后端 push 给所有 member 包括自己 — UI 已经在 send 前本地 echo 了，
-    // 否则会重复显示一条。简单处理：跳过 sender == 当前用户。
-    bool is_me = (sender == ::g_user_id) && !sender.empty();
+    // 是自己发的？后端 push 给所有成员（包括自己用于多端同步）但本端 send 时已经
+    // 本地 echo 过 → 直接 drop，否则同一条消息会显示两次。
+    // (代价：多设备登录的另一端看不到这一条，等 fetchHistory 才会同步过来；
+    //  Phase 7+ 用 message_id dedup 解决多端实时同步。)
+    if (sender == ::g_user_id && !sender.empty()) return;
 
     auto& b = wsInbox();
     std::lock_guard<std::mutex> lk(b.mu);
     Msg m;
-    m.from   = is_me ? L"me" : poolWString(b, sender);
+    m.from   = poolWString(b, sender);
     m.author = poolWString(b, sender);
     m.status = L"online";
     m.read   = false;
@@ -263,6 +265,89 @@ inline void drainWsInbox() {
         streamFor(slug.c_str()).push_back(m);
     }
     b.pending.clear();
+}
+
+// 切频道时拉历史 — 一个频道只拉一次（缓存"已拉"状态防重复）
+inline std::unordered_map<std::wstring, bool>& historyFetched() {
+    static std::unordered_map<std::wstring, bool> m;
+    return m;
+}
+
+inline void fetchHistory(HWND notify_hwnd, const std::wstring& slug) {
+    auto& m = slugToUuid();
+    auto it = m.find(slug);
+    if (it == m.end() || ::g_session_token.empty()) return;
+    if (historyFetched()[slug]) return;
+    historyFetched()[slug] = true;
+
+    struct A { std::wstring slug; std::string uuid; HWND h; };
+    A* a = new A{slug, it->second, notify_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/chat/history?session_token=" + ::g_session_token
+            + "&chat_id=" + a->uuid + "&limit=50";
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (!r.ok()) {
+            historyFetched()[a->slug] = false;   // 失败：允许下次重试
+            delete a; return 0;
+        }
+        // body 是 [MessageOut, ...] 倒序（DESC）— 我们要正序贴到 streamFor 前面
+        auto& b = wsInbox();
+        std::vector<Msg> parsed;
+        size_t pos = 0;
+        while (true) {
+            auto p_id = r.body.find("\"id\":", pos);
+            if (p_id == std::string::npos) break;
+            // 取 sender_id / msg_type / payload.text
+            auto next = r.body.find("\"id\":", p_id + 5);
+            std::string seg = r.body.substr(p_id, (next == std::string::npos)
+                                                  ? std::string::npos : next - p_id);
+            std::string sender   = net::jsonStr(seg, "sender_id");
+            std::string msg_type = net::jsonStr(seg, "msg_type");
+            std::string text;
+            auto pl = seg.find("\"payload\":");
+            if (pl != std::string::npos) {
+                std::string sub = seg.substr(pl);
+                text = net::jsonStr(sub, "text");
+                if (text.empty()) text = net::jsonStr(sub, "url");
+            }
+            if (msg_type.empty() || (text.empty() && msg_type != "system")) {
+                pos = (next == std::string::npos) ? r.body.size() : next;
+                continue;
+            }
+            std::lock_guard<std::mutex> lk(b.mu);
+            Msg m;
+            bool is_me = (sender == ::g_user_id) && !sender.empty();
+            m.from   = is_me ? L"me" : poolWString(b, sender);
+            m.author = poolWString(b, sender);
+            m.status = L"online";
+            m.read = true; m.time = L"";
+            if (msg_type == "text")              { m.kind = MsgKind::Text;  m.body = poolWString(b, text); }
+            else if (msg_type == "image")        { m.kind = MsgKind::Image; m.body = poolWString(b, text); }
+            else if (msg_type == "gif"
+                  || msg_type == "sticker")      { m.kind = MsgKind::Gif;   m.body = poolWString(b, text); }
+            else if (msg_type == "video")        { m.kind = MsgKind::Video; m.body = poolWString(b, text); }
+            else                                 { m.kind = MsgKind::System;m.body = poolWString(b, text); }
+            parsed.push_back(m);
+            pos = (next == std::string::npos) ? r.body.size() : next;
+        }
+        // backend 返回 DESC（最新在前）— 反转成时间正序
+        std::reverse(parsed.begin(), parsed.end());
+
+        // 把历史塞进 wsInbox.pending（用 status 字段当 slug 标记，drain 时分流）
+        {
+            std::lock_guard<std::mutex> lk(b.mu);
+            for (auto& m : parsed) {
+                b.str_pool.push_back(a->slug);
+                m.status = b.str_pool.back().c_str();
+                b.pending.push_back(m);
+            }
+        }
+        PostMessageW(a->h, WM_APP + 10, 0, 0);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
 }
 
 // 启动 WS 连接 — 登录成功 / 启动有 session 时调一次
@@ -321,6 +406,7 @@ float g_typing_t = 0.0f;
 void switchChannel(const wchar_t* id) {
     g_active = id;
     g_picker_open = false;
+    fetchHistory(g_hwnd, id);   // 拉一次历史（缓存）
 }
 
 // 把一个文件路径作为 media message 加到当前频道
@@ -855,7 +941,9 @@ void paintComposer(Graphics& g, RectF area) {
             auto& s = streamFor(g_active);
             Msg m; m.kind = MsgKind::Text; m.from = L"me"; m.author = L"";
             m.status = L"online"; m.read = false; m.time = L"now";
-            static std::vector<std::wstring> g_my_msgs;
+            // deque 不像 vector 那样 push_back 重分配 → 已存的 c_str() 不会失效
+            // （短 wstring SSO 内嵌在对象，vector 重分配 = 字符串变垃圾）
+            static std::deque<std::wstring> g_my_msgs;
             g_my_msgs.push_back(g_composer.text);
             m.body = g_my_msgs.back().c_str();
             s.push_back(m);
