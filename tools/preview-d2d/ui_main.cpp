@@ -11,10 +11,19 @@
 #include "hit.h"
 #include "chat.h"
 #include "modals.h"
+#include "fetch.h"
+#include "persist.h"
+#include "toast.h"
+#include "ws_user.h"
 #include "render/primitives.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <commdlg.h>
+#include <ShlObj.h>
+
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 namespace launcher::d2d::ui {
 
@@ -263,7 +272,7 @@ void paintAccountDropdown(D2DApp& app, float W) {
                 g_status = target;
                 g_status_fold_open = false;
                 g_status_fold_t.start(g_status_fold_t.value(), 0.0f, 0.18f, 0, curve::easeOutCubic);
-                // 后端 sync — 留给 main 异步处理
+                fetch::statusSync(statusKey(target));
             }, true);
             iy += 24.0f * ft;
         }
@@ -294,6 +303,9 @@ void paintAccountDropdown(D2DApp& app, float W) {
         { L"退出登录", icons::Name::Logout, [](){
             modal::openConfirm(L"退出登录", L"将清除本机会话，下次启动需重新登录。",
                 [](){
+                    fetch::logout(g_session_token);
+                    ws::stop();
+                    persist::clearCreds();
                     g_session_token.clear();
                     g_user_id.clear();
                     auth::g_form.username.text.clear(); auth::g_form.username.cursor = 0;
@@ -304,6 +316,7 @@ void paintAccountDropdown(D2DApp& app, float W) {
                     stages::g_stage = stages::Stage::Auth;
                     stages::g_auth_card_op.start(0.0f, 1.0f, 0.40f, 0.05f, curve::easeOutCubic);
                     stages::g_auth_card_y.start(12.0f, 0.0f, 0.45f, 0.05f, curve::easeOutQuint);
+                    toast::show(L"已退出登录");
                 },
                 L"退出", L"取消", true);
             g_account_dropdown = false;
@@ -456,21 +469,46 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         std::lock_guard<std::mutex> lk(g_user_tags_mtx);
         tags = g_user_tags;
     }
-    if (tags.empty()) {
-        // 默认占位标签
+    bool empty_real = tags.empty() && g_session_token.empty();
+    if (empty_real) {
         tags = { L"CS2", L"Premier 18k", L"东京机房" };
     }
-    for (auto& t : tags) {
-        float tw = measureW(app, t, chip_fmt) + 24;
+    for (auto& tag : tags) {
+        float tw = measureW(app, tag, chip_fmt) + 24;
+        LayoutRect chip_rect{ chipx, chipy, tw, 26 };
+        bool chov = chip_rect.contains(g_mouse);
         prim::fillRR(ctx, chipx, chipy, tw, 26, 13,
-                     br.solidA(pal.surface, op));
+                     br.solidA(chov ? pal.bg : pal.surface, op));
         prim::strokeRR(ctx, chipx, chipy, tw, 26, 13,
                        br.solidA(pal.divider, op));
-        prim::drawText_(ctx, t, chip_fmt,
+        prim::drawText_(ctx, tag, chip_fmt,
                         chipx + 12, chipy + 5, tw - 24, 16,
                         br.solidA(pal.text, op));
+        if (chov && !empty_real) {
+            // hover 显示 ✕ 删除
+            float xx = chipx + tw - 14;
+            icons::drawIcon(app, icons::Name::X, xx - 4, chipy + 7, 12,
+                            fadeArgb(pal.text_muted, op));
+            std::wstring tcopy = tag;
+            hit(LayoutRect{ xx - 6, chipy + 4, 18, 18 }, [tcopy]() {
+                fetch::removeTag(GetActiveWindow(), tcopy);
+            }, true);
+        }
         chipx += tw + 8;
         if (chipx > cx + cw - 80) break;
+    }
+    // + 添加 chip
+    if (!empty_real) {
+        const wchar_t* add = L"+ 添加";
+        float aw_ = measureW(app, add, chip_fmt) + 20;
+        LayoutRect addr{ chipx, chipy, aw_, 26 };
+        bool ahov = addr.contains(g_mouse);
+        prim::strokeRR(ctx, chipx, chipy, aw_, 26, 13,
+                       br.solidA(pal.primary, op * (ahov ? 1.0f : 0.6f)));
+        prim::drawText_(ctx, add, chip_fmt,
+                        chipx + 10, chipy + 5, aw_ - 20, 16,
+                        br.solidA(pal.primary, op));
+        hit(addr, [](){ modal::openAddTag(); }, true);
     }
 }
 
@@ -668,7 +706,32 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     DWRITE_TEXT_ALIGNMENT_CENTER,
                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     hit(up, [](){
-        // 简化：openfilename + 上传留 Step 7 modal 时一起做
+        OPENFILENAMEW ofn{};
+        static wchar_t fnbuf[MAX_PATH] = {0};
+        fnbuf[0] = 0;
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = GetActiveWindow();
+        ofn.lpstrFilter = L"图片\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0全部文件\0*.*\0";
+        ofn.lpstrFile = fnbuf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&ofn)) {
+            // 复制到 LOCALAPPDATA + 设 g_avatar_path
+            wchar_t base[MAX_PATH] = {0};
+            if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
+                std::wstring dir = std::wstring(base) + L"\\Launcher";
+                CreateDirectoryW(dir.c_str(), nullptr);
+                std::wstring src = fnbuf;
+                auto dot = src.find_last_of(L'.');
+                std::wstring ext = (dot != std::wstring::npos) ? src.substr(dot) : L".png";
+                std::wstring dst = dir + L"\\avatar" + ext;
+                if (CopyFileW(fnbuf, dst.c_str(), FALSE)) {
+                    g_avatar_path = dst;
+                    toast::show(L"头像已更新，正在上传…");
+                    fetch::uploadAvatar(GetActiveWindow(), dst);
+                }
+            }
+        }
     }, true);
 
     LayoutRect pw{ cx + 156, by, 130, 28 };
@@ -735,6 +798,12 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintChangePwModal(app, W, H);
     modal::paintConfirmModal(app, W, H);
     modal::paintHistoryModal(app, W, H);
+    modal::paintAddTagModal(app, W, H);
+    modal::paintCreatePackModal(app, W, H);
+    modal::paintRenamePackModal(app, W, H);
+
+    // toast 在最最顶层
+    toast::paint(app, W, H);
 }
 
 }  // namespace launcher::d2d::ui

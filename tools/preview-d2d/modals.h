@@ -12,6 +12,8 @@
 #include "inputbox.h"
 #include "anim.h"
 #include <functional>
+#include <string>
+#include <vector>
 
 namespace launcher::d2d::modal {
 
@@ -58,10 +60,56 @@ void paintCS2Modal(D2DApp& app, float W, float H);
 struct HistoryState {
     bool open = false;
     Tween t;
+    // 拉真 /api/profile/login-history 后填这个；每行 = "时间 | OK | IP | 地理"
+    std::vector<std::wstring> rows;
+    bool loaded = false;
+    int  page = 0;     // 5 行/页
 };
 extern HistoryState g_history;
 void openHistory();
 void paintHistoryModal(D2DApp& app, float W, float H);
+void onHistoryResult(const std::string& body);
+
+// AddTag — 给 Home 个人标签 chip + 添加用
+struct AddTagState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+    std::wstring error_msg;
+};
+extern AddTagState g_addtag;
+void openAddTag();
+void paintAddTagModal(D2DApp& app, float W, float H);
+void onAddTagResult(bool success, int status);
+
+// CreatePack — chat picker 里 + 新建表情包
+struct CreatePackState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+    std::wstring error_msg;
+};
+extern CreatePackState g_createpack;
+void openCreatePack();
+void paintCreatePackModal(D2DApp& app, float W, float H);
+void onCreatePackResult(bool success);
+
+// RenamePack
+struct RenamePackState {
+    bool open = false;
+    Tween t;
+    std::string pack_id;
+    std::wstring orig_name;
+    InputBox input;
+    bool busy = false;
+    std::wstring error_msg;
+};
+extern RenamePackState g_renamepack;
+void openRenamePack(const std::string& pack_id, const std::wstring& orig_name);
+void paintRenamePackModal(D2DApp& app, float W, float H);
+void onRenamePackResult(bool success);
 
 // 主帧循环 tick
 void tickAll(float dt);

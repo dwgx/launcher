@@ -43,6 +43,9 @@ const wchar_t* kGroups[] = { L"IMPORTANT", L"GENERAL", L"GAMES", L"SHOP" };
 std::wstring g_active = L"general";
 InputBox     g_composer;
 bool         g_focus_composer = false;
+bool         g_picker_open = false;
+Tween        g_picker_t;
+int          g_picker_tab = 0;
 
 static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 static std::unordered_map<std::wstring, bool> g_group_collapsed;
@@ -73,8 +76,33 @@ static float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) 
     return m.width;
 }
 
-void tick(float /*dt*/) {
-    // typing dots / unread badge anim 等留 Step polish
+void tick(float dt) {
+    g_picker_t.tick(dt);
+}
+
+void appendMedia(const std::wstring& path) {
+    Msg m;
+    std::wstring p = path;
+    auto dot = p.find_last_of(L'.');
+    std::wstring ext = (dot != std::wstring::npos) ? p.substr(dot) : L"";
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp" || ext == L".bmp") {
+        m.kind = MsgKind::Image;
+    } else if (ext == L".gif") {
+        m.kind = MsgKind::Gif;
+    } else if (ext == L".mp4" || ext == L".webm" || ext == L".mov" || ext == L".avi" || ext == L".mkv") {
+        m.kind = MsgKind::Video;
+    } else {
+        m.kind = MsgKind::Text;
+        m.body = L"[文件] " + path;
+        m.from = L"me"; m.time = L"now";
+        streamFor(g_active).push_back(std::move(m));
+        return;
+    }
+    m.from = L"me";
+    m.body = path;
+    m.time = L"now";
+    streamFor(g_active).push_back(std::move(m));
 }
 
 // ============== 频道列表 ==============
@@ -189,14 +217,7 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
     auto* time_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
     auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
 
-    // 文字 wrap 宽度
-    float bub_max_w = (std::min)(maxw * 0.65f, 480.0f);
-    DWRITE_TEXT_METRICS tm{};
-    app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
-    float bub_w = tm.width + 28;
-    float bub_h = (std::max)(tm.height + 18, 28.0f);
-
-    // 头像 28×28（占位 — 后续接通真头像）
+    // 头像 28×28
     float ar = 14.0f;
     float ay = y + 4;
     if (!prev_same_author) {
@@ -210,11 +231,8 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                         DWRITE_TEXT_ALIGNMENT_CENTER,
                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
-
     float bub_x = x + ar * 2 + 10;
     float bub_y = y + (prev_same_author ? 0 : 22);
-
-    // 作者 + 时间（同 author 连续消息不重复显示）
     if (!prev_same_author) {
         prim::drawText_(ctx,
                         m.author.empty() ? m.from.c_str() : m.author.c_str(),
@@ -229,7 +247,89 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
         }
     }
 
-    // 气泡 bg
+    // ---------- 媒体气泡 (Image/Gif/Video) ----------
+    if (m.kind == MsgKind::Image || m.kind == MsgKind::Gif) {
+        float bub_w = 240, bub_h = 180;
+        auto* bmp = app.images().fromFile(m.body);
+        if (bmp) {
+            D2D1_SIZE_F sz = bmp->GetSize();
+            if (sz.width > 0 && sz.height > 0) {
+                float aspect = sz.height / sz.width;
+                float max_w = (std::min)(maxw * 0.55f, 320.0f);
+                bub_w = (std::min)(max_w, sz.width);
+                bub_h = bub_w * aspect;
+                if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
+            }
+            // 圆角裁剪：用 PushAxisAlignedClip + bmp draw
+            ctx->PushAxisAlignedClip(D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
+                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            ctx->DrawBitmap(bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
+                            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            ctx->PopAxisAlignedClip();
+            // 圆角描边覆盖
+            prim::strokeRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
+                           br.solidA(pal.divider, 0.5f), 1.0f);
+        } else {
+            prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
+                         br.solid(pal.surface));
+            prim::drawText_(ctx, m.kind == MsgKind::Gif ? L"[GIF]" : L"[Image]", body_fmt,
+                            bub_x, bub_y + bub_h * 0.4f, bub_w, 22,
+                            br.solid(pal.text_muted),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        if (m.kind == MsgKind::Gif) {
+            // GIF 标识
+            prim::fillRR(ctx, bub_x + bub_w - 36, bub_y + 6, 30, 16, 4,
+                         br.solidA(0x000000, 0.55f));
+            auto* gif_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f),
+                                               DWRITE_FONT_WEIGHT_BOLD);
+            prim::drawText_(ctx, L"GIF", gif_fmt,
+                            bub_x + bub_w - 36, bub_y + 7, 30, 14,
+                            br.solid(0xFFFFFFFF),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+    }
+
+    if (m.kind == MsgKind::Video) {
+        float bub_w = 240, bub_h = 140;
+        prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
+                     br.solid(pal.surface));
+        // ▶
+        prim::fillCircle(ctx, bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f, 24,
+                         br.solidA(0x000000, 0.55f));
+        icons::Name play = icons::Name::Play;
+        // 简单画三角
+        auto* white = br.solid(0xFFFFFFFF);
+        ctx->FillEllipse(D2D1::Ellipse(
+            D2D1::Point2F(bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f), 4, 4), white);
+        prim::drawText_(ctx, L"▶ 视频", body_fmt,
+                        bub_x, bub_y + bub_h - 24, bub_w, 18,
+                        br.solid(pal.text_muted),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+    }
+
+    if (m.kind == MsgKind::Sticker) {
+        float bub_w = 100, bub_h = 100;
+        auto* bmp = app.images().fromFile(m.body);
+        if (bmp) {
+            ctx->DrawBitmap(bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
+                            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else {
+            prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
+                         br.solid(pal.surface));
+        }
+        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+    }
+
+    // ---------- Text bubble ----------
+    float bub_max_w = (std::min)(maxw * 0.65f, 480.0f);
+    DWRITE_TEXT_METRICS tm{};
+    app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
+    float bub_w = tm.width + 28;
+    float bub_h = (std::max)(tm.height + 18, 28.0f);
+
     uint32_t bub_bg = me ? pal.primary : pal.card;
     uint32_t bub_fg = me ? 0xFFFFFFFF : pal.text;
     prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
@@ -287,7 +387,9 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     icons::drawIcon(app, icons::Name::Smile, ix + 6, iy + 6, 18,
                     ehov ? pal.text : pal.text_muted);
     hit(emoji_btn, [](){
-        // emoji picker 留下一轮（GDI+ 那边复杂）
+        g_picker_open = !g_picker_open;
+        if (g_picker_open) g_picker_t.start(0, 1, 0.22f, 0, curve::easeOutBack);
+        else               g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
     }, true);
 
     // textarea
@@ -459,10 +561,117 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     paintComposer(app, ax, ay + ah - comp_h, aw, comp_h);
 }
 
+// ============== Picker ==============
+const wchar_t* kEmoji[] = {
+    L"😀",L"😁",L"😂",L"🤣",L"😄",L"😅",L"😉",L"😊",
+    L"😎",L"😍",L"🥰",L"🙃",L"🙂",L"🤩",L"🤔",L"😐",
+    L"😴",L"😌",L"😜",L"🤪",L"🥳",L"🥺",L"😢",L"😭",
+    L"💀",L"👻",L"🤖",L"👍",L"👎",L"👏",L"🙏",L"💪",
+    L"🔥",L"💯",L"🎮",L"🍣",L"🌸",L"⭐",L"🚀",L"💖",
+};
+
+static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
+    if (!g_picker_open && g_picker_t.value() < 0.001f) return;
+    float t = g_picker_t.value();
+    if (t < 0.001f) return;
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    float pw = 360, ph = 320;
+    float px = anchor_x;
+    float py = anchor_y - ph - 8;
+
+    prim::drawShadow(ctx, br, px, py, pw, ph, 12.0f, pal.shadow_card_hover, t, 4.0f, 4);
+    prim::fillRR(ctx, px, py, pw, ph, 12.0f, br.solidA(pal.card, t));
+    prim::strokeRR(ctx, px, py, pw, ph, 12.0f, br.solidA(pal.divider, t));
+
+    // 顶部 tab：表情 / 表情包
+    auto* tab_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f),
+                                       DWRITE_FONT_WEIGHT_BOLD);
+    auto* hint_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+    LayoutRect tab_em{ px + 14, py + 12, 60, 26 };
+    LayoutRect tab_pk{ px + 80, py + 12, 80, 26 };
+    bool em_act = (g_picker_tab == 0);
+    if (em_act) {
+        prim::fillRR(ctx, tab_em.x, tab_em.y, tab_em.w, tab_em.h, 6.0f,
+                     br.solidA(pal.primary, 0.18f * t));
+    }
+    prim::drawText_(ctx, L"表情", tab_fmt,
+                    tab_em.x, tab_em.y + 5, tab_em.w, 18,
+                    br.solidA(em_act ? pal.primary : pal.text_muted, t),
+                    DWRITE_TEXT_ALIGNMENT_CENTER);
+    hit(tab_em, [](){ g_picker_tab = 0; }, true);
+
+    if (!em_act) {
+        prim::fillRR(ctx, tab_pk.x, tab_pk.y, tab_pk.w, tab_pk.h, 6.0f,
+                     br.solidA(pal.primary, 0.18f * t));
+    }
+    prim::drawText_(ctx, L"表情包", tab_fmt,
+                    tab_pk.x, tab_pk.y + 5, tab_pk.w, 18,
+                    br.solidA(g_picker_tab > 0 ? pal.primary : pal.text_muted, t),
+                    DWRITE_TEXT_ALIGNMENT_CENTER);
+    hit(tab_pk, [](){ g_picker_tab = 1; }, true);
+
+    if (g_picker_tab == 0) {
+        // 8 列 emoji grid
+        int cols = 8;
+        int total = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
+        float cell = 36.0f;
+        float grid_x = px + 14, grid_y = py + 50;
+        auto* em_fmt = app.texts().format(L"Segoe UI Emoji", ptToDip(16.0f));
+        for (int i = 0; i < total; ++i) {
+            int row = i / cols, col = i % cols;
+            float ex = grid_x + col * cell, ey = grid_y + row * cell;
+            LayoutRect cell_r{ ex, ey, cell, cell };
+            bool hov = cell_r.contains(g_mouse);
+            if (hov) {
+                prim::fillRR(ctx, ex, ey, cell, cell, 6.0f,
+                             br.solidA(pal.text, t * 0.06f));
+            }
+            prim::drawText_(ctx, kEmoji[i], em_fmt,
+                            ex, ey + 4, cell, cell - 4,
+                            br.solidA(pal.text, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+            const wchar_t* e = kEmoji[i];
+            hit(cell_r, [e](){
+                std::wstring s = e;
+                g_composer.replaceSelection(s);
+                g_focus_composer = true;
+            }, true);
+        }
+    } else {
+        // 表情包占位 — 接通 fetchMyPacks 后填充
+        prim::drawText_(ctx, L"表情包同步中…", hint_fmt,
+                        px + 14, py + 60, pw - 28, 18,
+                        br.solidA(pal.text_muted, t));
+        // 新建按钮
+        LayoutRect newp{ px + 14, py + 90, 100, 28 };
+        bool nh = newp.contains(g_mouse);
+        prim::fillRR(ctx, newp.x, newp.y, newp.w, newp.h, 6,
+                     br.solidA(pal.primary, t * (nh ? 1.0f : 0.85f)));
+        prim::drawText_(ctx, L"+ 新建", tab_fmt,
+                        newp.x, newp.y + 5, newp.w, 18,
+                        br.solidA(0xFFFFFF, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        hit(newp, [](){
+            g_picker_open = false;
+            g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+            // modals.h 的 openCreatePack — 但 chat.cpp 不能 #include modals.h（循环），改用 PostMessage
+            PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
+        }, true);
+    }
+}
+
 void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
     float lw = 240.0f;
     paintChatList(app, ax, ay, lw, ah);
     paintChatPane(app, ax + lw + 1, ay, aw - lw - 1, ah);
+
+    // picker 在 composer 上面浮起
+    float comp_h = 64;
+    paintPicker(app, ax + lw + 1 + 14, ay + ah - comp_h);
 }
 
 // ============== 事件 ==============

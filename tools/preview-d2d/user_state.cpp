@@ -1,7 +1,9 @@
 #include "user_state.h"
+#include "steam.h"
 
 namespace launcher::d2d {
 
+SteamInfo g_steam;
 UserInfo  g_user;
 UserStatus g_status = UserStatus::Online;
 

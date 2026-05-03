@@ -7,6 +7,8 @@
 #include "net.h"
 #include "hit.h"
 #include "stages.h"
+#include "fetch.h"
+#include "steam.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -17,10 +19,13 @@
 
 namespace launcher::d2d::modal {
 
-ChangePwState g_change_pw;
-ConfirmState  g_confirm;
-CS2State      g_cs2;
-HistoryState  g_history;
+ChangePwState   g_change_pw;
+ConfirmState    g_confirm;
+CS2State        g_cs2;
+HistoryState    g_history;
+AddTagState     g_addtag;
+CreatePackState g_createpack;
+RenamePackState g_renamepack;
 
 namespace {
 
@@ -150,10 +155,17 @@ void tickAll(float dt) {
     g_confirm.t.tick(dt);
     g_cs2.t.tick(dt);
     g_history.t.tick(dt);
+    g_addtag.t.tick(dt);
+    g_addtag.input.float_t.tick(dt);
+    g_createpack.t.tick(dt);
+    g_createpack.input.float_t.tick(dt);
+    g_renamepack.t.tick(dt);
+    g_renamepack.input.float_t.tick(dt);
 }
 
 bool anyOpen() {
-    return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open;
+    return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
+        || g_addtag.open || g_createpack.open || g_renamepack.open;
 }
 
 // ============== ChangePw ==============
@@ -414,11 +426,10 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
         sx += 180;
     }
 
-    // 启动按钮
     drawPrimaryBtn(app, cx + 24, cy + ch - 56, 200, 40,
-                   L"启动 CS2", t, [](){ /* 启 Steam 留 polish */ });
+                   L"启动 CS2", t, [](){ launchCS2(); });
     drawGhostBtn(app, cx + 240, cy + ch - 56, 160, 40,
-                 L"商店页面", t, [](){ /* ShellExecute steam:// */ });
+                 L"商店页面", t, [](){ openCS2Store(); });
 
     // 关闭 ✕
     LayoutRect close_btn{ cx + cw - 40, cy + 12, 28, 28 };
@@ -436,6 +447,9 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
 void openHistory() {
     g_history.open = true;
     g_history.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+    if (!g_session_token.empty()) {
+        fetch::loginHistory(GetActiveWindow());
+    }
 }
 static void closeHistory() {
     g_history.t.start(g_history.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
@@ -463,38 +477,335 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     prim::drawText_(ctx, L"登录历史", h1,
                     cx + 24, cy + 22, cw - 48, 22,
                     br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"接 GET /api/profile/login-history (留下一轮接通)", sub,
-                    cx + 24, cy + 50, cw - 48, 18,
-                    br.solidA(pal.text_muted, t));
+    if (!g_history.loaded) {
+        prim::drawText_(ctx, L"加载中…", sub,
+                        cx + 24, cy + 50, cw - 48, 18,
+                        br.solidA(pal.text_muted, t));
+    } else {
+        wchar_t info[64];
+        swprintf_s(info, L"共 %d 条记录 · 5 条/页", (int)g_history.rows.size());
+        prim::drawText_(ctx, info, sub,
+                        cx + 24, cy + 50, cw - 48, 18,
+                        br.solidA(pal.text_muted, t));
+    }
 
-    // 占位行 5 个
     auto* row_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-    for (int i = 0; i < 5; ++i) {
-        float ry = cy + 90 + i * 50;
-        prim::fillRR(ctx, cx + 20, ry, cw - 40, 40, 8.0f,
-                     br.solidA(pal.surface, t));
-        prim::fillCircle(ctx, cx + 36, ry + 20, 6,
-                         br.solidA(0x4ADE80, t));
-        wchar_t buf[64];
-        swprintf_s(buf, L"2026-05-0%d  ·  154.40.36.x  ·  Tokyo", i + 1);
-        prim::drawText_(ctx, buf, row_fmt,
-                        cx + 56, ry + 11, cw - 96, 18,
-                        br.solidA(pal.text, t));
+    int per = 5;
+    int total = (int)g_history.rows.size();
+    int total_pages = total > 0 ? (total + per - 1) / per : 1;
+    if (g_history.page >= total_pages) g_history.page = total_pages - 1;
+    if (g_history.page < 0) g_history.page = 0;
+    int begin = g_history.page * per;
+    int end = (std::min)(begin + per, total);
+
+    if (total == 0) {
+        // 占位 5 行
+        for (int i = 0; i < 5; ++i) {
+            float ry = cy + 90 + i * 50;
+            prim::fillRR(ctx, cx + 20, ry, cw - 40, 40, 8.0f,
+                         br.solidA(pal.surface, t * 0.6f));
+        }
+    } else {
+        for (int i = begin; i < end; ++i) {
+            float ry = cy + 90 + (i - begin) * 50;
+            prim::fillRR(ctx, cx + 20, ry, cw - 40, 40, 8.0f,
+                         br.solidA(pal.surface, t));
+            prim::fillCircle(ctx, cx + 36, ry + 20, 6,
+                             br.solidA(0x4ADE80, t));
+            prim::drawText_(ctx, g_history.rows[i], row_fmt,
+                            cx + 56, ry + 11, cw - 96, 18,
+                            br.solidA(pal.text, t));
+        }
+    }
+    // 翻页 ‹ ›
+    if (total_pages > 1) {
+        wchar_t pg[16]; swprintf_s(pg, L"%d / %d", g_history.page + 1, total_pages);
+        prim::drawText_(ctx, pg, sub,
+                        cx + cw * 0.5f - 30, cy + ch - 90, 60, 18,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        drawGhostBtn(app, cx + cw * 0.5f - 90, cy + ch - 95, 30, 30, L"‹", t,
+                     [](){ if (g_history.page > 0) g_history.page--; });
+        drawGhostBtn(app, cx + cw * 0.5f + 60, cy + ch - 95, 30, 30, L"›", t,
+                     [](){ g_history.page++; });
     }
 
     drawGhostBtn(app, cx + cw - 24 - 100, cy + ch - 52, 100, 36,
                  L"关闭", t, [](){ closeHistory(); });
+
+    // 真接通 — 占位 5 行用 g_history.rows 替代（如果已加载）
+    if (g_history.loaded && !g_history.rows.empty()) {
+        // 简单分页 5/页
+        // 已经画了占位 5 行，这里覆盖：用 rows 显示
+    }
+}
+
+void onHistoryResult(const std::string& body) {
+    g_history.rows.clear();
+    g_history.page = 0;
+    g_history.loaded = true;
+    // 简单解析 [{"ts":"...","ok":true,"ip":"...","geo":"..."}, ...]
+    size_t pos = 0;
+    auto utf8w = [](const std::string& s) -> std::wstring {
+        if (s.empty()) return {};
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        if (n <= 0) return {};
+        std::wstring w(n - 1, 0);
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+        return w;
+    };
+    while (true) {
+        auto ob = body.find('{', pos);
+        if (ob == std::string::npos) break;
+        auto cb = body.find('}', ob);
+        if (cb == std::string::npos) break;
+        std::string obj = body.substr(ob, cb - ob + 1);
+        std::string ts = net::jsonStr(obj, "ts");
+        std::string ip = net::jsonStr(obj, "ip");
+        std::string geo = net::jsonStr(obj, "geo");
+        // ts 可能是 "2026-05-04T..." — 取前 16 字节够
+        if (ts.size() > 16) ts.resize(16);
+        for (auto& c : ts) if (c == 'T') c = ' ';
+        std::wstring row = utf8w(ts) + L"  ·  " + utf8w(ip);
+        if (!geo.empty()) row += L"  ·  " + utf8w(geo);
+        g_history.rows.push_back(row);
+        pos = cb + 1;
+    }
+}
+
+// ============== AddTag ==============
+void openAddTag() {
+    g_addtag.open = true;
+    g_addtag.input.text.clear();
+    g_addtag.input.cursor = 0;
+    g_addtag.input.clearSel();
+    g_addtag.error_msg.clear();
+    g_addtag.busy = false;
+    g_addtag.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeAddTag() {
+    g_addtag.t.start(g_addtag.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_addtag.open = false;
+}
+
+static void submitAddTag(HWND hwnd) {
+    if (g_addtag.busy) return;
+    std::wstring tag = g_addtag.input.text;
+    while (!tag.empty() && (tag.front() == L' ' || tag.front() == L'\t')) tag.erase(tag.begin());
+    while (!tag.empty() && (tag.back()  == L' ' || tag.back()  == L'\t')) tag.pop_back();
+    if (tag.empty()) { g_addtag.error_msg = L"请输入标签内容"; return; }
+    if (tag.size() > 24) { g_addtag.error_msg = L"最多 24 字"; return; }
+    g_addtag.error_msg.clear();
+    g_addtag.busy = true;
+    fetch::addTag(hwnd, tag);
+}
+
+void onAddTagResult(bool success, int status) {
+    g_addtag.busy = false;
+    if (success) {
+        closeAddTag();
+        // tag list 重拉
+        fetch::userTags(GetActiveWindow());
+    } else {
+        if (status == 409) g_addtag.error_msg = L"标签已存在";
+        else if (status == 429) g_addtag.error_msg = L"标签数量上限 (20)";
+        else g_addtag.error_msg = L"添加失败，稍后再试";
+    }
+}
+
+void paintAddTagModal(D2DApp& app, float W, float H) {
+    if (!g_addtag.open && g_addtag.t.value() < 0.001f) return;
+    float t = g_addtag.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    float cw = 360, ch = 220;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
+                                  DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, L"添加标签", h1,
+                    cx + 30, cy + 22, cw - 60, 22,
+                    br.solidA(pal.text, t));
+    prim::drawText_(ctx, L"24 字以内 · 上限 20 个", sub,
+                    cx + 30, cy + 50, cw - 60, 18,
+                    br.solidA(pal.text_muted, t));
+
+    drawField(app, g_addtag.input, cx + 30, cy + 80, cw - 60, 40,
+              L"标签内容", true, t);
+    hit(g_addtag.input.bounds, [](){}, true);
+
+    if (!g_addtag.error_msg.empty()) {
+        prim::drawText_(ctx, g_addtag.error_msg, sub,
+                        cx + 30, cy + 130, cw - 60, 18,
+                        br.solidA(0xE34B4B, t));
+    }
+
+    float by = cy + ch - 52;
+    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t,
+                 [](){ closeAddTag(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   g_addtag.busy ? L"添加中…" : L"添加", t,
+                   [hwnd = GetActiveWindow()](){ submitAddTag(hwnd); });
+}
+
+// ============== CreatePack ==============
+void openCreatePack() {
+    g_createpack.open = true;
+    g_createpack.input.text.clear();
+    g_createpack.input.cursor = 0;
+    g_createpack.input.clearSel();
+    g_createpack.error_msg.clear();
+    g_createpack.busy = false;
+    g_createpack.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeCreatePack() {
+    g_createpack.t.start(g_createpack.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_createpack.open = false;
+}
+static void submitCreatePack(HWND hwnd) {
+    if (g_createpack.busy) return;
+    std::wstring name = g_createpack.input.text;
+    if (name.empty()) { g_createpack.error_msg = L"请输入分组名"; return; }
+    if (name.size() > 24) { g_createpack.error_msg = L"最多 24 字"; return; }
+    if (g_session_token.empty()) { g_createpack.error_msg = L"未登录"; return; }
+    g_createpack.busy = true;
+    struct A { std::wstring n; HWND h; };
+    auto* a = new A{ name, hwnd };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"name\":\"" + net::jsonEscape(a->n) + "\"}";
+        auto r = net::postJson(L"/api/sticker/pack", body);
+        PostMessageW(a->h, WM_APP + 19, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+void onCreatePackResult(bool success) {
+    g_createpack.busy = false;
+    if (success) closeCreatePack();
+    else g_createpack.error_msg = L"创建失败";
+}
+void paintCreatePackModal(D2DApp& app, float W, float H) {
+    if (!g_createpack.open && g_createpack.t.value() < 0.001f) return;
+    float t = g_createpack.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 360, ch = 220;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, L"新建表情包", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, L"分组名 · 24 字以内", sub, cx + 30, cy + 50, cw - 60, 18,
+                    br.solidA(pal.text_muted, t));
+    drawField(app, g_createpack.input, cx + 30, cy + 80, cw - 60, 40, L"分组名", true, t);
+    hit(g_createpack.input.bounds, [](){}, true);
+    if (!g_createpack.error_msg.empty()) {
+        prim::drawText_(ctx, g_createpack.error_msg, sub,
+                        cx + 30, cy + 130, cw - 60, 18,
+                        br.solidA(0xE34B4B, t));
+    }
+    float by = cy + ch - 52;
+    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeCreatePack(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   g_createpack.busy ? L"创建中…" : L"创建", t,
+                   [hwnd = GetActiveWindow()](){ submitCreatePack(hwnd); });
+}
+
+// ============== RenamePack ==============
+void openRenamePack(const std::string& pack_id, const std::wstring& orig_name) {
+    g_renamepack.open = true;
+    g_renamepack.pack_id = pack_id;
+    g_renamepack.orig_name = orig_name;
+    g_renamepack.input.text = orig_name;
+    g_renamepack.input.cursor = (int)orig_name.size();
+    g_renamepack.input.clearSel();
+    g_renamepack.error_msg.clear();
+    g_renamepack.busy = false;
+    g_renamepack.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeRenamePack() {
+    g_renamepack.t.start(g_renamepack.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_renamepack.open = false;
+}
+static void submitRenamePack(HWND hwnd) {
+    if (g_renamepack.busy) return;
+    std::wstring name = g_renamepack.input.text;
+    if (name.empty()) { g_renamepack.error_msg = L"分组名不能为空"; return; }
+    if (name.size() > 24) { g_renamepack.error_msg = L"最多 24 字"; return; }
+    g_renamepack.busy = true;
+    struct A { std::string id; std::wstring n; HWND h; };
+    auto* a = new A{ g_renamepack.pack_id, name, hwnd };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"pack_id\":\"" + a->id
+                         + "\",\"new_name\":\"" + net::jsonEscape(a->n) + "\"}";
+        auto r = net::postJson(L"/api/sticker/pack/rename", body);
+        PostMessageW(a->h, WM_APP + 20, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+void onRenamePackResult(bool success) {
+    g_renamepack.busy = false;
+    if (success) closeRenamePack();
+    else g_renamepack.error_msg = L"重命名失败";
+}
+void paintRenamePackModal(D2DApp& app, float W, float H) {
+    if (!g_renamepack.open && g_renamepack.t.value() < 0.001f) return;
+    float t = g_renamepack.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 360, ch = 220;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, L"重命名表情包", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, g_renamepack.orig_name, sub, cx + 30, cy + 50, cw - 60, 18,
+                    br.solidA(pal.text_muted, t));
+    drawField(app, g_renamepack.input, cx + 30, cy + 80, cw - 60, 40, L"新名字", true, t);
+    hit(g_renamepack.input.bounds, [](){}, true);
+    if (!g_renamepack.error_msg.empty()) {
+        prim::drawText_(ctx, g_renamepack.error_msg, sub,
+                        cx + 30, cy + 130, cw - 60, 18,
+                        br.solidA(0xE34B4B, t));
+    }
+    float by = cy + ch - 52;
+    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeRenamePack(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   g_renamepack.busy ? L"保存中…" : L"保存", t,
+                   [hwnd = GetActiveWindow()](){ submitRenamePack(hwnd); });
 }
 
 // ============== 事件路由 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
-    // 任意 modal 开着时由 modal 优先 hit；外部点击关闭
     if (!anyOpen()) return false;
-    // hits 已经在 paint 时注册（含关闭按钮 / yes/no 按钮 / inputbox）
     bool consumed = dispatchClick(dip);
     if (!consumed) {
-        // 点击外部 — 关闭最顶 modal
-        if (g_change_pw.open) closeChangePw();
+        if (g_renamepack.open) closeRenamePack();
+        else if (g_createpack.open) closeCreatePack();
+        else if (g_addtag.open) closeAddTag();
+        else if (g_change_pw.open) closeChangePw();
         else if (g_confirm.open) closeConfirm();
         else if (g_cs2.open) closeCS2();
         else if (g_history.open) closeHistory();
@@ -503,6 +814,9 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
 }
 
 bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
+    if (g_addtag.open) { g_addtag.input.onChar(c, ctrl, hwnd); return true; }
+    if (g_createpack.open) { g_createpack.input.onChar(c, ctrl, hwnd); return true; }
+    if (g_renamepack.open) { g_renamepack.input.onChar(c, ctrl, hwnd); return true; }
     if (!g_change_pw.open) return false;
     std::array<InputBox*, 3> boxes{
         &g_change_pw.old_pw, &g_change_pw.new_pw, &g_change_pw.repeat_pw };
@@ -514,10 +828,28 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!anyOpen()) return false;
     if (vk == VK_ESCAPE) {
+        if (g_renamepack.open) { closeRenamePack(); return true; }
+        if (g_createpack.open) { closeCreatePack(); return true; }
+        if (g_addtag.open) { closeAddTag(); return true; }
         if (g_change_pw.open) { closeChangePw(); return true; }
         if (g_confirm.open) { closeConfirm(); return true; }
         if (g_cs2.open) { closeCS2(); return true; }
         if (g_history.open) { closeHistory(); return true; }
+    }
+    if (g_addtag.open) {
+        if (vk == VK_RETURN) { submitAddTag(hwnd); return true; }
+        g_addtag.input.onKey(vk, shift, ctrl);
+        return true;
+    }
+    if (g_createpack.open) {
+        if (vk == VK_RETURN) { submitCreatePack(hwnd); return true; }
+        g_createpack.input.onKey(vk, shift, ctrl);
+        return true;
+    }
+    if (g_renamepack.open) {
+        if (vk == VK_RETURN) { submitRenamePack(hwnd); return true; }
+        g_renamepack.input.onKey(vk, shift, ctrl);
+        return true;
     }
     if (g_change_pw.open) {
         if (vk == VK_RETURN) { submitChangePw(hwnd); return true; }

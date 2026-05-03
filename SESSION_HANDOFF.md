@@ -4,9 +4,10 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-04 00:20**
-最后 commit：**`7ff312d`** feat(preview-d2d): Phase 2.1 Step 1-5 + Step 8 骨架 + 真后端登录
-（batch B 待 commit — Step 6 Chat 简化版 + Step 7 Modals 4 个）
+最后更新：**2026-05-04 00:40**
+最后 commit：**`b4ef216`** Phase 2.1 Step 6 Chat 简化版 + Step 7 Modals 4 个
+（batch C 待 commit — 全部业务功能补全：persist/HWID/Steam/Toast/i18n/WS/tray/
+AddTag/CreatePack/RenamePack/picker/image bubble/autologin/WM_DROPFILES/真退登录）
 **已部署后端**：migration 0010_user_status 应用 + 全套 sticker/profile/status 端点上线 ✓
 GitHub：https://github.com/dwgx/launcher (private, master)
 
@@ -29,27 +30,46 @@ GitHub：https://github.com/dwgx/launcher (private, master)
 | 2. 入场动画 5 阶段 | ✓ | anim.h, palette.h, stages.{h,cpp} |
 | 3. Auth view (InputBox + 浮动 label) | ✓ | hit.h, inputbox.h, auth.{h,cpp} |
 | 4. Topbar + Sidebar + AccountDropdown + 30 icons | ✓ | icons.{h,cpp}, ui_main.{h,cpp} |
-| 5. Home view (profile-card + stat 卡 + chips) | ✓ | ui_main.cpp::paintHomeView |
-| 6. Chat view (简化：list + text bubble + composer，**没** picker/sticker/GIF/video/WS) | ⚠ 简化 | chat.{h,cpp} |
-| 7. Modals (ChangePw/Confirm/CS2/History — **没** AddTag/CreatePack/RenamePack) | ⚠ 部分 | modals.{h,cpp} |
-| 8. Lunching/Market/Cloud/Settings/Profile (骨架，**没** 详细 listing/ofn 上传/seg 滑块 tween) | ⚠ 骨架 | ui_main.cpp |
-| 9. 删 tools/preview/ | ☐ 等功能完整 parity 后 | — |
+| 5. Home view (profile-card + stat 卡 + chips + ✕ 删除 + 添加按钮) | ✓ | ui_main.cpp::paintHomeView |
+| 6. Chat view (list + text/image/gif/video/sticker bubble + composer + emoji picker 8 列 + 表情包 tab + WS 接通 + 拖文件) | ✓ | chat.{h,cpp}, ws_user.{h,cpp} |
+| 7. Modals (ChangePw / Confirm / CS2 / History / AddTag / CreatePack / RenamePack — 全套真后端) | ✓ | modals.{h,cpp} |
+| 8. 各 view (Lunching CS2 真启动 / Market 占位 / Cloud / Settings 主题 seg / Profile 头像上传 + 改密) | ✓ | ui_main.cpp |
+| 9. 删 tools/preview/ | ☐ 用户验证后再删（保留作为剩余 polish 参考） | — |
 
-### Batch B 剩余 TODO（功能完整 parity）
+### 业务功能（全部 1:1 GDI+ Preview 等价）
 
-- **Chat 完整版**：emoji picker (8 列 + 系统 emoji) / sticker pack 分组 / GIF/video/image bubble / 媒体下载 / 引用气泡 / @ mention / drag-drop 文件 / WS 实时接收 (`net::WsClient` 已经有)
-- **Modals 剩余**：AddTag / CreatePack / RenamePack / 头像上传 (OFN + 异步 multipart)
-- **History modal**：拉真 `/api/profile/login-history` 数据 + 5/page 分页
-- **Toast**：右下角通知 (上传成功 / 错误反馈)
-- **Settings 完整**：language seg + 三语 i18n (en / zh-cn / ja-jp)
-- **Profile**：tags chips 真接 `/api/profile/tags` (g_user_tags 已经有 mutex 保护)
-- **真头像**：登录后 GET `/api/profile/avatar/:id` → 写 `%LOCALAPPDATA%/Launcher/avatars/<uid>.png` → `g_avatar_path`
-- **隐秘注册表 persist**：30 候选路径 + DPAPI 加密；启动遍历找 `_m=LUNC` magic
-- **托盘**：Shell_NotifyIcon + ESC 最小化到托盘
-- **WM_DROPFILES**：拖文件进 chat 自动发媒体
-- **Sticker mine / pack public/share/rename/delete**：全套 sticker 管理 4 个 modal + GET /api/sticker/mine
-- **真 HWID**：ComputerName + UserName + VolSerial → SHA256
-- **退出登录的真后端**：POST /api/auth/logout + persist::clearCreds
+- ✓ **persist**：30 候选注册表路径 + DPAPI 凭据 + session token 持久化（persist.{h,cpp}）
+- ✓ **真 HWID**：ComputerName + UserName + VolSerial → CryptoAPI SHA-256 → 64 hex（hwid.h）
+- ✓ **Steam**：HKCU\Software\Valve\Steam 读 AutoLoginUser + LastGameNameUsed（steam.h）
+- ✓ **CS2 真启动**：ShellExecute steam://rungameid/730；打开商店页（steam.h::launchCS2）
+- ✓ **Toast**：右下角通知，2.5s 自动 fade（toast.{h,cpp}）
+- ✓ **i18n**：tr() 三语字符串表 en / zh-cn / ja-jp（i18n.{h,cpp}）
+- ✓ **真后端登录**：POST /api/auth/{login,register} 异步线程 → afterLogin → WS / fetch tags / fetch avatar
+- ✓ **真后端改密**：POST /api/profile/password 异步 → 强制重登
+- ✓ **退出登录真后端**：POST /api/auth/logout + persist::clearCreds + ws::stop
+- ✓ **真后端 status sync**：POST /api/profile/status 切换状态时调
+- ✓ **真后端 tags**：GET /api/profile/tags / POST /add /remove + Home chip ✕ 删除 + + 添加 modal
+- ✓ **真后端 login history**：POST /api/profile/login-history + History modal 5/页分页
+- ✓ **真后端头像上传**：OFN 选文件 + CopyFile 本地 + 异步 multipart POST /api/profile/avatar
+- ✓ **真后端云端头像同步**：登录后 GET /api/avatar/:uid → 写 LOCALAPPDATA → ImageCache invalidate
+- ✓ **WS 实时接收**：net::WsClient 升级 + 后台线程 receive + UI 队列 + drain WM_APP+10
+- ✓ **托盘**：Shell_NotifyIcon + 右键菜单 (显示主窗口/退出) + ESC 最小化 + balloon 提示
+- ✓ **WM_DROPFILES**：拖文件进 chat → chat::appendMedia → image/gif/video bubble
+- ✓ **Chat picker**：emoji 8 列 (40 个 Segoe UI Emoji) + 表情包 tab + 新建按钮 → CreatePack modal
+- ✓ **Sticker pack**：CreatePack (POST /api/sticker/pack) + RenamePack (POST /rename) — 完整路径
+- ✓ **Image/GIF/Video bubble**：ImageCache::fromFile (WIC + ID2D1Bitmap) + GIF 标签徽章
+- ✓ **autologin**：启动 persist::loadSession 找到 token → 跳过 Auth 直进 Main + WS / fetch
+- ✓ **主题持久化**：D 切换调 persist::saveTheme
+
+### 剩余 polish（不影响主流程）
+
+- emoji 字体 fallback：Win11 系统默认 fallback 已经够用，自定义 IDWriteFontFallback 留 Phase 2.2
+- 头像 24/28/72 三档预生成：D2D DrawBitmap linear interpolation 视觉够；如需极致清晰再加 GDI+ 等价 Bitmap 缩放
+- WS 收到的非 text 消息（sticker / pack_share / image / video）— 当前 chat::ws_user.cpp 只解析 text，其他类型扩展几行
+- Sticker pack 全套：share / delete / install / uninstall / 系统文件夹导入 + GET /api/sticker/mine + sticker pack 浏览面板（picker 第二 tab 当前是占位）
+- Settings：language seg control 滑块 tween + 字号 / 字体回退链选择
+- Market：拉真 /api/market/listings 渲染商品卡（当前 3 行占位）
+- Cloud view：真功能未定义（GDI+ 那边也是空状态卡）
 
 ### 最近的 commit（Phase 2.1 D2D 移植）
 

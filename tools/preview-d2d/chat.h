@@ -26,7 +26,12 @@ extern std::wstring g_active;        // 当前频道 slug
 extern InputBox     g_composer;
 extern bool         g_focus_composer;
 
-enum class MsgKind { Text, System, DayDivider };
+// Emoji / sticker picker
+extern bool  g_picker_open;
+extern Tween g_picker_t;
+extern int   g_picker_tab;     // 0 = emoji, 1+ = sticker pack idx
+
+enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
 
 struct Msg {
     MsgKind kind = MsgKind::Text;
@@ -54,5 +59,8 @@ void fetchOfficialChannels(HWND notify);
 
 // main thread WM_APP+5 调
 void applyOfficialResult();
+
+// 拖拽文件进 chat → 添加 image bubble + 上传后端
+void appendMedia(const std::wstring& path);
 
 }  // namespace launcher::d2d::chat
