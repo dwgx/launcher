@@ -4,26 +4,42 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-03 08:15**
-最后 commit：**`d966cd6`** feat(preview): sticker 真上传 + transitions 框架
-（**未提交**：WS receive + sticker/mine + transitions 真用上 + user_tags + 右上角 wedge bug fix
-+ pack 重构（右侧 tab 带 + 创建/重命名/删除/分享 modal）+ status 同步后端联动）
-**已部署后端**：migration 0010_user_status 应用 + 新 7 端点上线 ✓
+最后更新：**2026-05-03 22:35**
+最后 commit：**`239f3db`** feat(skia-d3d): D2D 渲染矢量图形 — 转圈 spinner + 圆角卡 + 阴影 + 相位扫描条
+**已部署后端**：migration 0010_user_status 应用 + 全套 sticker/profile/status 端点上线 ✓
 GitHub：https://github.com/dwgx/launcher (private, master)
 
-### 最近 10 个 commit（这一轮的密集改动）
+## ⚠️ 给下一个 Agent 的强制读物
+
+**Phase 2 渲染选型已定**：**Direct2D + DirectComposition + DXGI flip-model +
+waitable swap chain**（**不是 Skia**）。
+
+用户原话"**太丝滑了 就用它**"。下一阶段任务：把 `tools/preview/loading_demo.cpp`
+（GDI+ 3700+ 行）的全部 UI 渲染移植到 D2D pipeline，目标目录 `tools/preview-d2d/`。
+
+**必读**：
+1. [`docs/PHASE_2_D2D_MIGRATION.md`](./docs/PHASE_2_D2D_MIGRATION.md) — 完整迁移规范、API 映射、坑、组件命名
+2. [`tools/preview-skia/skia_d3d.cpp`](./tools/preview-skia/skia_d3d.cpp) — 唯一权威参考实现（156 KB exe，跑通）
+3. memory `feedback_d2d_pipeline.md` — 选型理由 + 8 个具体坑
+
+### 最近 15 个 commit（这一轮的密集改动）
 
 ```
-d966cd6  sticker 真上传 + transitions 框架
-0c29a1b  修改密码 modal + chat send 真后端 + admin 角色编辑
-60e6b0d  WinHTTP × backend 真接通 + 滚动日志 + 打勾动画 + 头像缩略图
-1f84cc7  sidebar 加 market 入口 + 头像本地缓存真生效
-bef4ca8  表情包文件夹导入 + 主页扩展 + 后端 user_roles + 50 上限
-72bc9d6  真齿轮/聊天泡图标 + 卡片切换动画 + 滑块 seg + 按钮立体 + 性能
-6c43844  sidebar SVG icons + auto-login 动画 + chat 折叠 + 频道写权限
-aa96f04  chat 内嵌图片/视频粘贴 + 拖拽文件 + GDI+ image bubble
-22f6347  InputBox 完整键盘 + 选区 + 隐秘注册表 + DPAPI 自动登录
-23d810c  modal/dropdown 点击阻断 + 托盘 balloon + 红 badge 清零
+239f3db  feat(skia-d3d): D2D 渲染矢量 — 转圈 spinner + 圆角卡 + 阴影 + 相位扫描条
+07eda15  fix(skia-d3d): ClearRenderTargetView RGBA 顺序写反成 BGRA → 蓝色渐变
+c730614  feat(skia): 金标准 pipeline foundation — NOREDIRECT + DComp + DXGI flip + waitable
+def4d28  perf(skia): vsync-locked render loop — SwapBuffers + DwmFlush 替代 Sleep
+5461f3c  feat(skia): Phase 2 起手 — Win32 + WGL + Skia/Ganesh PoC 跑通 (废弃路线)
+dd4f0a8  perf(preview): 修弹出来还卡顿 — 高精度 timer + 跳擦背景 + 缩窗优化
+4219dfc  perf(preview): AA / 细腻度六件套 — DPI / 32bpp / Bezier / Pen Inset / 字号 hint / 120Hz
+d2675b3  feat(sticker+chat): 分组可见 / 右键菜单 / +导入入 grid / 缩略图 / 历史 100 + 媒体
+e65cad0  feat(preview): 登录过渡 + 头像云同步 + 购物车 icon + 气泡 Telegram 风 + emoji 字体 fallback
+3e7568d  fix(preview): chat 文字乱码 + 历史拉取 + pack 内容下载
+2f955ac  fix(preview): 真 HWID + 退出登录彻底清干净
+591afd7  fix(admin): invites 空字段 deserialize + 加删除用户 + 双重确认
+50a9934  feat(preview): WS receive + sticker pack 重构 + status 同步 + 右上角 wedge fix
+447ceb1  feat(backend): pack mgmt + status sync + 0010 user_status
+d966cd6  feat(preview): sticker 真上传 + transitions 框架
 ```
 
 ---
@@ -270,7 +286,10 @@ D:\Project\Launcher\
 └── third_party/               # Skia / Clay 待下载
 ```
 
-**真实 Skia 工程没编译过**（src/），CMakeLists 写了但没跑过 vcpkg + fetch-skia。
+**`src/` 工程没编译过**，CMakeLists 写了但没跑过 vcpkg + fetch-skia。
+**Phase 2 不再走 src/Skia 路线** — 用 `tools/preview-d2d/` 走 D2D + DComp。
+`scripts/fetch-skia.ps1` 拉过 Skia 但只用作 `tools/preview-skia/` PoC 验证，
+production 不再依赖 Skia。`third_party/skia/` 已 gitignore（~250MB 预编译）。
 
 ---
 
@@ -321,12 +340,17 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
    `submitAddTag` / `removeUserTag` 异步线程；Home chip 真用列表渲染 + hover 显 ✕；
    `modal::AddTag` (tx::Slide) 弹窗输入 + Enter 提交。WM_APP+15/16/17 三个回调。
 
-### 大件（用户没明说但合理）
+### 大件 — 下一阶段
 
-5. **Phase 2 真实 src/ 工程跑通** — vcpkg + fetch-skia + cmake build，把 Preview 整个搬到 Skia + Clay
-   （当前 src/ 只是骨架 + design 给的几个 .h，从未编译）
-6. **Source Han Sans CN 嵌入** — assets/fonts/ 下载 + AddFontResourceEx 加载
-7. **HWID 真采集** — 现在 Preview 用 "launcher-preview-demo" 字面量
+5. **Phase 2.1：D2D 移植** ⬅ **下一个 agent 主任务**
+   - 目标：`tools/preview-d2d/` 整套 D2D + DComp + DXGI flip + waitable + DirectWrite
+     1:1 替换 GDI+ Preview 全部 UI
+   - **强制读 [`docs/PHASE_2_D2D_MIGRATION.md`](./docs/PHASE_2_D2D_MIGRATION.md)**
+   - 参考实现：[`tools/preview-skia/skia_d3d.cpp`](./tools/preview-skia/skia_d3d.cpp)
+   - **业务逻辑全保留**（net / persist / hwid / fetch helpers / WS / state machine）
+   - **只换渲染层**（GDI+ Graphics → ID2D1DeviceContext + IDWriteTextFormat）
+6. **Source Han Sans CN 嵌入** — assets/fonts/ 下载 + DirectWrite 自定义 fallback
+7. ~~**HWID 真采集**~~ ✓ 已经走 ComputerName + UserName + VolSerial → SHA256 64 hex
 8. **Stripe / 微信支付** 接 credit 充值
 9. **真实订阅签发** — Phase 7 BLAKE3 + Ed25519 .helix 验签
 
