@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod formhelp;
 pub mod hashing;
 pub mod logging;
 pub mod tier;

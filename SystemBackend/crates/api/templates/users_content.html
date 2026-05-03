@@ -59,6 +59,8 @@
                       onclick="document.getElementById('edit_{{ u.id }}').showModal()">编辑</button>
               <button class="btn btn-xs btn-ghost text-rose-400"
                       onclick="document.getElementById('pw_{{ u.id }}').showModal()">重置密码</button>
+              <button class="btn btn-xs btn-ghost text-rose-500"
+                      onclick="document.getElementById('del_{{ u.id }}').showModal()">删除</button>
             </td>
           </tr>
           {% endfor %}
@@ -116,6 +118,38 @@
         <button type="button" class="btn btn-ghost"
                 onclick="document.getElementById('edit_{{ u.id }}').close()">取消</button>
         <button class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog id="del_{{ u.id }}" class="modal">
+  <div class="modal-box max-w-md">
+    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
+    <h3 class="font-bold text-lg text-rose-500">⚠ 删除用户（不可恢复）</h3>
+    <p class="text-xs opacity-70 mt-2 mb-3">
+      用户 <span class="font-mono font-bold">{{ u.username }}</span> · UID
+      <span class="font-mono">{{ u.uid }}</span> · 昵称
+      <span class="font-mono">{{ u.nickname }}</span><br>
+      <span class="text-rose-400">将同时清掉：sessions / 标签 / 已装表情包 / 邀请使用记录 / 订阅 / 心跳 / 登录历史 / HWID 重绑 / 头像元数据。</span><br>
+      <span class="opacity-60">已发消息 / 已上传 sticker / 创建过的 pack / 上传过的 media 会保留但作者字段置 NULL。</span>
+    </p>
+    <form method="post" action="/admin/users/{{ u.id }}/delete"
+          onsubmit="return confirm('再次确认：永久删除用户 {{ u.username }}？此操作无法撤销。');"
+          class="space-y-3">
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">为防止误删，请输入此用户的<b class="text-rose-400">用户名</b>确认：</span>
+        <input name="confirm_username" type="text" required
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+               class="input input-bordered font-mono"
+               oninput="document.getElementById('del_btn_{{ u.id }}').disabled = this.value !== '{{ u.username }}'">
+      </label>
+      <div class="modal-action">
+        <button type="button" class="btn btn-ghost"
+                onclick="document.getElementById('del_{{ u.id }}').close()">取消</button>
+        <button id="del_btn_{{ u.id }}" disabled class="btn"
+                style="background:#B14444;color:#fff">永久删除</button>
       </div>
     </form>
   </div>

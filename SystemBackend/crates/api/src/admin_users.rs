@@ -245,11 +245,74 @@ async fn user_reset_pw_form(
     Redirect::to("/admin/users?reset=ok")
 }
 
+// =====================================================================
+// 删除用户 — admin 双重确认
+// 安全设计：
+//   1. SSR dialog "type-to-confirm"：必须输入用户名一致 + JS confirm()
+//   2. 后端再校验 confirm_username 字段必须等于 DB 里的 username（不一致 → reject）
+//   3. 解除外键引用：messages.sender_id / stickers.creator_id / sticker_packs.creator_id
+//      / media_files.uploader_id 一律 SET NULL（保留内容）
+//   4. 级联删 = sessions / login_history / hwid_rebind_requests / heartbeats
+//      / user_avatar_meta / chat_members / message_reactions / user_sticker_packs
+//      / user_tags / market_listings / market_orders / market_reviews / credit_ledger
+//      / invite_code_uses / subscriptions（FK 多数已 ON DELETE CASCADE，但显式 DELETE 保险）
+//   5. 最后 DELETE FROM users
+// =====================================================================
+#[derive(Deserialize)]
+pub struct DeleteForm { pub confirm_username: String }
+
+async fn user_delete_submit(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Form(form): Form<DeleteForm>,
+) -> impl IntoResponse {
+    // 第一道：拿真 username 跟客户端输入比对（防误删）
+    let actual = sqlx::query_scalar!("SELECT username FROM users WHERE id=$1", id)
+        .fetch_optional(&s.db).await.ok().flatten().flatten();
+    let actual = match actual {
+        Some(u) => u,
+        None => return Redirect::to("/admin/users?err=user_not_found"),
+    };
+    if actual != form.confirm_username.trim() {
+        return Redirect::to("/admin/users?err=delete_confirm_mismatch");
+    }
+
+    // 解除引用 (SET NULL) — 保留内容但去除作者
+    let _ = sqlx::query!("UPDATE messages SET sender_id=NULL WHERE sender_id=$1", id)
+        .execute(&s.db).await;
+    let _ = sqlx::query!("UPDATE stickers SET creator_id=NULL WHERE creator_id=$1", id)
+        .execute(&s.db).await;
+    let _ = sqlx::query!("UPDATE sticker_packs SET creator_id=NULL WHERE creator_id=$1", id)
+        .execute(&s.db).await;
+    let _ = sqlx::query!("UPDATE media_files SET uploader_id=NULL WHERE uploader_id=$1", id)
+        .execute(&s.db).await;
+
+    // 删除引用了该用户的强关联表（FK 多数 CASCADE，仍显式 DELETE 防 schema 漂移）
+    let _ = sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id).execute(&s.db).await;
+    let _ = sqlx::query!("DELETE FROM user_tags WHERE user_id=$1", id).execute(&s.db).await;
+    let _ = sqlx::query!("DELETE FROM user_sticker_packs WHERE user_id=$1", id).execute(&s.db).await;
+
+    // 写审计日志（用户已经要被删，这里 actor=admin / target=被删 user 的 id+username）
+    let _ = sqlx::query!(
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.delete_user',$1,$2)",
+        id.to_string(), serde_json::json!({"username": &actual}))
+        .execute(&s.db).await;
+
+    // 真删
+    let res = sqlx::query!("DELETE FROM users WHERE id=$1", id).execute(&s.db).await;
+    if let Err(e) = res {
+        tracing::error!("delete user failed: {}", e);
+        return Redirect::to("/admin/users?err=delete_failed");
+    }
+    Redirect::to("/admin/users?delete=ok")
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin/users",                  get(users_page))
         .route("/admin/users/:id/edit",         post(user_edit_submit))
         .route("/admin/users/:id/reset-pw",     post(user_reset_pw_form))
+        .route("/admin/users/:id/delete",       post(user_delete_submit))
         .route("/api/admin/users",              get(list_users))
         .route("/api/admin/users/:id",          post(patch_user))
         .route("/api/admin/users/:id/reset-pw", post(admin_reset_password))

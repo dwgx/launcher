@@ -63,11 +63,16 @@ async fn list_page(State(s): State<Arc<AppState>>) -> Html<String> {
     })
 }
 
+// HTML form 留空字段会发 `field=`（空字符串）；serde 默认 Option<i32>::deserialize 把它
+// 当成 Some("") 然后 i32::from_str("") 报错。统一走 empty_str_as_none。
 #[derive(Deserialize)]
 pub struct CreateForm {
     pub note:     Option<String>,
+    #[serde(default, deserialize_with = "launcher_shared::formhelp::empty_str_as_none")]
     pub max_uses: Option<i32>,
+    #[serde(default, deserialize_with = "launcher_shared::formhelp::empty_str_as_none")]
     pub days:     Option<i64>,
+    #[serde(default, deserialize_with = "launcher_shared::formhelp::empty_str_as_none")]
     pub count:    Option<i32>,
 }
 
