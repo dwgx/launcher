@@ -50,6 +50,10 @@ void importFromFolderUi(HWND notify, const std::string& pack_id);
 // 用户名下所有 sticker（含全部自创 pack）总数 — 后端限 50/user
 int totalUserStickers();
 
+// 删单个 sticker — 本地从 g_packs 移除路径 + POST /api/sticker/delete
+// (后端可能没此端点；客户端本地删除立即生效，后端失败 silent)
+void deleteSticker(HWND notify, const std::wstring& path);
+
 // sticker 缓存目录 = %LOCALAPPDATA%/Launcher/stickers/
 std::wstring cacheDir();
 

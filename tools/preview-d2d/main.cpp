@@ -325,6 +325,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 38: {                    // geoIP fetched → 重 paint Home 显示国家
             return 0;
         }
+        case WM_APP + 39: {                    // sticker delete result
+            // 本地已经移除，后端是否成功不影响 UI
+            return 0;
+        }
+        case WM_APP + 40: {                    // chat picker → 删单个 sticker (lp = std::wstring* path)
+            auto* p = (std::wstring*)wp;
+            if (p) sticker::deleteSticker(hwnd, *p);
+            return 0;
+        }
+        case WM_APP + 41: {                    // chat picker → 我的表情想导入
+            toast::show(L"请先切到/新建一个表情包分组再导入");
+            return 0;
+        }
         case WM_APP + 35: {                    // profile update result
             modal::onEditStatusTextResult(wp != 0);
             modal::onEditBioResult(wp != 0);

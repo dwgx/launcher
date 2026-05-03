@@ -425,4 +425,42 @@ int totalUserStickers() {
     return n;
 }
 
+void deleteSticker(HWND notify, const std::wstring& path) {
+    // 1. 立即本地删除（乐观更新）
+    std::string sha;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (auto& p : g_packs) {
+            for (auto it = p.stickers.begin(); it != p.stickers.end(); ++it) {
+                if (*it == path) {
+                    // sha 从路径提取 (格式：cache_dir/<sha>.<ext>)
+                    auto sl = path.find_last_of(L"\\/");
+                    auto dot = path.find_last_of(L'.');
+                    if (sl != std::wstring::npos && dot != std::wstring::npos && dot > sl) {
+                        std::wstring s = path.substr(sl + 1, dot - sl - 1);
+                        // sha256 是 ascii hex (0-9 a-f)，直接 wchar→char cast 安全
+                        sha.reserve(s.size());
+                        for (wchar_t c : s) sha.push_back((char)c);
+                    }
+                    p.stickers.erase(it);
+                    goto local_done;
+                }
+            }
+        }
+    local_done:;
+    }
+    // 2. 后端异步同步（失败 silent）
+    if (sha.empty()) return;
+    struct A { std::string sha; HWND h; };
+    auto* a = new A{ sha, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"sha256\":\"" + a->sha + "\"}";
+        net::postJson(L"/api/sticker/delete", body);
+        PostMessageW(a->h, WM_APP + 39, 1, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
 }  // namespace launcher::d2d::sticker

@@ -725,8 +725,8 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
         }, true);
 
-        // ↥ 导入文件夹（有 pack 时）
-        if (!cur_pid.empty()) {
+        // ↥ 导入文件夹 — 始终显示。"我的表情"(无 id) 时给提示
+        {
             LayoutRect imp{ px + pw - 64 - 60, py + 50, 56, 24 };
             bool ih = imp.contains(g_mouse);
             prim::fillRR(ctx, imp.x, imp.y, imp.w, imp.h, 4,
@@ -735,13 +735,17 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                             imp.x, imp.y + 5, imp.w, 16,
                             br.solidA(pal.text, t),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
-            // PostMessage 让 main 弹文件夹对话框（避免在 paint 里阻塞 UI）
             std::string pid = cur_pid;
             hit(imp, [pid](){
-                static std::string g_pending_import_pid;
-                g_pending_import_pid = pid;
-                PostMessageW(GetActiveWindow(), WM_APP + 34,
-                             (WPARAM)&g_pending_import_pid, 0);
+                if (pid.empty()) {
+                    // "我的表情" 或系统 — 提示先选/建分组
+                    PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
+                } else {
+                    static std::string g_pending_import_pid;
+                    g_pending_import_pid = pid;
+                    PostMessageW(GetActiveWindow(), WM_APP + 34,
+                                 (WPARAM)&g_pending_import_pid, 0);
+                }
             }, true);
         }
 
@@ -787,16 +791,44 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                         t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 }
                 std::wstring path = cur_pack.stickers[i];
-                hit(sr, [path](){
-                    Msg m;
-                    m.kind = MsgKind::Sticker;
-                    m.from = L"me";
-                    m.body = path;
-                    m.time = L"now";
-                    streamFor(g_active).push_back(std::move(m));
-                    g_picker_open = false;
-                    g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
-                }, true);
+                // hover 时右上角 ✕ 删除按钮
+                if (sh_) {
+                    LayoutRect xb{ ex + cell - 18, ey + 2, 16, 16 };
+                    bool xh = xb.contains(g_mouse);
+                    prim::fillCircle(ctx, xb.x + 8, xb.y + 8, 8,
+                                     br.solidA(0x000000, t * (xh ? 0.85f : 0.65f)));
+                    icons::drawIcon(app, icons::Name::X, xb.x + 2, xb.y + 2, 12,
+                                    fadeArgb(0xFFFFFFFF, t));
+                    // ✕ 优先 hit（注册顺序：先 sticker，再 ✕，dispatch reverse 后 ✕ 优先）
+                    hit(sr, [path](){
+                        Msg m;
+                        m.kind = MsgKind::Sticker;
+                        m.from = L"me";
+                        m.body = path;
+                        m.time = L"now";
+                        streamFor(g_active).push_back(std::move(m));
+                        g_picker_open = false;
+                        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                    }, true);
+                    hit(xb, [path](){
+                        // PostMessage 主线程调 sticker::deleteSticker
+                        static std::wstring g_pending_del;
+                        g_pending_del = path;
+                        PostMessageW(GetActiveWindow(), WM_APP + 40,
+                                     (WPARAM)&g_pending_del, 0);
+                    }, true);
+                } else {
+                    hit(sr, [path](){
+                        Msg m;
+                        m.kind = MsgKind::Sticker;
+                        m.from = L"me";
+                        m.body = path;
+                        m.time = L"now";
+                        streamFor(g_active).push_back(std::move(m));
+                        g_picker_open = false;
+                        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                    }, true);
+                }
             }
         }
 

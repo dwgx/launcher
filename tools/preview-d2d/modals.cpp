@@ -9,6 +9,7 @@
 #include "stages.h"
 #include "fetch.h"
 #include "steam.h"
+#include "webview.h"
 #include "game_assets.h"
 #include "render/primitives.h"
 
@@ -375,10 +376,15 @@ void paintConfirmModal(D2DApp& app, float W, float H) {
 void openCS2() {
     g_cs2.open = true;
     g_cs2.t.start(0, 1, 0.30f, 0, curve::easeOutQuint);
+    // 启动 WebView2 嵌入 Steam store widget（含 mp4 视频自动播放）
+    if (webview::ensure(GetActiveWindow())) {
+        webview::navigate(L"https://store.steampowered.com/widget/730/embed/");
+    }
 }
 static void closeCS2() {
     g_cs2.t.start(g_cs2.t.value(), 0, 0.20f, 0, curve::easeOutQuint);
     g_cs2.open = false;
+    webview::show(false);   // 立即隐藏，stop 视频继续覆盖窗口
 }
 
 void paintCS2Modal(D2DApp& app, float W, float H) {
@@ -396,44 +402,50 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
 
-    // 顶部 cover — 真 CS2 头图（找不到才退化到主色渐变）
-    float cover_h = 200;
-    auto cs2_path = cs2HeaderPath();
-    auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
-    if (cover_bmp) {
-        // 圆角顶部裁剪
-        ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy, cx + cw, cy + cover_h),
-                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        D2D1_SIZE_F sz = cover_bmp->GetSize();
-        // 等比 fill (cover)
-        float scale = (std::max)(cw / sz.width, cover_h / sz.height);
-        float dw = sz.width * scale, dh = sz.height * scale;
-        float dx = cx + (cw - dw) * 0.5f, dy = cy + (cover_h - dh) * 0.5f;
-        ctx->DrawBitmap(cover_bmp, D2D1::RectF(dx, dy, dx + dw, dy + dh),
-                        t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        // 底部黑色渐变蒙版（让标题文字可读）
-        prim::fillRect(ctx, cx, cy + cover_h - 80, cw, 80,
-                       br.solidA(0x000000, 0.55f * t));
-        ctx->PopAxisAlignedClip();
+    // 顶部 cover 区域 — 默认显示真 CS2 头图；WebView2 ready 后用 Steam 嵌入视频替代
+    float cover_h = 220;
+    bool wv_ready = webview::isReady();
+    if (wv_ready && t > 0.95f) {
+        // WebView2 子窗口接管 cover 区域（物理像素 = DIP × dpi/96）
+        float scale = app.dpi() / 96.0f;
+        int wl = (int)((cx + 8) * scale);
+        int wt = (int)((cy + 8) * scale);
+        int wr = (int)((cx + cw - 8) * scale);
+        int wb = (int)((cy + cover_h) * scale);
+        webview::setBounds(wl, wt, wr, wb);
+        webview::show(true);
+        // D2D 这里只画一个圆角占位，WebView2 会盖在上面
+        prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(pal.surface, t));
     } else {
-        prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
+        // WebView2 没就绪时画静态 CS2 头图
+        webview::show(false);
+        auto cs2_path = cs2HeaderPath();
+        auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
+        if (cover_bmp) {
+            ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy, cx + cw, cy + cover_h),
+                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            D2D1_SIZE_F sz = cover_bmp->GetSize();
+            float scale_ = (std::max)(cw / sz.width, cover_h / sz.height);
+            float dw = sz.width * scale_, dh = sz.height * scale_;
+            float dx = cx + (cw - dw) * 0.5f, dy = cy + (cover_h - dh) * 0.5f;
+            ctx->DrawBitmap(cover_bmp, D2D1::RectF(dx, dy, dx + dw, dy + dh),
+                            t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            prim::fillRect(ctx, cx, cy + cover_h - 80, cw, 80,
+                           br.solidA(0x000000, 0.55f * t));
+            ctx->PopAxisAlignedClip();
+        } else {
+            prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
+        }
+        auto* hh = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
+                                      DWRITE_FONT_WEIGHT_BOLD);
+        prim::drawText_(ctx, L"Counter-Strike 2", hh,
+                        cx + 24, cy + cover_h - 60, cw - 48, 30,
+                        br.solidA(0xFFFFFF, t));
+        auto* sub_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
+        prim::drawText_(ctx, L"Valve  ·  Source 2  ·  视频加载中…", sub_fmt,
+                        cx + 24, cy + cover_h - 28, cw - 48, 18,
+                        br.solidA(0xFFFFFF, t * 0.85f));
     }
-    auto* hh = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
-                                  DWRITE_FONT_WEIGHT_BOLD);
-    prim::drawText_(ctx, L"Counter-Strike 2", hh,
-                    cx + 24, cy + cover_h - 60, cw - 48, 30,
-                    br.solidA(0xFFFFFF, t));
-    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
-    prim::drawText_(ctx, L"Valve  ·  Source 2", sub,
-                    cx + 24, cy + cover_h - 28, cw - 48, 18,
-                    br.solidA(0xFFFFFF, t * 0.85f));
-
-    // 中央 ▶ — 真打开 Steam 商店页（带视频自动播放，浏览器播）
-    float pcx = cx + cw * 0.5f, pcy = cy + cover_h * 0.5f;
-    prim::fillCircle(ctx, pcx, pcy, 32, br.solidA(0x000000, t * 0.55f));
-    prim::strokeCircle(ctx, pcx, pcy, 32, br.solidA(0xFFFFFF, t), 2.0f);
-    icons::drawIcon(app, icons::Name::Play, pcx - 14, pcy - 14, 28, fadeArgb(0xFFFFFFFF, t));
-    hit(LayoutRect{ pcx - 32, pcy - 32, 64, 64 }, [](){ openCS2Store(); }, true);
 
     // 底部 stat
     auto* stat_lbl = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
