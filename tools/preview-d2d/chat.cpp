@@ -419,18 +419,27 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
         float bub_w = 240, bub_h = 140;
         prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
                      br.solid(pal.surface));
-        // ▶
-        prim::fillCircle(ctx, bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f, 24,
-                         br.solidA(0x000000, 0.55f));
-        icons::Name play = icons::Name::Play;
-        // 简单画三角
-        auto* white = br.solid(0xFFFFFFFF);
-        ctx->FillEllipse(D2D1::Ellipse(
-            D2D1::Point2F(bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f), 4, 4), white);
-        prim::drawText_(ctx, L"▶ 视频", body_fmt,
+        prim::fillCircle(ctx, bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f, 28,
+                         br.solidA(0x000000, 0.65f));
+        prim::strokeCircle(ctx, bub_x + bub_w * 0.5f, bub_y + bub_h * 0.5f, 28,
+                           br.solid(0xFFFFFFFF), 2.0f);
+        icons::drawIcon(app, icons::Name::Play,
+                        bub_x + bub_w * 0.5f - 12,
+                        bub_y + bub_h * 0.5f - 12, 24,
+                        0xFFFFFFFF);
+        prim::drawText_(ctx, L"点击播放视频", body_fmt,
                         bub_x, bub_y + bub_h - 24, bub_w, 18,
                         br.solid(pal.text_muted),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
+        // 点击 → WebView2 内嵌播放器
+        std::wstring src = m.body;
+        hit({ bub_x, bub_y, bub_w, bub_h }, [src](){
+            // PostMessage 让 main 调（避免 paint 内调 modal 状态变化）
+            static std::wstring g_pending_video;
+            g_pending_video = src;
+            PostMessageW(GetActiveWindow(), WM_APP + 46,
+                         (WPARAM)&g_pending_video, 0);
+        }, true);
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
     }
 
@@ -474,6 +483,33 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
     prim::drawText_(ctx, m.body, body_fmt,
                     bub_x + 14, bub_y + 8, bub_w - 28, bub_h - 16,
                     br.solid(bub_fg));
+
+    // 检测 https/http 链接 → 整个气泡区点击打开内嵌浏览器
+    auto find_url = [](const std::wstring& s) -> std::wstring {
+        size_t p = s.find(L"https://");
+        if (p == std::wstring::npos) p = s.find(L"http://");
+        if (p == std::wstring::npos) return {};
+        size_t e = p;
+        while (e < s.size() && s[e] > 0x20 && s[e] != L' ') e++;
+        return s.substr(p, e - p);
+    };
+    std::wstring url = find_url(m.body);
+    if (!url.empty()) {
+        // 链接气泡下加一个小提示行 + hit 整个气泡 → WebView2 打开
+        auto* link_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.5f),
+                                            DWRITE_FONT_WEIGHT_BOLD);
+        prim::drawText_(ctx, L"↗ 点击打开", link_fmt,
+                        bub_x + 14, bub_y + bub_h - 14, bub_w - 28, 12,
+                        br.solidA(me ? 0xFFFFFF : 0xC96442, 0.7f));
+        bub_h += 4;     // 容纳提示
+        std::wstring url_copy = url;
+        hit({ bub_x, bub_y, bub_w, bub_h }, [url_copy](){
+            static std::wstring g_pending_url;
+            g_pending_url = url_copy;
+            PostMessageW(GetActiveWindow(), WM_APP + 47,
+                         (WPARAM)&g_pending_url, 0);
+        }, true);
+    }
 
     return (prev_same_author ? bub_h : bub_h + 22) + 6;
 }

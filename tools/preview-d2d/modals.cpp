@@ -31,6 +31,7 @@ RenamePackState   g_renamepack;
 UserProfileState  g_user_profile;
 EditStatusTextState g_edit_status;
 EditBioState      g_edit_bio;
+WebViewModalState g_webview_modal;
 
 namespace {
 
@@ -176,12 +177,14 @@ void tickAll(float dt) {
     g_edit_status.input.float_t.tick(dt);
     g_edit_bio.t.tick(dt);
     g_edit_bio.input.float_t.tick(dt);
+    g_webview_modal.t.tick(dt);
 }
 
 bool anyOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
         || g_addtag.open || g_createpack.open || g_renamepack.open
-        || g_user_profile.open || g_edit_status.open || g_edit_bio.open;
+        || g_user_profile.open || g_edit_status.open || g_edit_bio.open
+        || g_webview_modal.open;
 }
 
 // ============== ChangePw ==============
@@ -1074,6 +1077,128 @@ void paintEditBioModal(D2DApp& app, float W, float H) {
                    [hwnd = GetActiveWindow()](){ submitEditBio(hwnd); });
 }
 
+// ============== WebView modal (通用浏览器/视频播放) ==============
+namespace {
+std::wstring fileToFileUrl(const std::wstring& path) {
+    // 转 file:///D:/foo/bar.mp4 — 反斜杠改正斜杠
+    std::wstring url = L"file:///";
+    for (wchar_t c : path) {
+        if (c == L'\\') url.push_back(L'/');
+        else url.push_back(c);
+    }
+    return url;
+}
+std::wstring buildVideoHtml(const std::wstring& src) {
+    // 弹一个全屏 video tag wrapper — autoplay + controls + 黑底
+    std::wstring h = L"<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                     L"<style>html,body{margin:0;padding:0;background:#000;height:100vh;overflow:hidden;}"
+                     L"video{width:100%;height:100%;object-fit:contain;}</style></head>"
+                     L"<body><video src=\"";
+    h += src;
+    h += L"\" autoplay controls loop></video></body></html>";
+    return h;
+}
+}
+
+void openVideoPlayer(const std::wstring& src) {
+    g_webview_modal.open = true;
+    g_webview_modal.title = src;
+    g_webview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+    if (!webview::ensure(GetActiveWindow())) return;
+    // 本地路径自动转 file:/// URL
+    std::wstring real_src = src;
+    if (src.size() > 1 && (src[1] == L':' || src.compare(0, 2, L"\\\\") == 0)) {
+        real_src = fileToFileUrl(src);
+    }
+    webview::navigateHtml(buildVideoHtml(real_src));
+}
+
+void openWebPage(const std::wstring& url) {
+    g_webview_modal.open = true;
+    g_webview_modal.title = url;
+    g_webview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+    if (!webview::ensure(GetActiveWindow())) return;
+    webview::navigate(url);
+}
+
+static void closeWebViewModal() {
+    g_webview_modal.t.start(g_webview_modal.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_webview_modal.open = false;
+    webview::show(false);   // 立即停止视频/页面
+}
+
+void paintWebViewModal(D2DApp& app, float W, float H) {
+    if (!g_webview_modal.open && g_webview_modal.t.value() < 0.001f) return;
+    float t = g_webview_modal.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    // 大模态：W-80 × H-80, 顶部 48 标题栏 + 内容区 = WebView2 子窗
+    float cw = (std::min)(W - 80.0f, 1280.0f);
+    float ch = (std::min)(H - 80.0f, 800.0f);
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    float bar_h = 48.0f;
+
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    prim::fillRect(ctx, cx, cy + bar_h - 1, cw, 1, br.solidA(pal.divider, t));
+
+    // 标题栏
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
+                                  DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+    prim::drawText_(ctx, L"内嵌浏览器", h1,
+                    cx + 16, cy + 12, 200, 22,
+                    br.solidA(pal.text, t),
+                    DWRITE_TEXT_ALIGNMENT_LEADING,
+                    DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    prim::drawText_(ctx, g_webview_modal.title, sub,
+                    cx + 100, cy + 16, cw - 220, 18,
+                    br.solidA(pal.text_muted, t));
+
+    // ✕ 关闭
+    LayoutRect close_btn{ cx + cw - 36, cy + 10, 28, 28 };
+    bool ch_h = close_btn.contains(g_mouse);
+    if (ch_h) {
+        prim::fillRR(ctx, close_btn.x, close_btn.y, 28, 28, 6,
+                     br.solidA(pal.text, t * 0.10f));
+    }
+    icons::drawIcon(app, icons::Name::X, close_btn.x + 6, close_btn.y + 6, 16,
+                    fadeArgb(pal.text, t));
+    hit(close_btn, [](){ closeWebViewModal(); }, true);
+
+    // 内容区 = WebView2 (物理像素)
+    if (t > 0.95f && webview::isReady()) {
+        float scale = app.dpi() / 96.0f;
+        int wl = (int)((cx + 8) * scale);
+        int wt = (int)((cy + bar_h) * scale);
+        int wr = (int)((cx + cw - 8) * scale);
+        int wb = (int)((cy + ch - 8) * scale);
+        webview::setBounds(wl, wt, wr, wb);
+        webview::show(true);
+    } else {
+        // WebView2 还没 ready / 没装 runtime → 占位
+        prim::fillRR(ctx, cx + 8, cy + bar_h, cw - 16, ch - bar_h - 8, 8.0f,
+                     br.solidA(pal.surface, t));
+        if (!webview::runtimeAvailable()) {
+            prim::drawText_(ctx, L"WebView2 Runtime 未安装 — 装个 Edge 就行",
+                            sub,
+                            cx, cy + ch * 0.5f, cw, 22,
+                            br.solidA(pal.text_muted, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        } else {
+            prim::drawText_(ctx, L"加载中…", sub,
+                            cx, cy + ch * 0.5f, cw, 22,
+                            br.solidA(pal.text_muted, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+    }
+}
+
 void paintRenamePackModal(D2DApp& app, float W, float H) {
     if (!g_renamepack.open && g_renamepack.t.value() < 0.001f) return;
     float t = g_renamepack.t.value();
@@ -1109,6 +1234,13 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
 // ============== 事件路由 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
+    // WebView2 modal 打开时：WebView2 自己接管 input，不要让 dispatchClick
+    // 误吃成 \"外部点击关闭\" — 用户点 WebView 内部本来该传给 webview，
+    // 不命中 close 按钮就保持开。
+    if (g_webview_modal.open) {
+        dispatchClick(dip);   // 仅响应 close 按钮 hit
+        return true;
+    }
     bool consumed = dispatchClick(dip);
     if (!consumed) {
         if (g_edit_bio.open) closeEditBio();
@@ -1142,6 +1274,7 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!anyOpen()) return false;
     if (vk == VK_ESCAPE) {
+        if (g_webview_modal.open) { closeWebViewModal(); return true; }
         if (g_edit_bio.open) { closeEditBio(); return true; }
         if (g_edit_status.open) { closeEditStatusText(); return true; }
         if (g_user_profile.open) { closeUserProfile(); return true; }

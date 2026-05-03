@@ -25,7 +25,11 @@ bool ensure(HWND parent);          // 异步 init；返回是否调用成功（�
 bool isReady();
 void setBounds(int left, int top, int right, int bottom);
 void navigate(const std::wstring& url);
+// NavigateToString — 内嵌 HTML 字符串（用来包 <video> 等 H5 标签播本地视频）
+void navigateHtml(const std::wstring& html);
 void show(bool visible);
 void destroy();
+// 检测 WebView2 Runtime 是否可用 — Loader.dll 能 LoadLibrary + 至少创建 env
+bool runtimeAvailable();
 
 }  // namespace launcher::d2d::webview

@@ -977,6 +977,8 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintUserProfileModal(app, W, H);
     modal::paintEditStatusTextModal(app, W, H);
     modal::paintEditBioModal(app, W, H);
+    // WebView2 modal 在最顶（CS2 modal 已经直接 webview，这是通用浏览器/视频）
+    modal::paintWebViewModal(app, W, H);
 
     // toast 在最最顶层
     toast::paint(app, W, H);

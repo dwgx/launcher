@@ -56,13 +56,19 @@ std::wstring userDataDir() {
     return dir;
 }
 
+extern std::wstring g_pending_html;
+
 void applyPendingState() {
     if (!g_ctrl) return;
     if (g_pending_bounds.right > g_pending_bounds.left) {
         g_ctrl->put_Bounds(g_pending_bounds);
     }
     g_ctrl->put_IsVisible(g_pending_visible ? TRUE : FALSE);
-    if (!g_pending_url.empty() && g_view) {
+    if (!g_pending_html.empty() && g_view) {
+        g_view->NavigateToString(g_pending_html.c_str());
+        g_pending_html.clear();
+        g_pending_url.clear();
+    } else if (!g_pending_url.empty() && g_view) {
         g_view->Navigate(g_pending_url.c_str());
         g_pending_url.clear();
     }
@@ -125,6 +131,20 @@ void navigate(const std::wstring& url) {
         g_view->Navigate(url.c_str());
         g_pending_url.clear();
     }
+}
+
+namespace { std::wstring g_pending_html; }
+
+void navigateHtml(const std::wstring& html) {
+    g_pending_html = html;
+    if (g_view) {
+        g_view->NavigateToString(html.c_str());
+        g_pending_html.clear();
+    }
+}
+
+bool runtimeAvailable() {
+    return resolveCreateEnv() != nullptr;
 }
 
 void show(bool visible) {

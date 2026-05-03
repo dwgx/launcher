@@ -144,6 +144,21 @@ void openEditBio();
 void paintEditBioModal(D2DApp& app, float W, float H);
 void onEditBioResult(bool success);
 
+// 通用 WebView 弹窗 — 视频 / 网页都用这个，全屏铺开 WebView2 子窗口
+struct WebViewModalState {
+    bool open = false;
+    Tween t;
+    std::wstring title;        // 标题栏文字（视频文件名 / URL host）
+};
+extern WebViewModalState g_webview_modal;
+
+// 播本地视频 / URL（mp4/webm/m3u8 都行）
+//   src 可以是 file:///path 或 https://... 或 本地路径（自动转 file:///）
+void openVideoPlayer(const std::wstring& src);
+// 弹任意 URL 到嵌入浏览器
+void openWebPage(const std::wstring& url);
+void paintWebViewModal(D2DApp& app, float W, float H);
+
 // 主帧循环 tick
 void tickAll(float dt);
 

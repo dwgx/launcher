@@ -365,6 +365,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (p) chat::applyHistoryResult(*p);
             return 0;
         }
+        case WM_APP + 46: {                    // chat video bubble 点击 (wp = std::wstring* path)
+            auto* p = (std::wstring*)wp;
+            if (p && !p->empty()) modal::openVideoPlayer(*p);
+            return 0;
+        }
+        case WM_APP + 47: {                    // chat text 链接点击 (wp = std::wstring* url)
+            auto* p = (std::wstring*)wp;
+            if (p && !p->empty()) modal::openWebPage(*p);
+            return 0;
+        }
         case WM_APP + 35: {                    // profile update result
             modal::onEditStatusTextResult(wp != 0);
             modal::onEditBioResult(wp != 0);
