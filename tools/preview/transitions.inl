@@ -9,26 +9,32 @@ namespace tx {
 struct Slide {
     Tween x, y, op;
     bool active() const { return op.started && !op.done(); }
+    bool started() const { return op.started; }
+    float value() const { return op.value(); }       // 让旧式 .value() 调用直接拿 opacity
+    float dy() const { return y.value(); }           // 当前 Y 偏移（像素）
 
-    // 进入：从 (dx, dy) 滑回 (0, 0)，op 0→1
-    void enter(float dx = 0, float dy = 12.0f, float dur = 0.30f) {
+    // 进入：从 (dx, dy) 滑回 (0, 0)，op 0→1。easeOutBack 让 modal 弹一下。
+    void enter(float dx = 0, float dy_ = 12.0f, float dur = 0.30f) {
         x.start(dx, 0.0f, dur, 0, curve::easeOutCubic);
-        y.start(dy, 0.0f, dur, 0, curve::easeOutCubic);
+        y.start(dy_, 0.0f, dur, 0, curve::easeOutBack);
         op.start(0.0f, 1.0f, dur, 0, curve::easeOutCubic);
     }
     // 退出：滑出到 (dx, dy)，op 1→0
-    void exit(float dx = 0, float dy = 12.0f, float dur = 0.20f) {
+    void exit(float dx = 0, float dy_ = 12.0f, float dur = 0.20f) {
         x.start(x.value(), dx, dur, 0, curve::easeOutCubic);
-        y.start(y.value(), dy, dur, 0, curve::easeOutCubic);
+        y.start(y.value(), dy_, dur, 0, curve::easeOutCubic);
         op.start(op.value(), 0.0f, dur, 0, curve::easeOutCubic);
     }
     void tick(float dt) { x.tick(dt); y.tick(dt); op.tick(dt); }
+    void finish() { x.elapsed = y.elapsed = op.elapsed = 9999; }   // snap to end
 };
 
 // ---------- Fade ----------
 struct Fade {
     Tween op;
     bool active() const { return op.started && !op.done(); }
+    bool started() const { return op.started; }
+    float value() const { return op.value(); }
     void enter(float dur = 0.25f) { op.start(0.0f, 1.0f, dur, 0, curve::easeOutCubic); }
     void exit(float dur = 0.20f)  { op.start(op.value(), 0.0f, dur, 0, curve::easeOutCubic); }
     void tick(float dt) { op.tick(dt); }
@@ -39,6 +45,9 @@ struct Fade {
 struct Scale {
     Tween s, op;
     bool active() const { return op.started && !op.done(); }
+    bool started() const { return op.started; }
+    float value() const { return op.value(); }      // 旧式 .value() = opacity
+    float scale() const { return s.value(); }
     void enter(float from = 0.94f, float dur = 0.28f) {
         s.start(from, 1.0f, dur, 0, curve::easeOutBack);
         op.start(0.0f, 1.0f, dur, 0, curve::easeOutCubic);

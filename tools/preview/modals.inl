@@ -9,7 +9,7 @@ namespace modal {
 // ============================================================
 struct ChangePw {
     bool open = false;
-    Tween t;
+    tx::Slide t;          // modal 入场：translateY 16→0 + op 0↔1
     InputBox old_pw, new_pw, confirm_pw;
     int focus = 0;
     std::wstring error;
@@ -20,7 +20,7 @@ inline ChangePw& g_pw() { static ChangePw s; return s; }
 void openChangePw() {
     auto& p = g_pw();
     p.open = true;
-    p.t.start(p.t.value(), 1.0f, 0.28f, 0, curve::easeOutBack);
+    p.t.enter(0.0f, 16.0f, 0.28f);
     p.old_pw.text.clear();   p.old_pw.cursor = 0;   p.old_pw.clearSel();   p.old_pw.password = true;
     p.new_pw.text.clear();   p.new_pw.cursor = 0;   p.new_pw.clearSel();   p.new_pw.password = true;
     p.confirm_pw.text.clear(); p.confirm_pw.cursor = 0; p.confirm_pw.clearSel(); p.confirm_pw.password = true;
@@ -31,7 +31,7 @@ void openChangePw() {
 void closeChangePw() {
     auto& p = g_pw();
     p.open = false;
-    p.t.start(p.t.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
+    p.t.exit(0.0f, 16.0f, 0.20f);
 }
 
 void paintChangePwModal(Graphics& g, int Wpx, int Hpx) {
@@ -48,7 +48,7 @@ void paintChangePwModal(Graphics& g, int Wpx, int Hpx) {
 
     float mw = 420.0f, mh = 380.0f;
     float mx = (Wpx - mw) / 2.0f;
-    float my = (Hpx - mh) / 2.0f + 16.0f * (1.0f - t);
+    float my = (Hpx - mh) / 2.0f + p.t.dy();
 
     drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
     fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
@@ -180,20 +180,448 @@ void paintChangePwModal(Graphics& g, int Wpx, int Hpx) {
 }
 
 // ============================================================
+// 添加个人标签 modal — 接 /api/profile/tags/add
+// ============================================================
+struct AddTag {
+    bool open = false;
+    tx::Slide t;
+    InputBox input;
+    std::wstring error;
+    bool busy = false;
+};
+inline AddTag& g_tag() { static AddTag s; return s; }
+
+void openAddTag() {
+    auto& p = g_tag();
+    p.open = true;
+    p.t.enter(0.0f, 14.0f, 0.26f);
+    p.input.text.clear(); p.input.cursor = 0; p.input.clearSel();
+    p.error.clear();
+    p.busy = false;
+}
+void closeAddTag() {
+    auto& p = g_tag();
+    p.open = false;
+    p.t.exit(0.0f, 14.0f, 0.18f);
+}
+
+// 异步 POST /api/profile/tags/add — 实现在主程序（全局命名空间），这里 forward。
+
+void paintAddTagModal(Graphics& g, int Wpx, int Hpx) {
+    auto& p = g_tag();
+    if (p.t.value() < 0.001f && !p.open) return;
+    const Palette& pal = palette();
+    float t = p.t.value();
+    if (t < 0.001f) return;
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
+
+    SolidBrush dim(Color((BYTE)(170 * t), 0, 0, 0));
+    g.FillRectangle(&dim, 0, 0, Wpx, Hpx);
+
+    float mw = 380.0f, mh = 230.0f;
+    float mx = (Wpx - mw) / 2.0f;
+    float my = (Hpx - mh) / 2.0f + p.t.dy();
+
+    drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
+    fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
+
+    drawText_(g, L"添加标签", mx + 26, my + 22, mw - 52, 14.0f,
+              fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, L"展示在主页个人卡片上 — 例如 \"CS2\" / \"东京机房\"",
+              mx + 26, my + 48, mw - 52, 8.5f, fade(pal.text_muted));
+
+    // 关闭 ✕
+    RectF xr(mx + mw - 38, my + 16, 26, 26);
+    bool xhov = inRect(g_mouse, xr);
+    if (xhov) fillRR(g, xr.X, xr.Y, xr.Width, xr.Height, 6.0f, fade(pal.bg));
+    icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18.0f, fade(pal.text_muted));
+    hit(xr, [](){ closeAddTag(); }, true);
+
+    // input field
+    RectF fr(mx + 26, my + 80, mw - 52, 44);
+    p.input.bounds = fr;
+    fillRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.bg));
+    strokeRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.primary), 1.4f);
+    Color halo((BYTE)(38 * t), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    strokeRR(g, fr.X - 2, fr.Y - 2, fr.Width + 4, fr.Height + 4, 12.0f, halo, 4.0f);
+
+    if (p.input.text.empty()) {
+        drawText_(g, L"标签内容（最多 24 字）", fr.X + 14, fr.Y + 14, fr.Width - 28,
+                  10.0f, fade(pal.text_muted));
+    } else {
+        Font* f = fontcache::get(10.0f);
+        drawText_(g, p.input.text.c_str(), fr.X + 14, fr.Y + 14, fr.Width - 28,
+                  10.0f, fade(pal.text));
+        // caret
+        if (!p.input.hasSelection()) {
+            RectF bb;
+            g.MeasureString(p.input.displaySlice(0, p.input.cursor).c_str(), -1, f, PointF(0, 0), &bb);
+            int phase = (int)(g_time_in_stage * 1000) % 1000;
+            if (phase < 500) {
+                Pen pen(fade(pal.primary), 1.5f);
+                float cx_ = fr.X + 14 + bb.Width;
+                g.DrawLine(&pen, cx_, fr.Y + 14, cx_, fr.Y + 30);
+            }
+        }
+    }
+    hit(fr, [](){}, true);   // 阻断外部 dismiss
+
+    if (!p.error.empty()) {
+        Color ebg((BYTE)(36 * t), 0xE3, 0x4B, 0x4B);
+        Color efg((BYTE)(255 * t), 0xFF, 0x8A, 0x80);
+        fillRR(g, mx + 26, my + 132, mw - 52, 24, 6.0f, ebg);
+        drawText_(g, p.error.c_str(), mx + 36, my + 137, mw - 72, 8.5f, efg);
+    }
+
+    // 按钮
+    float by = my + mh - 52;
+    RectF cb(mx + 26, by, 100, 32);
+    bool ch = inRect(g_mouse, cb);
+    fillRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, ch ? fade(pal.bg) : fade(pal.card));
+    strokeRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, fade(pal.divider));
+    drawText_(g, L"取消", cb.X, cb.Y + 9, cb.Width, 9.5f, fade(pal.text),
+              StringAlignmentCenter, FontStyleBold);
+    hit(cb, [](){ closeAddTag(); }, true);
+
+    RectF sb(mx + mw - 26 - 110, by, 110, 32);
+    bool sh = inRect(g_mouse, sb);
+    Color sbg = p.busy ? fade(Color(255, 0x6B, 0x6A, 0x67))
+                       : (sh ? fade(pal.primary_hover) : fade(pal.primary));
+    fillRR(g, sb.X, sb.Y, sb.Width, sb.Height, 8.0f, sbg);
+    drawText_(g, p.busy ? L"提交中…" : L"添加", sb.X, sb.Y + 9, sb.Width, 9.5f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    if (!p.busy) {
+        hit(sb, [](){ ::submitAddTag(); }, true);
+    }
+
+    // 4 环形外部 dismiss
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeAddTag(); }, true);
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeAddTag(); }, true);
+    hit(RectF(0, my, mx, mh), [](){ closeAddTag(); }, true);
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeAddTag(); }, true);
+}
+
+// ============================================================
+// 创建表情包分组 modal — 接 POST /api/sticker/pack
+// ============================================================
+struct CreatePack {
+    bool open = false;
+    tx::Slide t;
+    InputBox input;
+    std::wstring error;
+    bool busy = false;
+};
+inline CreatePack& g_create_pack() { static CreatePack s; return s; }
+
+void openCreatePack() {
+    auto& p = g_create_pack();
+    p.open = true;
+    p.t.enter(0.0f, 14.0f, 0.26f);
+    p.input.text.clear(); p.input.cursor = 0; p.input.clearSel();
+    p.error.clear();
+    p.busy = false;
+}
+void closeCreatePack() {
+    auto& p = g_create_pack();
+    p.open = false;
+    p.t.exit(0.0f, 14.0f, 0.18f);
+}
+
+void paintCreatePackModal(Graphics& g, int Wpx, int Hpx) {
+    auto& p = g_create_pack();
+    if (p.t.value() < 0.001f && !p.open) return;
+    const Palette& pal = palette();
+    float t = p.t.value();
+    if (t < 0.001f) return;
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
+
+    SolidBrush dim(Color((BYTE)(170 * t), 0, 0, 0));
+    g.FillRectangle(&dim, 0, 0, Wpx, Hpx);
+
+    float mw = 380.0f, mh = 230.0f;
+    float mx = (Wpx - mw) / 2.0f;
+    float my = (Hpx - mh) / 2.0f + p.t.dy();
+
+    drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
+    fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
+
+    drawText_(g, L"创建表情包分组", mx + 26, my + 22, mw - 52, 14.0f,
+              fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, L"每组最多 25 张表情；可在分组里加图片 / GIF / 文件夹",
+              mx + 26, my + 48, mw - 52, 8.5f, fade(pal.text_muted));
+
+    RectF xr(mx + mw - 38, my + 16, 26, 26);
+    bool xhov = inRect(g_mouse, xr);
+    if (xhov) fillRR(g, xr.X, xr.Y, xr.Width, xr.Height, 6.0f, fade(pal.bg));
+    icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18.0f, fade(pal.text_muted));
+    hit(xr, [](){ closeCreatePack(); }, true);
+
+    RectF fr(mx + 26, my + 80, mw - 52, 44);
+    p.input.bounds = fr;
+    fillRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.bg));
+    strokeRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.primary), 1.4f);
+    Color halo((BYTE)(38 * t), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    strokeRR(g, fr.X - 2, fr.Y - 2, fr.Width + 4, fr.Height + 4, 12.0f, halo, 4.0f);
+    if (p.input.text.empty()) {
+        drawText_(g, L"分组名（最多 24 字）", fr.X + 14, fr.Y + 14, fr.Width - 28,
+                  10.0f, fade(pal.text_muted));
+    } else {
+        Font* f = fontcache::get(10.0f);
+        drawText_(g, p.input.text.c_str(), fr.X + 14, fr.Y + 14, fr.Width - 28,
+                  10.0f, fade(pal.text));
+        if (!p.input.hasSelection()) {
+            RectF bb;
+            g.MeasureString(p.input.displaySlice(0, p.input.cursor).c_str(), -1, f, PointF(0, 0), &bb);
+            int phase = (int)(g_time_in_stage * 1000) % 1000;
+            if (phase < 500) {
+                Pen pen(fade(pal.primary), 1.5f);
+                float cx_ = fr.X + 14 + bb.Width;
+                g.DrawLine(&pen, cx_, fr.Y + 14, cx_, fr.Y + 30);
+            }
+        }
+    }
+    hit(fr, [](){}, true);
+
+    if (!p.error.empty()) {
+        Color ebg((BYTE)(36 * t), 0xE3, 0x4B, 0x4B);
+        Color efg((BYTE)(255 * t), 0xFF, 0x8A, 0x80);
+        fillRR(g, mx + 26, my + 132, mw - 52, 24, 6.0f, ebg);
+        drawText_(g, p.error.c_str(), mx + 36, my + 137, mw - 72, 8.5f, efg);
+    }
+
+    float by = my + mh - 52;
+    RectF cb(mx + 26, by, 100, 32);
+    bool ch = inRect(g_mouse, cb);
+    fillRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, ch ? fade(pal.bg) : fade(pal.card));
+    strokeRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, fade(pal.divider));
+    drawText_(g, L"取消", cb.X, cb.Y + 9, cb.Width, 9.5f, fade(pal.text),
+              StringAlignmentCenter, FontStyleBold);
+    hit(cb, [](){ closeCreatePack(); }, true);
+
+    RectF sb(mx + mw - 26 - 110, by, 110, 32);
+    bool sh = inRect(g_mouse, sb);
+    Color sbg = p.busy ? fade(Color(255, 0x6B, 0x6A, 0x67))
+                       : (sh ? fade(pal.primary_hover) : fade(pal.primary));
+    fillRR(g, sb.X, sb.Y, sb.Width, sb.Height, 8.0f, sbg);
+    drawText_(g, p.busy ? L"提交中…" : L"创建", sb.X, sb.Y + 9, sb.Width, 9.5f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    if (!p.busy) {
+        hit(sb, [](){ ::submitCreatePack(); }, true);
+    }
+
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeCreatePack(); }, true);
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeCreatePack(); }, true);
+    hit(RectF(0, my, mx, mh), [](){ closeCreatePack(); }, true);
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeCreatePack(); }, true);
+}
+
+// ============================================================
+// 重命名表情包分组 modal — 接 POST /api/sticker/pack/rename
+// ============================================================
+struct RenamePack {
+    bool open = false;
+    tx::Slide t;
+    InputBox input;
+    std::wstring error;
+    bool busy = false;
+    int  pack_idx = -1;
+    std::string pack_id;
+};
+inline RenamePack& g_rename_pack() { static RenamePack s; return s; }
+
+void openRenamePack(int pack_idx, const std::string& pack_id, const std::wstring& cur_name) {
+    auto& p = g_rename_pack();
+    p.open = true;
+    p.t.enter(0.0f, 14.0f, 0.26f);
+    p.input.text = cur_name;
+    p.input.cursor = (int)cur_name.size();
+    p.input.clearSel();
+    p.error.clear();
+    p.busy = false;
+    p.pack_idx = pack_idx;
+    p.pack_id = pack_id;
+}
+void closeRenamePack() {
+    auto& p = g_rename_pack();
+    p.open = false;
+    p.t.exit(0.0f, 14.0f, 0.18f);
+}
+
+void paintRenamePackModal(Graphics& g, int Wpx, int Hpx) {
+    auto& p = g_rename_pack();
+    if (p.t.value() < 0.001f && !p.open) return;
+    const Palette& pal = palette();
+    float t = p.t.value();
+    if (t < 0.001f) return;
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
+
+    SolidBrush dim(Color((BYTE)(170 * t), 0, 0, 0));
+    g.FillRectangle(&dim, 0, 0, Wpx, Hpx);
+
+    float mw = 380.0f, mh = 210.0f;
+    float mx = (Wpx - mw) / 2.0f;
+    float my = (Hpx - mh) / 2.0f + p.t.dy();
+
+    drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
+    fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
+
+    drawText_(g, L"重命名表情包分组", mx + 26, my + 22, mw - 52, 14.0f,
+              fade(pal.text), StringAlignmentNear, FontStyleBold);
+
+    RectF xr(mx + mw - 38, my + 16, 26, 26);
+    bool xhov = inRect(g_mouse, xr);
+    if (xhov) fillRR(g, xr.X, xr.Y, xr.Width, xr.Height, 6.0f, fade(pal.bg));
+    icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18.0f, fade(pal.text_muted));
+    hit(xr, [](){ closeRenamePack(); }, true);
+
+    RectF fr(mx + 26, my + 60, mw - 52, 44);
+    p.input.bounds = fr;
+    fillRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.bg));
+    strokeRR(g, fr.X, fr.Y, fr.Width, fr.Height, 10.0f, fade(pal.primary), 1.4f);
+    Color halo((BYTE)(38 * t), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB());
+    strokeRR(g, fr.X - 2, fr.Y - 2, fr.Width + 4, fr.Height + 4, 12.0f, halo, 4.0f);
+    if (p.input.text.empty()) {
+        drawText_(g, L"新名字", fr.X + 14, fr.Y + 14, fr.Width - 28, 10.0f, fade(pal.text_muted));
+    } else {
+        Font* f = fontcache::get(10.0f);
+        drawText_(g, p.input.text.c_str(), fr.X + 14, fr.Y + 14, fr.Width - 28, 10.0f, fade(pal.text));
+        if (!p.input.hasSelection()) {
+            RectF bb;
+            g.MeasureString(p.input.displaySlice(0, p.input.cursor).c_str(), -1, f, PointF(0, 0), &bb);
+            int phase = (int)(g_time_in_stage * 1000) % 1000;
+            if (phase < 500) {
+                Pen pen(fade(pal.primary), 1.5f);
+                float cx_ = fr.X + 14 + bb.Width;
+                g.DrawLine(&pen, cx_, fr.Y + 14, cx_, fr.Y + 30);
+            }
+        }
+    }
+    hit(fr, [](){}, true);
+
+    if (!p.error.empty()) {
+        Color ebg((BYTE)(36 * t), 0xE3, 0x4B, 0x4B);
+        Color efg((BYTE)(255 * t), 0xFF, 0x8A, 0x80);
+        fillRR(g, mx + 26, my + 112, mw - 52, 24, 6.0f, ebg);
+        drawText_(g, p.error.c_str(), mx + 36, my + 117, mw - 72, 8.5f, efg);
+    }
+
+    float by = my + mh - 52;
+    RectF cb(mx + 26, by, 100, 32);
+    bool ch = inRect(g_mouse, cb);
+    fillRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, ch ? fade(pal.bg) : fade(pal.card));
+    strokeRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, fade(pal.divider));
+    drawText_(g, L"取消", cb.X, cb.Y + 9, cb.Width, 9.5f, fade(pal.text),
+              StringAlignmentCenter, FontStyleBold);
+    hit(cb, [](){ closeRenamePack(); }, true);
+
+    RectF sb(mx + mw - 26 - 110, by, 110, 32);
+    bool sh = inRect(g_mouse, sb);
+    Color sbg = p.busy ? fade(Color(255, 0x6B, 0x6A, 0x67))
+                       : (sh ? fade(pal.primary_hover) : fade(pal.primary));
+    fillRR(g, sb.X, sb.Y, sb.Width, sb.Height, 8.0f, sbg);
+    drawText_(g, p.busy ? L"提交中…" : L"保存", sb.X, sb.Y + 9, sb.Width, 9.5f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    if (!p.busy) hit(sb, [](){ ::submitRenamePack(); }, true);
+
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeRenamePack(); }, true);
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeRenamePack(); }, true);
+    hit(RectF(0, my, mx, mh), [](){ closeRenamePack(); }, true);
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeRenamePack(); }, true);
+}
+
+// ============================================================
+// 简易 "确认" 对话框（删除 pack 用）
+// ============================================================
+struct ConfirmDlg {
+    bool open = false;
+    tx::Slide t;
+    std::wstring title, message, primary_label;
+    std::function<void()> on_confirm;
+    bool danger = false;
+};
+inline ConfirmDlg& g_confirm() { static ConfirmDlg s; return s; }
+
+void openConfirm(const wchar_t* title, const wchar_t* msg,
+                 const wchar_t* primary, bool danger,
+                 std::function<void()> on_confirm) {
+    auto& p = g_confirm();
+    p.open = true;
+    p.t.enter(0.0f, 14.0f, 0.26f);
+    p.title = title; p.message = msg; p.primary_label = primary;
+    p.danger = danger;
+    p.on_confirm = std::move(on_confirm);
+}
+void closeConfirm() {
+    auto& p = g_confirm();
+    p.open = false;
+    p.t.exit(0.0f, 14.0f, 0.18f);
+}
+
+void paintConfirmModal(Graphics& g, int Wpx, int Hpx) {
+    auto& p = g_confirm();
+    if (p.t.value() < 0.001f && !p.open) return;
+    const Palette& pal = palette();
+    float t = p.t.value();
+    if (t < 0.001f) return;
+    auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
+
+    SolidBrush dim(Color((BYTE)(170 * t), 0, 0, 0));
+    g.FillRectangle(&dim, 0, 0, Wpx, Hpx);
+
+    float mw = 360.0f, mh = 180.0f;
+    float mx = (Wpx - mw) / 2.0f;
+    float my = (Hpx - mh) / 2.0f + p.t.dy();
+    drawShadow(g, mx, my, mw, mh, 16.0f, fade(Color(160, 0, 0, 0)), 6.0f, 4);
+    fillRR(g, mx, my, mw, mh, 16.0f, fade(pal.card));
+
+    drawText_(g, p.title.c_str(), mx + 26, my + 22, mw - 52, 14.0f,
+              fade(pal.text), StringAlignmentNear, FontStyleBold);
+    drawText_(g, p.message.c_str(), mx + 26, my + 56, mw - 52, 9.5f, fade(pal.text_muted));
+
+    float by = my + mh - 52;
+    RectF cb(mx + 26, by, 100, 32);
+    bool ch = inRect(g_mouse, cb);
+    fillRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, ch ? fade(pal.bg) : fade(pal.card));
+    strokeRR(g, cb.X, cb.Y, cb.Width, cb.Height, 8.0f, fade(pal.divider));
+    drawText_(g, L"取消", cb.X, cb.Y + 9, cb.Width, 9.5f, fade(pal.text),
+              StringAlignmentCenter, FontStyleBold);
+    hit(cb, [](){ closeConfirm(); }, true);
+
+    RectF sb(mx + mw - 26 - 110, by, 110, 32);
+    bool sh = inRect(g_mouse, sb);
+    Color base = p.danger ? Color(255, 0xE3, 0x4B, 0x4B) : pal.primary;
+    Color hover = p.danger ? Color(255, 0xFF, 0x6B, 0x6B) : pal.primary_hover;
+    fillRR(g, sb.X, sb.Y, sb.Width, sb.Height, 8.0f, fade(sh ? hover : base));
+    drawText_(g, p.primary_label.c_str(), sb.X, sb.Y + 9, sb.Width, 9.5f,
+              Color((BYTE)(255 * t), 255, 255, 255), StringAlignmentCenter, FontStyleBold);
+    hit(sb, [](){
+        auto& pp = g_confirm();
+        auto fn = pp.on_confirm;
+        closeConfirm();
+        if (fn) fn();
+    }, true);
+
+    hit(RectF(0, 0, (REAL)Wpx, my), [](){ closeConfirm(); }, true);
+    hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), [](){ closeConfirm(); }, true);
+    hit(RectF(0, my, mx, mh), [](){ closeConfirm(); }, true);
+    hit(RectF(mx + mw, my, Wpx - (mx + mw), mh), [](){ closeConfirm(); }, true);
+}
+
+// ============================================================
 // CS2 modal
 // ============================================================
 
 
 bool g_cs2_open = false;
-Tween g_cs2_t;
+tx::Slide g_cs2_t;            // modal 入场：translateY 12→0 + op 0→1
 
 void openCS2() {
     g_cs2_open = true;
-    g_cs2_t.start(g_cs2_t.value(), 1.0f, 0.30f, 0, curve::easeOutBack);
+    g_cs2_t.enter(0.0f, 12.0f, 0.30f);
 }
 void closeCS2() {
     g_cs2_open = false;
-    g_cs2_t.start(g_cs2_t.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
+    g_cs2_t.exit(0.0f, 12.0f, 0.20f);
 }
 
 // CS2 thumb cache
@@ -234,7 +662,7 @@ void paintCS2Modal(Graphics& g, int Wpx, int Hpx) {
     float mw = std::min(720.0f, (float)Wpx - 80.0f);
     float mh = std::min(560.0f, (float)Hpx - 80.0f);
     float mx = (Wpx - mw) / 2;
-    float my = (Hpx - mh) / 2 + 12 * (1.0f - t);
+    float my = (Hpx - mh) / 2 + g_cs2_t.dy();
 
     drawShadow(g, mx, my, mw, mh, 16, fade(Color(160, 0, 0, 0)), 8, 6);
     fillRR(g, mx, my, mw, mh, 16, fade(pal.card));
@@ -443,7 +871,7 @@ void paintHistoryModalNew(Graphics& g, int Wpx, int Hpx) {
     if (mw > Wpx - 40) mw = Wpx - 40.0f;
     float mh = std::min(520.0f, (float)Hpx - 60.0f);
     float mx = (Wpx - mw) / 2;
-    float my = (Hpx - mh) / 2 + 12 * (1.0f - t);
+    float my = (Hpx - mh) / 2 + g_overlay_t.dy();
 
     drawShadow(g, mx, my, mw, mh, 16, fade(Color(180, 0, 0, 0)), 8, 6);
     fillRR(g, mx, my, mw, mh, 16, fade(pal.card));
@@ -461,7 +889,7 @@ void paintHistoryModalNew(Graphics& g, int Wpx, int Hpx) {
     icons::drawSvg(g, icons::Name::X, xr.X + 4, xr.Y + 4, 18, fade(pal.text_muted));
     hit(xr, [](){
         g_overlay = Overlay::None;
-        g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
+        g_overlay_t.exit(0.0f, 8.0f, 0.20f);
     }, true);
 
     // rows — 5/page
@@ -535,13 +963,13 @@ void paintHistoryModalNew(Graphics& g, int Wpx, int Hpx) {
               StringAlignmentCenter, FontStyleBold);
     hit(cb, [](){
         g_overlay = Overlay::None;
-        g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
+        g_overlay_t.exit(0.0f, 8.0f, 0.20f);
     }, true);
 
     // 点外部关闭 — 4 环形 hit（避开 modal 内部，否则会阻断 ✕ / 关闭 / 翻页按钮）
     auto closeModal = [](){
         g_overlay = Overlay::None;
-        g_overlay_t.start(g_overlay_t.value(), 0, 0.20f, 0, curve::easeOutCubic);
+        g_overlay_t.exit(0.0f, 8.0f, 0.20f);
     };
     hit(RectF(0, 0, (REAL)Wpx, my), closeModal, true);                              // 上
     hit(RectF(0, my + mh, (REAL)Wpx, Hpx - (my + mh)), closeModal, true);            // 下

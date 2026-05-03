@@ -31,6 +31,10 @@
 #include <algorithm>
 #include <unordered_map>
 #include <map>
+#include <memory>
+#include <atomic>
+#include <mutex>
+#include <deque>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -372,6 +376,10 @@ struct Tween {
     }
 };
 
+// transitions.inl 依赖 Tween + curve::*，必须在 Tween 定义之后引入。
+// 之后的全局变量声明（g_cs2_t、g_dropdown_t...）以及 modals/chat_view.inl 都用得上 tx::Slide/Fade/Scale。
+#include "transitions.inl"
+
 // ====================================================================
 // 状态
 // ====================================================================
@@ -407,8 +415,8 @@ Tween g_card_scale, g_card_opacity, g_card_fade_out;
 Tween g_window_w, g_window_h;
 Tween g_sidebar_x, g_topbar_y, g_main_opacity;
 Tween g_view_fade;
-Tween g_dropdown_t;
-Tween g_overlay_t;
+tx::Fade  g_dropdown_t;       // 账户 dropdown popover：op 0↔1
+tx::Slide g_overlay_t;        // History 模态：translateY 8→0 + op 0↔1
 // Dot 阶段：起始小点
 Tween g_dot_size, g_dot_alpha;
 Tween g_auth_card_y, g_auth_card_op;
@@ -427,6 +435,12 @@ struct UserInfo {
     const wchar_t* expires   = L"2026-05-09";
     const wchar_t* last_login= L"05-02 10:32";
 } g_user;
+
+// 个人标签 — 启动后从 /api/profile/tags 拉取；离线时退化为占位 4 个
+std::vector<std::wstring> g_user_tags = {
+    L"CS2", L"Premier 18k", L"东京机房", L"私服管理员"
+};
+std::mutex g_user_tags_mu;
 
 // 用户头像（运行期）— 选了头像后存路径 + 加载 GDI+ Image，所有 avatar 渲染处优先用它
 struct AvatarCache {
@@ -754,6 +768,12 @@ inline Font* get(float size_pt, FontStyle style = FontStyleRegular) {
 }  // namespace fontcache
 
 void buildRoundRect(GraphicsPath& p, REAL x, REAL y, REAL w, REAL h, REAL r) {
+    // 钳一下：调用方有时传 r=999 表示"全圆/胶囊"，但 4 段 arc 用 r*2 做 bounding box，
+    // r > min(w,h)/2 时 arc 椭圆会超出 rect 几个量级，path 退化成扭曲怪形 →
+    // 在右上角 hover 那 84x32 pill 上能看到一片渲染撕裂。这里钳到 min(w,h)/2。
+    REAL rmax = (w < h ? w : h) * 0.5f;
+    if (r > rmax) r = rmax;
+    if (r < 0) r = 0;
     p.Reset();
     p.AddArc(x, y, r*2, r*2, 180, 90);
     p.AddArc(x+w-r*2, y, r*2, r*2, 270, 90);
@@ -899,9 +919,307 @@ const float kTopbarH  = 48.0f;
 #include "icons.inl"
 #include "net.inl"
 #include "transitions.inl"
+// modals.inl/chat_view.inl 引用主程序定义 — 这里前向声明
+void submitAddTag();
+void submitCreatePack();
+void submitRenamePack();
+void requestRenamePack(int idx);
+void requestDeletePack(int idx);
+void requestSharePack(int idx);
 #include "modals.inl"
 #include "market_view.inl"
 #include "chat_view.inl"
+
+// ====================================================================
+// 个人标签 user_tags — 启动后异步 GET /api/profile/tags + 添加 modal submit
+// ====================================================================
+inline void fetchUserTags(HWND notify) {
+    if (g_session_token.empty()) return;
+    struct A { HWND h; };
+    A* a = new A{notify};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/profile/tags?session_token=" + g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (!r.ok()) { delete a; return 0; }
+        std::vector<std::wstring> tags;
+        size_t pos = 0;
+        // body 形如 {"tags":["CS2","Premier 18k",...]}
+        auto p1 = r.body.find("\"tags\":[");
+        if (p1 == std::string::npos) { delete a; return 0; }
+        pos = p1 + 8;
+        while (true) {
+            auto q1 = r.body.find('"', pos);
+            if (q1 == std::string::npos) break;
+            auto q2 = r.body.find('"', q1 + 1);
+            if (q2 == std::string::npos) break;
+            std::string s = r.body.substr(q1 + 1, q2 - q1 - 1);
+            int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+            std::wstring w(n > 0 ? n - 1 : 0, 0);
+            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+            tags.push_back(std::move(w));
+            pos = q2 + 1;
+            if (pos < r.body.size() && r.body[pos] == ']') break;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_user_tags_mu);
+            g_user_tags = std::move(tags);
+        }
+        PostMessageW(a->h, WM_APP + 15, 1, 0);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// modal 提交按钮 → POST /api/profile/tags/add
+void submitAddTag() {
+    auto& p = modal::g_tag();
+    p.error.clear();
+    std::wstring tag = p.input.text;
+    while (!tag.empty() && (tag.front() == L' ' || tag.front() == L'\t')) tag.erase(tag.begin());
+    while (!tag.empty() && (tag.back()  == L' ' || tag.back()  == L'\t')) tag.pop_back();
+    if (tag.empty()) { p.error = L"请输入标签内容"; return; }
+    if (tag.size() > 24) { p.error = L"最多 24 字"; return; }
+    if (g_session_token.empty()) { p.error = L"未登录"; return; }
+    p.busy = true;
+    struct A { std::wstring tag; HWND h; };
+    A* a = new A{tag, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"tag\":\"" + net::jsonEscape(a->tag) + "\"}";
+        auto r = net::postJson(L"/api/profile/tags/add", body);
+        PostMessageW(a->h, WM_APP + 16, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// ====================================================================
+// 表情包分组 sticker_packs — create / rename / delete / share
+// ====================================================================
+
+// 拉取自己的 pack 列表 (GET /api/sticker/packs/mine) 并填进 chatv::packs()
+inline void fetchMyPacks(HWND notify) {
+    if (g_session_token.empty()) return;
+    struct A { HWND h; };
+    A* a = new A{notify};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string url = "/api/sticker/packs/mine?session_token=" + g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), "", L"");
+        if (!r.ok()) { delete a; return 0; }
+        // body 形如 [{"id":"uuid","name":"foo","short_name":"bar","install_count":0,"cover_url":null}, ...]
+        // 顺序解析每个 object 的 id + name
+        auto& ps = chatv::packs();
+        // 保留 ps[0]（系统 emoji）+ "我的表情" 默认；其他清空重建
+        std::vector<chatv::Pack> kept;
+        for (auto& p : ps) if (p.is_system || p.name == L"我的表情") kept.push_back(p);
+        ps = std::move(kept);
+        size_t pos = 0;
+        while (true) {
+            auto ip = r.body.find("\"id\":\"", pos);
+            if (ip == std::string::npos) break;
+            ip += 6;
+            auto ie = r.body.find('"', ip);
+            std::string id = r.body.substr(ip, ie - ip);
+            auto np = r.body.find("\"name\":\"", ie);
+            if (np == std::string::npos) break;
+            np += 8;
+            auto ne = r.body.find('"', np);
+            std::string name_utf8 = r.body.substr(np, ne - np);
+            int wn = MultiByteToWideChar(CP_UTF8, 0, name_utf8.c_str(), -1, nullptr, 0);
+            std::wstring name(wn > 0 ? wn - 1 : 0, 0);
+            if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, name_utf8.c_str(), -1, name.data(), wn);
+            // 已存在则跳过
+            bool dup = false;
+            for (auto& p : ps) if (p.id == id) { dup = true; break; }
+            if (!dup) {
+                chatv::Pack p; p.id = id; p.name = std::move(name);
+                ps.push_back(std::move(p));
+            }
+            pos = ne;
+        }
+        PostMessageW(a->h, WM_APP + 18, 1, 0);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 创建 pack — 点 modal "创建" 按钮
+void submitCreatePack() {
+    auto& p = modal::g_create_pack();
+    p.error.clear();
+    std::wstring name = p.input.text;
+    while (!name.empty() && (name.front() == L' ' || name.front() == L'\t')) name.erase(name.begin());
+    while (!name.empty() && (name.back()  == L' ' || name.back()  == L'\t')) name.pop_back();
+    if (name.empty()) { p.error = L"请输入分组名"; return; }
+    if (name.size() > 24) { p.error = L"最多 24 字"; return; }
+    if (g_session_token.empty()) { p.error = L"未登录"; return; }
+    p.busy = true;
+    struct A { std::wstring name; HWND h; };
+    A* a = new A{name, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"name\":\"" + net::jsonEscape(a->name)
+            + "\",\"is_public\":false}";
+        auto r = net::postJson(L"/api/sticker/pack", body);
+        PostMessageW(a->h, WM_APP + 19, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 重命名：弹 modal 输入新名 → 提交后 POST /api/sticker/pack/rename
+void requestRenamePack(int idx) {
+    auto& ps = chatv::packs();
+    if (idx <= 0 || idx >= (int)ps.size()) return;
+    if (ps[idx].id.empty()) {
+        g_toast.show(L"该分组未同步到云端，无法重命名");
+        return;
+    }
+    modal::openRenamePack(idx, ps[idx].id, ps[idx].name);
+}
+
+void submitRenamePack() {
+    auto& p = modal::g_rename_pack();
+    p.error.clear();
+    std::wstring nm = p.input.text;
+    while (!nm.empty() && (nm.front() == L' ' || nm.front() == L'\t')) nm.erase(nm.begin());
+    while (!nm.empty() && (nm.back()  == L' ' || nm.back()  == L'\t')) nm.pop_back();
+    if (nm.empty()) { p.error = L"请输入新名字"; return; }
+    if (nm.size() > 24) { p.error = L"最多 24 字"; return; }
+    if (g_session_token.empty()) { p.error = L"未登录"; return; }
+    p.busy = true;
+    struct A { std::string id; std::wstring nm; HWND h; };
+    A* a = new A{p.pack_id, nm, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"pack_id\":\"" + a->id
+            + "\",\"new_name\":\"" + net::jsonEscape(a->nm) + "\"}";
+        auto r = net::postJson(L"/api/sticker/pack/rename", body);
+        PostMessageW(a->h, WM_APP + 20, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 分享：POST /share，返回 short_name → 拷到剪贴板 + toast
+void requestSharePack(int idx) {
+    auto& ps = chatv::packs();
+    if (idx <= 0 || idx >= (int)ps.size()) return;
+    if (ps[idx].id.empty() || g_session_token.empty()) {
+        g_toast.show(L"该分组未同步到云端");
+        return;
+    }
+    struct A { std::string id; HWND h; };
+    A* a = new A{ps[idx].id, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"pack_id\":\"" + a->id + "\",\"is_public\":true}";
+        auto r = net::postJson(L"/api/sticker/pack/share", body);
+        if (r.ok()) {
+            std::string sn = net::jsonStr(r.body, "short_name");
+            // 拷到剪贴板
+            std::string url = "https://154.40.36.22:1337/sticker/" + sn;
+            int n = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
+            std::wstring wu(n > 0 ? n - 1 : 0, 0);
+            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wu.data(), n);
+            if (OpenClipboard(a->h)) {
+                EmptyClipboard();
+                size_t bytes = (wu.size() + 1) * sizeof(wchar_t);
+                HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                if (hg) {
+                    void* p = GlobalLock(hg);
+                    memcpy(p, wu.c_str(), bytes);
+                    GlobalUnlock(hg);
+                    SetClipboardData(CF_UNICODETEXT, hg);
+                }
+                CloseClipboard();
+            }
+            PostMessageW(a->h, WM_APP + 21, 1, 0);
+        } else {
+            PostMessageW(a->h, WM_APP + 21, 0, (LPARAM)(intptr_t)r.status);
+        }
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 删除：弹确认 → POST /delete → fetchMyPacks 刷新
+void requestDeletePack(int idx) {
+    auto& ps = chatv::packs();
+    if (idx <= 0 || idx >= (int)ps.size()) return;
+    std::wstring name = ps[idx].name;
+    std::string id = ps[idx].id;
+    wchar_t msg[160];
+    swprintf_s(msg, 160, L"确定要删除「%ls」吗？分组里所有云端表情都会一起清掉，无法恢复。",
+               name.c_str());
+    modal::openConfirm(L"删除分组", msg, L"删除", true, [id, idx](){
+        // 本地立即移除
+        auto& ps = chatv::packs();
+        if (idx >= 0 && idx < (int)ps.size()) {
+            ps.erase(ps.begin() + idx);
+            if (chatv::activePack() >= (int)ps.size()) chatv::activePack() = 0;
+        }
+        if (id.empty() || g_session_token.empty()) {
+            g_toast.show(L"已本地删除（未同步到云端）");
+            return;
+        }
+        struct A { std::string id; HWND h; };
+        A* a = new A{id, g_hwnd};
+        CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+            auto* a = (A*)lp;
+            std::string body = std::string("{\"session_token\":\"") + g_session_token
+                + "\",\"pack_id\":\"" + a->id + "\"}";
+            auto r = net::postJson(L"/api/sticker/pack/delete", body);
+            PostMessageW(a->h, WM_APP + 22, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+            delete a;
+            return 0;
+        }, a, 0, nullptr);
+    });
+}
+
+// ====================================================================
+// 用户状态 status 同步 — 切状态时 POST /api/profile/status
+// ====================================================================
+inline void syncUserStatus(const wchar_t* status_key) {
+    if (g_session_token.empty()) return;
+    struct A { std::wstring k; HWND h; };
+    A* a = new A{status_key, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"status\":\"" + net::jsonEscape(a->k) + "\"}";
+        net::postJson(L"/api/profile/status", body);
+        // 不弹 toast — 默默同步；本地已经立刻反映到 UI
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// 异步删除一个 tag（chip 上 hover 时显示 ✕ 由 paintHomeView 处理；这里是 op）
+void removeUserTag(const std::wstring& tag) {
+    if (g_session_token.empty()) return;
+    struct A { std::wstring tag; HWND h; };
+    A* a = new A{tag, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"tag\":\"" + net::jsonEscape(a->tag) + "\"}";
+        net::postJson(L"/api/profile/tags/remove", body);
+        // 不管成功失败都重新拉一次 — 拉取结果是真正的真理
+        PostMessageW(a->h, WM_APP + 17, 0, 0);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
+}
+
 
 struct MenuEntry { View view; const char* key; icons::Name icon; };
 const MenuEntry kMenu[] = {
@@ -962,8 +1280,8 @@ void paintTopbar(Graphics& g, int Wpx) {
         wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
         g.DrawString(initial, -1, &af, avrect, &fmt, &avf);
     }
-    // 在线徽章
-    Color stC = pal.status_online;
+    // 状态徽章 — 跟 g_status 联动（在线/繁忙/离开/睡眠/离线）
+    Color stC = chatv::statusColor(pal, statusKey(g_status));
     SolidBrush stB(stC);
     g.FillEllipse(&stB, ax + ar*2 - 7.0f, ay + ar*2 - 7.0f, 7.0f, 7.0f);
     Pen ring(pal.bg, 2.0f);
@@ -973,9 +1291,8 @@ void paintTopbar(Graphics& g, int Wpx) {
     RectF avHit(pill_x, ty, pill_w + 16.0f, kTopbarH);
     hit(avHit, [](){
         g_account_dropdown = !g_account_dropdown;
-        g_dropdown_t.start(g_dropdown_t.value(),
-                           g_account_dropdown ? 1.0f : 0.0f,
-                           0.18f, 0, curve::easeOutBack);
+        if (g_account_dropdown) g_dropdown_t.enter(0.18f);
+        else                    g_dropdown_t.exit(0.15f);
     }, true);
 }
 
@@ -1085,6 +1402,8 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
                 g_status = target;
                 g_status_fold_open = false;
                 g_status_fold_t.start(g_status_fold_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                // 后端同步：写 users.status 并 WS 广播给所有在线用户
+                syncUserStatus(statusKey(target));
             }, true);
             iy += 24 * ft;
         }
@@ -1101,22 +1420,22 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
     Item items[] = {
         { "acc.profile",  icons::Name::User, [](){
               switchView(View::Profile); g_account_dropdown=false;
-              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
+              g_dropdown_t.exit(0.15f); }, false },
         { "acc.history",  icons::Name::History, [](){
               g_overlay = Overlay::History;
-              g_overlay_t.start(0,1,0.25f,0,curve::easeOutCubic);
+              g_overlay_t.enter(0.0f, 8.0f, 0.25f);
               g_account_dropdown=false;
-              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic); }, false },
+              g_dropdown_t.exit(0.15f); }, false },
         { "acc.password", icons::Name::Shield, [](){
               modal::openChangePw();
               g_account_dropdown = false;
-              g_dropdown_t.start(g_dropdown_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
+              g_dropdown_t.exit(0.15f);
         }, false },
         { "acc.signout",  icons::Name::Logout, [](){
               // 清除存储的凭据，回到 Auth
               persist::clearCreds();
               g_account_dropdown = false;
-              g_dropdown_t.start(g_dropdown_t.value(),0,0.15f,0,curve::easeOutCubic);
+              g_dropdown_t.exit(0.15f);
               // 回到 Auth：重置表单 + 切 stage
               g_auth_form.username.text.clear(); g_auth_form.username.cursor = 0; g_auth_form.username.clearSel();
               g_auth_form.password.text.clear(); g_auth_form.password.cursor = 0; g_auth_form.password.clearSel();
@@ -1161,7 +1480,7 @@ void registerDropdownDismissHits(int Wpx, int Hpx) {
     auto dismiss = [](){
         g_account_dropdown = false;
         g_status_fold_open = false;
-        g_dropdown_t.start(g_dropdown_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
+        g_dropdown_t.exit(0.15f);
         g_status_fold_t.start(g_status_fold_t.value(), 0, 0.15f, 0, curve::easeOutCubic);
     };
     // 4 环形 hit 避开 dropdown 本身 + topbar trigger 区
@@ -1256,11 +1575,12 @@ void paintHomeView(Graphics& g, RectF area) {
         wchar_t initial[2] = { (wchar_t)towupper(g_user.nickname[0]), 0 };
         g.DrawString(initial, -1, &af, avr, &fmt, &avF);
     }
-    // online dot 14x14, right 2 bottom 2, ring 3px card
+    // online dot 14x14, right 2 bottom 2, ring 3px card — 跟 g_status 联动
+    Color cur_status_c = chatv::statusColor(pal, statusKey(g_status));
     float dotR = 7.0f;
     float dx = avx + avR*2 - dotR*2 - 2.0f;
     float dy = avy + avR*2 - dotR*2 - 2.0f;
-    SolidBrush stB(fade(pal.status_online));
+    SolidBrush stB(fade(cur_status_c));
     g.FillEllipse(&stB, dx, dy, dotR*2, dotR*2);
     Pen ring(fade(pal.card), 3.0f);
     g.DrawEllipse(&ring, dx, dy, dotR*2, dotR*2);
@@ -1271,9 +1591,9 @@ void paintHomeView(Graphics& g, RectF area) {
               14.0f, fade(pal.text), StringAlignmentNear, FontStyleBold);
     drawText_(g, g_user.email, idX, cy + 56, cw - (idX - cx) - 26,
               10.0f, fade(pal.text_muted));
-    SolidBrush gn(fade(pal.status_online));
+    SolidBrush gn(fade(cur_status_c));
     g.FillEllipse(&gn, idX, cy + 84.0f, 6.0f, 6.0f);
-    drawText_(g, L"Online", idX + 12, cy + 80, 80, 8.5f, fade(pal.text_muted));
+    drawText_(g, statusLabel(g_status, g_lang), idX + 12, cy + 80, 80, 8.5f, fade(pal.text_muted));
 
     // meta divider
     Pen sep(fade(pal.divider), 1.0f);
@@ -1308,7 +1628,7 @@ void paintHomeView(Graphics& g, RectF area) {
                       StringAlignmentCenter, FontStyleBold);
             hit(link, [](){
                 g_overlay = Overlay::History;
-                g_overlay_t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+                g_overlay_t.enter(0.0f, 8.0f, 0.25f);
             }, true);
         }
         ry += 22.0f;
@@ -1370,37 +1690,53 @@ void paintHomeView(Graphics& g, RectF area) {
                   Color((BYTE)(220 * op), 255, 255, 255));
     }
 
-    // 个人标签（chips）
+    // 个人标签（chips）— 接 user_tags 表
     float ty2 = xy + xh + 16;
     drawText_(g, L"我的标签", cx, ty2, 200, 9.0f, fade(pal.text_muted),
               StringAlignmentNear, FontStyleBold);
-    static const wchar_t* kTags[] = { L"CS2", L"Premier 18k", L"东京机房", L"私服管理员", L"+ 添加" };
+    // 拷贝一份避免持锁画图
+    std::vector<std::wstring> tags_copy;
+    {
+        std::lock_guard<std::mutex> lk(g_user_tags_mu);
+        tags_copy = g_user_tags;
+    }
     float tag_x = cx;
     float tag_y = ty2 + 22;
-    for (int i = 0; i < (int)(sizeof(kTags)/sizeof(kTags[0])); ++i) {
-        bool is_add = (i == (int)(sizeof(kTags)/sizeof(kTags[0])) - 1);
-        float tw = measureText(g, kTags[i], 8.5f).Width + 24;
+    for (auto& tag : tags_copy) {
+        // padding 跟旧版一致 (+24)，文字在整 chip 宽度内居中。
+        // 删除 ✕ 不占文字布局，hover 时浮在 chip 右上角外侧。
+        float tw = measureText(g, tag.c_str(), 8.5f).Width + 24;
         bool thov = inRect(g_mouse, RectF(tag_x, tag_y, tw, 26));
-        Color tagBg = is_add
-            ? fade(Color(0, 0, 0, 0))
-            : fade(Color((BYTE)(36), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB()));
-        if (!is_add) {
-            fillRR(g, tag_x, tag_y, tw, 26, 13.0f, tagBg);
-        } else {
-            strokeRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.divider));
-        }
-        if (thov && is_add) {
-            fillRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.bg));
-        }
-        drawText_(g, kTags[i], tag_x, tag_y + 7, tw, 8.5f,
-                  is_add ? fade(pal.text_muted) : fade(pal.primary),
-                  StringAlignmentCenter, FontStyleBold);
-        if (is_add) {
-            hit(RectF(tag_x, tag_y, tw, 26), [](){
-                g_toast.show(L"标签自定义功能规划中（接后端 user_tags）");
-            }, true);
+        Color tagBg = fade(Color((BYTE)(36), pal.primary.GetR(), pal.primary.GetG(), pal.primary.GetB()));
+        fillRR(g, tag_x, tag_y, tw, 26, 13.0f, tagBg);
+        drawText_(g, tag.c_str(), tag_x, tag_y + 7, tw, 8.5f,
+                  fade(pal.primary), StringAlignmentCenter, FontStyleBold);
+        // hover 时显示一个小 ✕ 圆形浮在 chip 右上角 (-3, -3) 外侧 — 不挤压文字。
+        if (thov) {
+            float bx = tag_x + tw - 9, by = tag_y - 3;
+            SolidBrush bb(fade(pal.surface));
+            g.FillEllipse(&bb, bx, by, 14.0f, 14.0f);
+            Pen pp(fade(pal.divider), 1.0f);
+            g.DrawEllipse(&pp, bx, by, 14.0f, 14.0f);
+            drawText_(g, L"✕", bx, by + 1, 14, 7.5f, fade(pal.text_muted), StringAlignmentCenter);
+            std::wstring tag_capt = tag;
+            hit(RectF(bx, by, 14, 14), [tag_capt](){ removeUserTag(tag_capt); }, true);
         }
         tag_x += tw + 8;
+        // 换行（避免超出卡片宽度）
+        if (tag_x > area.X + area.Width - 120) {
+            tag_x = cx; tag_y += 32;
+        }
+    }
+    // "+ 添加" chip
+    {
+        float tw = measureText(g, L"+ 添加", 8.5f).Width + 24;
+        bool thov = inRect(g_mouse, RectF(tag_x, tag_y, tw, 26));
+        strokeRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.divider));
+        if (thov) fillRR(g, tag_x, tag_y, tw, 26, 13.0f, fade(pal.bg));
+        drawText_(g, L"+ 添加", tag_x, tag_y + 7, tw, 8.5f, fade(pal.text_muted),
+                  StringAlignmentCenter, FontStyleBold);
+        hit(RectF(tag_x, tag_y, tw, 26), [](){ modal::openAddTag(); }, true);
     }
 }
 
@@ -1739,7 +2075,7 @@ void paintHistoryOverlay(Graphics& g, int Wpx, int Hpx) {
     float cw = (float)Wpx - 80;
     float ch = (float)Hpx - 80;
     float cx = (Wpx - cw) / 2;
-    float cy = (Hpx - ch) / 2 + 8 * (1.0f - t);
+    float cy = (Hpx - ch) / 2 + g_overlay_t.dy();
     auto fade = [&](Color c) { return Color((BYTE)(c.GetA() * t), c.GetR(), c.GetG(), c.GetB()); };
     Color cardC((BYTE)(255 * t), pal.card.GetR(), pal.card.GetG(), pal.card.GetB());
     drawShadow(g, cx, cy, cw, ch, 12.0f, Color((BYTE)(80 * t), 0, 0, 0), 6.0f, 5);
@@ -1751,7 +2087,7 @@ void paintHistoryOverlay(Graphics& g, int Wpx, int Hpx) {
     bool xh = inRect(g_mouse, x);
     if (xh) fillRR(g, x.X, x.Y, x.Width, x.Height, 5.0f, fade(pal.surface));
     drawText_(g, L"✕", x.X, x.Y + 4, x.Width, 10.0f, fade(pal.text), StringAlignmentCenter);
-    hit(x, [](){ g_overlay = Overlay::None; g_overlay_t.start(g_overlay_t.value(), 0, 0.18f, 0, curve::easeOutCubic); }, true);
+    hit(x, [](){ g_overlay = Overlay::None; g_overlay_t.exit(0.0f, 8.0f, 0.18f); }, true);
 
     Pen sep(fade(pal.divider), 1.0f);
     g.DrawLine(&sep, cx + 18, cy + 42, cx + cw - 18, cy + 42);
@@ -1781,7 +2117,7 @@ void paintHistoryOverlay(Graphics& g, int Wpx, int Hpx) {
     hit(outer, [inner](){
         if (!inRect(g_mouse, inner)) {
             g_overlay = Overlay::None;
-            g_overlay_t.start(g_overlay_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+            g_overlay_t.exit(0.0f, 8.0f, 0.18f);
         }
     }, true);
 }
@@ -2042,6 +2378,10 @@ void paintMain(Graphics& g, int Wpx, int Hpx) {
     registerDropdownDismissHits(Wpx, Hpx);
     modal::paintCS2Modal(g, Wpx, Hpx);
     modal::paintChangePwModal(g, Wpx, Hpx);
+    modal::paintAddTagModal(g, Wpx, Hpx);
+    modal::paintCreatePackModal(g, Wpx, Hpx);
+    modal::paintRenamePackModal(g, Wpx, Hpx);
+    modal::paintConfirmModal(g, Wpx, Hpx);
 
     // toast 在最顶层
     if (!g_toast.text.empty() && g_toast.t.value() > 0.001f) {
@@ -2244,6 +2584,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CHAR: {
             wchar_t c = (wchar_t)wp;
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            // 添加标签 / 创建分组 modal 输入优先（最浅层）
+            if (modal::g_tag().open) {
+                auto& tt = modal::g_tag();
+                tt.input.onChar(c, ctrl, hwnd);
+                if (c == L'\r' || c == L'\n') submitAddTag();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+            }
+            if (modal::g_create_pack().open) {
+                auto& tt = modal::g_create_pack();
+                tt.input.onChar(c, ctrl, hwnd);
+                if (c == L'\r' || c == L'\n') submitCreatePack();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+            }
+            if (modal::g_rename_pack().open) {
+                auto& tt = modal::g_rename_pack();
+                tt.input.onChar(c, ctrl, hwnd);
+                if (c == L'\r' || c == L'\n') submitRenamePack();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                break;
+            }
             // 修改密码 modal 输入优先（任何 stage 都能用）
             if (modal::g_pw().open) {
                 auto& pp = modal::g_pw();
@@ -2303,6 +2665,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN: {
             bool shift_dn = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool ctrl_dn  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (modal::g_tag().open) {
+                auto& tt = modal::g_tag();
+                tt.input.onKey((int)wp, shift_dn, ctrl_dn);
+                if (wp == VK_ESCAPE) modal::closeAddTag();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (modal::g_create_pack().open) {
+                auto& tt = modal::g_create_pack();
+                tt.input.onKey((int)wp, shift_dn, ctrl_dn);
+                if (wp == VK_ESCAPE) modal::closeCreatePack();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (modal::g_rename_pack().open) {
+                auto& tt = modal::g_rename_pack();
+                tt.input.onKey((int)wp, shift_dn, ctrl_dn);
+                if (wp == VK_ESCAPE) modal::closeRenamePack();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (modal::g_confirm().open) {
+                if (wp == VK_ESCAPE) modal::closeConfirm();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (modal::g_pw().open) {
                 auto& pp = modal::g_pw();
                 if (wp == VK_TAB) {
@@ -2334,11 +2722,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (modal::g_cs2_open) {
                     modal::closeCS2();
                 } else if (g_overlay != Overlay::None) {
-                    g_overlay_t.start(g_overlay_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                    g_overlay_t.exit(0.0f, 8.0f, 0.18f);
                     g_overlay = Overlay::None;
                 } else if (chatv::g_picker_open) {
                     chatv::g_picker_open = false;
-                    chatv::g_picker_t.start(chatv::g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                    chatv::g_picker_t.exit(0.94f, 0.18f);
                 } else {
                     hideToTray(hwnd);
                 }
@@ -2405,8 +2793,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_auth_succeeded = true;
                 g_check_anim.start(0.0f, 1.0f, 0.45f, 0, curve::easeOutBack);
                 SetTimer(hwnd, 0xA2, 850, nullptr);
-                // 登录成功后立即拉取频道映射
+                // 登录成功后立即拉取频道映射 + 起 WS 实时接收 + 同步个人 stickers + 拉个人标签
                 chatv::fetchOfficialChannels(hwnd);
+                chatv::startWebSocket(hwnd);
+                chatv::fetchMyStickers(hwnd);
+                fetchMyPacks(hwnd);
+                fetchUserTags(hwnd);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -2435,6 +2827,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 10: {
+            // WS 推送了一条消息 — 把后台线程暂存的 pending drain 进 streamFor，再重绘
+            chatv::drainWsInbox();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -2459,6 +2853,96 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int status = (int)(intptr_t)lp;
                 if (status == 413) g_toast.show(L"表情包已达 50 张上限");
             }
+            return 0;
+        }
+        case WM_APP + 14: {
+            // 启动期同步了 N 张云端 sticker — 弹一次轻 toast，方便用户感知
+            int n = (int)wp;
+            wchar_t msg[80];
+            swprintf_s(msg, 80, L"已同步 %d 张云端表情", n);
+            g_toast.show(msg);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 15: {
+            // tags 拉取/刷新完成
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 16: {
+            // 添加标签结果
+            auto& p = modal::g_tag();
+            p.busy = false;
+            if (wp == 1) {
+                modal::closeAddTag();
+                fetchUserTags(hwnd);   // 拉最新列表
+                g_toast.show(L"标签已添加 ✓");
+            } else {
+                int status = (int)(intptr_t)lp;
+                if (status == 413) p.error = L"已达 20 个标签上限";
+                else if (status == 400) p.error = L"标签内容无效";
+                else p.error = L"添加失败（网络或后端拒绝）";
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 17: {
+            // tag 删除完后重新拉
+            fetchUserTags(hwnd);
+            return 0;
+        }
+        case WM_APP + 18: {
+            // pack 列表已同步
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 19: {
+            // 创建 pack 结果
+            auto& p = modal::g_create_pack();
+            p.busy = false;
+            if (wp == 1) {
+                modal::closeCreatePack();
+                fetchMyPacks(hwnd);
+                g_toast.show(L"分组已创建 ✓");
+            } else {
+                int status = (int)(intptr_t)lp;
+                if (status == 400) p.error = L"分组名无效";
+                else p.error = L"创建失败（网络或后端拒绝）";
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 20: {
+            // 重命名 pack 结果
+            auto& p = modal::g_rename_pack();
+            p.busy = false;
+            if (wp == 1) {
+                // 本地立即更新名字
+                auto& ps = chatv::packs();
+                if (p.pack_idx >= 0 && p.pack_idx < (int)ps.size())
+                    ps[p.pack_idx].name = p.input.text;
+                modal::closeRenamePack();
+                g_toast.show(L"分组已重命名 ✓");
+            } else {
+                int status = (int)(intptr_t)lp;
+                if (status == 403) p.error = L"无权限";
+                else if (status == 400) p.error = L"名字无效";
+                else p.error = L"重命名失败";
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 21: {
+            // 分享 pack 结果
+            if (wp == 1) g_toast.show(L"分享链接已复制到剪贴板 ✓");
+            else g_toast.show(L"分享失败（网络或后端拒绝）");
+            return 0;
+        }
+        case WM_APP + 22: {
+            // 删除 pack 结果（本地已先删；这里只确认云端）
+            if (wp == 1) g_toast.show(L"分组已删除 ✓");
+            else g_toast.show(L"云端删除失败 — 重启会重新拉取");
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_TIMER:
@@ -2630,8 +3114,14 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
     DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
     DragAcceptFiles(g_hwnd, TRUE);   // 接收文件拖拽
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
-    // 已有 session — 立即拉官方频道映射（chat send 用 uuid）
-    if (!g_session_token.empty()) chatv::fetchOfficialChannels(g_hwnd);
+    // 已有 session — 立即拉官方频道映射（chat send 用 uuid）+ 起 WS 实时接收 + 同步 stickers + 拉 tags
+    if (!g_session_token.empty()) {
+        chatv::fetchOfficialChannels(g_hwnd);
+        chatv::startWebSocket(g_hwnd);
+        chatv::fetchMyStickers(g_hwnd);
+        fetchMyPacks(g_hwnd);
+        fetchUserTags(g_hwnd);
+    }
 
     // 自动登录 — 注册表里有凭据就直接进 main，跳过 Auth
     std::wstring saved_user, saved_pass;
@@ -2659,8 +3149,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         g_topbar_y.elapsed = 999;
         if (overlayHistory) {
             g_overlay = Overlay::History;
-            g_overlay_t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
-            g_overlay_t.elapsed = 999;
+            g_overlay_t.enter(0.0f, 8.0f, 0.25f);
+            g_overlay_t.finish();
         }
     } else {
         // 完整入场动画：Dot → Loading → ...（auto_login 时走 g_skip_auth_after_loading 标记跳过 Auth）
@@ -2707,6 +3197,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         modal::g_pw().old_pw.float_t.tick(dt);
         modal::g_pw().new_pw.float_t.tick(dt);
         modal::g_pw().confirm_pw.float_t.tick(dt);
+        modal::g_tag().t.tick(dt);
+        modal::g_tag().input.float_t.tick(dt);
+        modal::g_create_pack().t.tick(dt);
+        modal::g_create_pack().input.float_t.tick(dt);
+        modal::g_rename_pack().t.tick(dt);
+        modal::g_rename_pack().input.float_t.tick(dt);
+        modal::g_confirm().t.tick(dt);
 
         // 入场流程驱动
         auto resize_to_tween = [&]() {
@@ -2743,11 +3240,11 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
         bool any_anim = active(g_card_scale) || active(g_card_opacity) || active(g_card_fade_out)
             || active(g_window_w) || active(g_window_h)
             || active(g_sidebar_x) || active(g_topbar_y) || active(g_main_opacity)
-            || active(g_view_fade) || active(g_dropdown_t) || active(g_overlay_t)
+            || active(g_view_fade) || g_dropdown_t.active() || g_overlay_t.active()
             || active(g_auth_card_op) || active(g_auth_card_y)
             || active(g_dot_size) || active(g_dot_alpha)
-            || active(g_status_fold_t) || active(modal::g_cs2_t)
-            || active(chatv::g_picker_t)
+            || active(g_status_fold_t) || modal::g_cs2_t.active()
+            || chatv::g_picker_t.active()
             || active(g_auth_form.username.float_t)
             || active(g_auth_form.password.float_t)
             || active(g_auth_form.invite.float_t);

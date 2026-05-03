@@ -177,4 +177,115 @@ inline Resp uploadMultipart(const wchar_t* path,
     return request(L"POST", path, body, ct);
 }
 
+// ====================================================================
+// WebSocket 客户端 (WinHTTP 官方栈，Windows 8+)
+// ====================================================================
+// 用法：
+//   net::WsClient ws;
+//   ws.connect(L"/ws/chat?session_token=...", [](const std::string& body) {
+//       // 在后台线程被调用，body 是单条 text frame
+//   });
+//   // 后台线程持续 receive 直到 close 或 error。
+//   ws.close();
+//
+// 内部用 WinHttpWebSocketCompleteUpgrade 把普通 HTTP 句柄升级成 WS，
+// 然后在专用线程里循环 WinHttpWebSocketReceive 收 frame 拼接 message。
+struct WsClient {
+    HINTERNET h_con{nullptr};
+    HINTERNET h_req{nullptr};
+    HINTERNET h_ws{nullptr};
+    HANDLE    h_thread{nullptr};
+    std::atomic<bool> stop{false};
+
+    using OnMessage = std::function<void(const std::string&)>;
+
+    bool connect(const std::wstring& path, OnMessage on_msg) {
+        HINTERNET ses = sharedSession();
+        if (!ses) return false;
+        h_con = WinHttpConnect(ses, kHost, kPort, 0);
+        if (!h_con) return false;
+        h_req = WinHttpOpenRequest(h_con, L"GET", path.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!h_req) { WinHttpCloseHandle(h_con); h_con = nullptr; return false; }
+
+        // 同 request：跳 TLS 校验（IP cert / 自签）
+        DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+                   | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+                   | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+        WinHttpSetOption(h_req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+
+        // 标记该请求要升级成 WebSocket
+        if (!WinHttpSetOption(h_req, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
+            cleanup(); return false;
+        }
+        if (!WinHttpSendRequest(h_req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            cleanup(); return false;
+        }
+        if (!WinHttpReceiveResponse(h_req, nullptr)) {
+            cleanup(); return false;
+        }
+        DWORD status = 0; DWORD szs = sizeof(status);
+        WinHttpQueryHeaders(h_req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            nullptr, &status, &szs, nullptr);
+        if (status != 101) { cleanup(); return false; }
+
+        h_ws = WinHttpWebSocketCompleteUpgrade(h_req, 0);
+        if (!h_ws) { cleanup(); return false; }
+        // 升级成功后 h_req 不需要主动关 — h_ws 拥有它的生命周期
+        WinHttpCloseHandle(h_req); h_req = nullptr;
+
+        // 起 receive 线程
+        struct Arg { WsClient* self; OnMessage cb; };
+        Arg* a = new Arg{ this, std::move(on_msg) };
+        h_thread = CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+            std::unique_ptr<Arg> a((Arg*)lp);
+            std::string accum;
+            BYTE buf[4096];
+            while (!a->self->stop.load()) {
+                DWORD got = 0;
+                WINHTTP_WEB_SOCKET_BUFFER_TYPE bt;
+                DWORD st = WinHttpWebSocketReceive(a->self->h_ws, buf, sizeof(buf), &got, &bt);
+                if (st != NO_ERROR) break;
+                if (bt == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) break;
+                if (bt == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE
+                    || bt == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE) {
+                    accum.append((char*)buf, got);
+                    continue;
+                }
+                if (bt == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+                    || bt == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
+                    accum.append((char*)buf, got);
+                    if (a->cb) a->cb(accum);
+                    accum.clear();
+                }
+            }
+            return 0;
+        }, a, 0, nullptr);
+        return h_thread != nullptr;
+    }
+
+    void close() {
+        stop.store(true);
+        if (h_ws) {
+            WinHttpWebSocketClose(h_ws,
+                WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        }
+        if (h_thread) {
+            WaitForSingleObject(h_thread, 2000);
+            CloseHandle(h_thread); h_thread = nullptr;
+        }
+        cleanup();
+    }
+    ~WsClient() { close(); }
+
+private:
+    void cleanup() {
+        if (h_ws)  { WinHttpCloseHandle(h_ws);  h_ws  = nullptr; }
+        if (h_req) { WinHttpCloseHandle(h_req); h_req = nullptr; }
+        if (h_con) { WinHttpCloseHandle(h_con); h_con = nullptr; }
+    }
+};
+
 }  // namespace net

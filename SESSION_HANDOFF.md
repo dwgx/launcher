@@ -4,8 +4,11 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-03 06:05**
+最后更新：**2026-05-03 08:15**
 最后 commit：**`d966cd6`** feat(preview): sticker 真上传 + transitions 框架
+（**未提交**：WS receive + sticker/mine + transitions 真用上 + user_tags + 右上角 wedge bug fix
++ pack 重构（右侧 tab 带 + 创建/重命名/删除/分享 modal）+ status 同步后端联动）
+**已部署后端**：migration 0010_user_status 应用 + 新 7 端点上线 ✓
 GitHub：https://github.com/dwgx/launcher (private, master)
 
 ### 最近 10 个 commit（这一轮的密集改动）
@@ -64,6 +67,9 @@ aa96f04  chat 内嵌图片/视频粘贴 + 拖拽文件 + GDI+ image bubble
                         admin/oldhand/newhand/user 中文头衔) + user_tags
                         ⚠ 改过 hash 后 _sqlx_migrations DELETE row 9 重跑过
                         ⚠ 表 owner = helix（兜底 ALTER OWNER 在 SQL 里）
+0010_user_status        users.status TEXT 'online' + users.last_seen TIMESTAMPTZ + index
+                        ⚠ 这一轮手动 psql 应用（避开 sqlx 编译期 query check 死锁）
+                        + INSERT _sqlx_migrations row 10 防启动重跑
 ```
 
 ### 新加 API（这一轮）
@@ -82,6 +88,28 @@ config.toml 新字段:
   media_image_max_bytes  = 8MB
   media_video_max_bytes  = 32MB
   media_generic_max_bytes = 100MB
+```
+
+### 新加 API（这一轮 — 已部署 ✓）
+
+```
+GET  /api/sticker/mine?session_token=       自己上传过的所有 sticker（含 media_url）
+                                            供同账号在另一台机启动后同步本地缓存
+GET  /api/profile/tags?session_token=       个人标签列表 → {"tags":[...]}
+POST /api/profile/tags/add                  body: {session_token, tag}; 20/user, 24 字
+POST /api/profile/tags/remove               body: {session_token, tag}
+POST /api/profile/status                    body: {session_token, status: online|busy|away|sleep|offline}
+                                            写 users.status + ws::broadcast_all 推 {"type":"status"}
+POST /api/sticker/pack/rename               {session_token, pack_id, new_name} owner check + 24 字
+POST /api/sticker/pack/delete               {session_token, pack_id} CASCADE 删 pack_items + user_sticker_packs
+                                            + 删该用户在此 pack 唯一引用的孤儿 stickers
+POST /api/sticker/pack/share                {session_token, pack_id, is_public} → {short_name, is_public}
+                                            short_name = pack_id 前 12 字 hex (复用)
+chat::send  官方频道改用 ws::broadcast_all  之前只对 chat_members fanout，但官方频道无 members 行
+                                            导致 WS receive 收不到自己发的；现在广播给全在线
+heartbeat   写 users.last_seen = now()      离线判定靠 (now - last_seen) > N
+migration 0010_user_status                  users.status TEXT default 'online' + last_seen TIMESTAMPTZ
+                                            + idx_users_last_seen
 ```
 
 ### API（全部 /api 前缀，session_token 鉴权）
@@ -278,14 +306,20 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 ### 用户明确点过但还没做（高优先）
 
-1. **WS receive** — `WinHttpWebSocketCompleteUpgrade` 后台线程接 /ws/chat?session_token=…
-   收到 message JSON 解析 → push 进 streamFor(channel) → PostMessage WM_APP+10 触发重绘
-   （已经有 WM_APP+10 的 case 处理但没实际接收）
-2. **启动拉取已上传 stickers** — GET /api/sticker/mine（需新加 endpoint）
-   下载 media 到本地 cache + 加进 userPack — 用户在另一台机也能看到自己上传的
-3. **UI 层迁移到 transitions.inl** — 把现有零散 Tween 调用包装成 tx::Slide / tx::Fade / tx::Scale
-   modal 入场 / view 切换 / popover 都用统一 transition 接口
-4. **个人标签接 user_tags 表** — Home view "+添加" → modal 输入 → POST 持久化
+1. ~~**WS receive**~~ ✓ 这一轮做了：`net::WsClient` 用 `WinHttpWebSocketCompleteUpgrade` 升级 +
+   后台线程 `WinHttpWebSocketReceive` 循环 fragment/message，解析 JSON → `chatv::WsInbox` 队列 →
+   PostMessage WM_APP+10 → UI 线程 drain 到 `streamFor(slug)`。需要 backend 部署后才能真验证。
+2. ~~**启动拉取已上传 stickers**~~ ✓ 后端加 `GET /api/sticker/mine` (sticker.rs 新 fn `my_stickers`) +
+   主路由表加进去。客户端 `chatv::fetchMyStickers(hwnd)` 启动后异步 GET +
+   下载 media 到 `%LOCALAPPDATA%/Launcher/stickers/<sha>.<ext>` + 加进 `userPack()`。
+3. ~~**UI 迁移到 transitions.inl**~~ ✓ `g_cs2_t` (CS2 modal) / `g_pw().t` (修改密码) /
+   `g_overlay_t` (登录历史) → `tx::Slide`；`g_dropdown_t` (账户菜单) → `tx::Fade`；
+   `g_picker_t` (emoji picker) → `tx::Scale`。`tx::Slide` 默认在 Y 轴用 easeOutBack，弹一下更自然。
+   `transitions.inl` 加 `.value()` (兼容旧 Tween.value 调用) / `.dy()` / `.scale()` / `.finish()`。
+4. ~~**个人标签接 user_tags 表**~~ ✓ 后端 `/api/profile/tags` GET / `/add` POST / `/remove` POST，
+   20/user 上限 + 24 字单标签。客户端 `g_user_tags` (mutex 保护) + `fetchUserTags` /
+   `submitAddTag` / `removeUserTag` 异步线程；Home chip 真用列表渲染 + hover 显 ✕；
+   `modal::AddTag` (tx::Slide) 弹窗输入 + Enter 提交。WM_APP+15/16/17 三个回调。
 
 ### 大件（用户没明说但合理）
 
@@ -298,7 +332,10 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 ### 已知 bug / 用户报但难复现
 
-- 用户多次报"右上角割裂"截图 — PrintWindow 自测复现不出，可能是窗口被拖到屏幕外的截图边缘伪影
+- ~~用户多次报"右上角割裂"截图~~ ✓ 这一轮终于找到了：`buildRoundRect` 没钳 `r`，
+  pill hover bg 调 `fillRR(... 999.0f)` 想表"全圆胶囊"，但 4 个 arc 用 r*2=1998
+  做 bounding box 远超 84×32 pill rect，path 退化成扭曲怪形 fill 出一片大块。
+  修在 `buildRoundRect` 里 `r = min(r, min(w,h)/2)`。鼠标飘到 dwgx avatar 上立即复现。
 - 用户反馈 modal fade in 中间帧文字消失 — 也是截图时机问题，稳态自测正常
 
 ---
