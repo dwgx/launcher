@@ -200,6 +200,54 @@ void detectSystemLanguage() {
 }
 
 // ====================================================================
+// HWID — Preview 简易版：ComputerName + UserName + 系统盘 VolumeSerial
+//        SHA-256 → 64 hex 字符。后端 /api/auth/{login,register} 强制 64 字。
+//        正式版（Phase 1.5+）走 14 个硬件源，详见 src/native/hwid。
+// ====================================================================
+inline std::string hwidHex() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+
+    std::wstring blob;
+    wchar_t cn[256] = {0}; DWORD cnsz = 256;
+    if (GetComputerNameW(cn, &cnsz)) blob.append(cn, cnsz);
+    blob.push_back(L'|');
+    wchar_t un[256] = {0}; DWORD unsz = 256;
+    if (GetUserNameW(un, &unsz)) blob.append(un, unsz - 1);
+    blob.push_back(L'|');
+    DWORD volSerial = 0;
+    if (GetVolumeInformationW(L"C:\\", nullptr, 0, &volSerial,
+                              nullptr, nullptr, nullptr, 0)) {
+        wchar_t vs[16]; swprintf_s(vs, 16, L"%08X", volSerial);
+        blob.append(vs);
+    }
+    // wide → utf8
+    int n = WideCharToMultiByte(CP_UTF8, 0, blob.c_str(), (int)blob.size(),
+                                 nullptr, 0, nullptr, nullptr);
+    std::string utf8(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, blob.c_str(), (int)blob.size(),
+                        utf8.data(), n, nullptr, nullptr);
+
+    // SHA-256 (CryptAPI; advapi32 已经 link)
+    HCRYPTPROV prov = 0; HCRYPTHASH h = 0;
+    BYTE hash[32] = {0};
+    if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES,
+                             CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
+        if (CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
+            CryptHashData(h, (const BYTE*)utf8.data(), (DWORD)utf8.size(), 0);
+            DWORD hsz = 32;
+            CryptGetHashParam(h, HP_HASHVAL, hash, &hsz, 0);
+            CryptDestroyHash(h);
+        }
+        CryptReleaseContext(prov, 0);
+    }
+    char out[65] = {0};
+    for (int i = 0; i < 32; ++i) sprintf_s(out + i * 2, 3, "%02x", hash[i]);
+    cached.assign(out, 64);
+    return cached;
+}
+
+// ====================================================================
 // Persist — 隐秘注册表持久化（lang/theme/凭据）
 //   策略：写死 30 个候选路径（伪装成系统/Office/MuiCache 子键），启动遍历找
 //   _m magic = 'LUNC' 的那一个。没找到就按 GetTickCount 随机选一个写入。
@@ -1432,8 +1480,22 @@ void paintAccountDropdown(Graphics& g, int Wpx) {
               g_dropdown_t.exit(0.15f);
         }, false },
         { "acc.signout",  icons::Name::Logout, [](){
-              // 清除存储的凭据，回到 Auth
+              // 退出登录：1) 调后端删 session（best-effort 异步） 2) 清隐秘注册表凭据
+              //          3) 清内存 token/uid 4) 重置 UI 回 Auth
+              if (!g_session_token.empty()) {
+                  std::string* tok = new std::string(g_session_token);
+                  CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+                      auto* t = (std::string*)lp;
+                      std::string body = std::string("{\"session_token\":\"") + *t + "\"}";
+                      net::postJson(L"/api/auth/logout", body);
+                      delete t; return 0;
+                  }, tok, 0, nullptr);
+              }
+              // 关 WS（防止后台还在收推送）
+              chatv::wsClient().close();
               persist::clearCreds();
+              g_session_token.clear();
+              g_user_id.clear();
               g_account_dropdown = false;
               g_dropdown_t.exit(0.15f);
               // 回到 Auth：重置表单 + 切 stage
@@ -2746,19 +2808,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_auth_form.error_msg = L"注册需要邀请码";
             else {
                 g_auth_form.busy = true;
-                persist::saveCreds(user, pass);
+                // 不再这里 saveCreds — 等真登录/注册成功才存（避免错账号被持久化）
                 struct Arg { std::wstring u, p; HWND h; bool reg; std::wstring inv; };
                 Arg* a = new Arg{user, pass, hwnd, g_auth_mode == AuthMode::Register, inv};
                 CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
                     auto* a = (Arg*)lp;
+                    std::string hwid = hwidHex();
                     std::string body = std::string("{\"username\":\"") + net::jsonEscape(a->u)
                         + "\",\"password\":\"" + net::jsonEscape(a->p)
-                        + "\",\"hwid_hex\":\"launcher-preview-demo\",\"client_ver\":\"0.1\"}";
+                        + "\",\"hwid_hex\":\"" + hwid + "\",\"client_ver\":\"0.1\"}";
                     const wchar_t* path = a->reg ? L"/api/auth/register" : L"/api/auth/login";
                     if (a->reg) {
                         body = std::string("{\"username\":\"") + net::jsonEscape(a->u)
                             + "\",\"password\":\"" + net::jsonEscape(a->p)
-                            + "\",\"hwid_hex\":\"launcher-preview-demo\",\"client_ver\":\"0.1\","
+                            + "\",\"hwid_hex\":\"" + hwid + "\",\"client_ver\":\"0.1\","
                             + "\"invite_code\":\"" + net::jsonEscape(a->inv) + "\"}";
                     }
                     auto r = net::postJson(path, body);
@@ -2767,6 +2830,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         std::string uid = net::jsonStr(r.body, "user_id");
                         g_session_token = tok;
                         g_user_id = uid;
+                        // 真成功才落盘 — DPAPI 加密存 _u / _p；session 存 _s / _x
+                        persist::saveCreds(a->u, a->p);
                         if (!tok.empty()) persist::saveSession(tok, uid);
                         PostMessageW(a->h, WM_APP + 2, 1, 0);
                     } else {
