@@ -47,6 +47,7 @@ bool D2DApp::init(HWND hwnd, int physical_w, int physical_h) {
     texts_.init(dwrite_.Get());
     strokes_.init(d2d_factory_.Get());
     images_.init(d2d_ctx_.Get(), wic_.Get());
+    gifs_.init(d2d_ctx_.Get(), wic_.Get());
 
     initialized_ = true;
     return true;
@@ -54,6 +55,7 @@ bool D2DApp::init(HWND hwnd, int physical_w, int physical_h) {
 
 void D2DApp::shutdown() {
     if (!initialized_) return;
+    gifs_.release();
     images_.release();
     strokes_.release();
     texts_.release();

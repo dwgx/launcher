@@ -266,9 +266,25 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
     // ---------- 媒体气泡 (Image/Gif/Video) ----------
     if (m.kind == MsgKind::Image || m.kind == MsgKind::Gif) {
         float bub_w = 240, bub_h = 180;
-        auto* bmp = app.images().fromFile(m.body);
-        if (bmp) {
-            D2D1_SIZE_F sz = bmp->GetSize();
+        ID2D1Bitmap* draw_bmp = nullptr;
+        D2D1_SIZE_F sz = { 0, 0 };
+
+        if (m.kind == MsgKind::Gif) {
+            // GIF 多帧 — IWICBitmapDecoder GetFrameCount + /grctlext/Delay
+            auto* anim = app.gifs().fromFile(m.body);
+            if (anim) {
+                draw_bmp = app.gifs().frameAt(anim, stages::g_time_in_stage);
+                sz.width = (float)anim->width;
+                sz.height = (float)anim->height;
+            }
+        }
+        if (!draw_bmp) {
+            // Image 或 GIF 解码失败 → 退到单帧 ID2D1Bitmap
+            draw_bmp = app.images().fromFile(m.body);
+            if (draw_bmp) sz = draw_bmp->GetSize();
+        }
+
+        if (draw_bmp) {
             if (sz.width > 0 && sz.height > 0) {
                 float aspect = sz.height / sz.width;
                 float max_w = (std::min)(maxw * 0.55f, 320.0f);
@@ -276,13 +292,11 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                 bub_h = bub_w * aspect;
                 if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
             }
-            // 圆角裁剪：用 PushAxisAlignedClip + bmp draw
             ctx->PushAxisAlignedClip(D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
                                      D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            ctx->DrawBitmap(bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
+            ctx->DrawBitmap(draw_bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
                             1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             ctx->PopAxisAlignedClip();
-            // 圆角描边覆盖
             prim::strokeRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
                            br.solidA(pal.divider, 0.5f), 1.0f);
         } else {
@@ -294,7 +308,6 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                             DWRITE_TEXT_ALIGNMENT_CENTER);
         }
         if (m.kind == MsgKind::Gif) {
-            // GIF 标识
             prim::fillRR(ctx, bub_x + bub_w - 36, bub_y + 6, 30, 16, 4,
                          br.solidA(0x000000, 0.55f));
             auto* gif_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f),
@@ -756,9 +769,20 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                     prim::fillRR(ctx, ex, ey, cell, cell, 6,
                                  br.solidA(pal.primary, t * 0.12f));
                 }
-                auto* bmp = app.images().fromFile(cur_pack.stickers[i]);
-                if (bmp) {
-                    ctx->DrawBitmap(bmp,
+                // sticker 也可能是 GIF — 优先 GifCache
+                ID2D1Bitmap* sticker_bmp = nullptr;
+                std::wstring sp = cur_pack.stickers[i];
+                auto sd = sp.find_last_of(L'.');
+                bool is_gif = (sd != std::wstring::npos
+                               && (sp.substr(sd) == L".gif"
+                                   || sp.substr(sd) == L".GIF"));
+                if (is_gif) {
+                    auto* sa = app.gifs().fromFile(sp);
+                    if (sa) sticker_bmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
+                }
+                if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp);
+                if (sticker_bmp) {
+                    ctx->DrawBitmap(sticker_bmp,
                         D2D1::RectF(ex + 4, ey + 4, ex + cell - 4, ey + cell - 4),
                         t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 }

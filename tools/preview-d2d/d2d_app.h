@@ -31,6 +31,7 @@
 #include "render/text_cache.h"
 #include "render/stroke_cache.h"
 #include "render/image_cache.h"
+#include "render/gif_cache.h"
 
 namespace launcher::d2d {
 
@@ -74,6 +75,7 @@ public:
     TextCache&   texts()    { return texts_; }
     StrokeCache& strokes()  { return strokes_; }
     ImageCache&  images()   { return images_; }
+    GifCache&    gifs()     { return gifs_; }
 
 private:
     void initD3D();
@@ -114,6 +116,7 @@ private:
     TextCache    texts_;
     StrokeCache  strokes_;
     ImageCache   images_;
+    GifCache     gifs_;
 
     int  pending_w_{};
     int  pending_h_{};
