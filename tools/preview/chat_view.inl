@@ -273,6 +273,39 @@ inline std::unordered_map<std::wstring, bool>& historyFetched() {
     return m;
 }
 
+// fwd
+inline std::wstring stickerCacheDir();
+
+// 远程 media URL "/api/media/<sha>/file.<ext>" → 下载到本地 cache 返回本地路径
+// 不在 cache 就先 GET 拉下来。同 sha 已下载直接返回。
+inline std::wstring downloadMediaToCache(const std::string& url_path) {
+    auto p1 = url_path.find("/api/media/");
+    if (p1 == std::string::npos) return L"";
+    p1 += 11;
+    auto p2 = url_path.find('/', p1);
+    if (p2 == std::string::npos) return L"";
+    std::string sha = url_path.substr(p1, p2 - p1);
+    auto dot = url_path.find_last_of('.');
+    std::string ext = (dot != std::string::npos) ? url_path.substr(dot + 1) : "bin";
+    std::wstring dir = stickerCacheDir();   // 复用 stickers 目录（也存其他媒体）
+    if (dir.empty()) return L"";
+    std::wstring fname = std::wstring(sha.begin(), sha.end())
+        + L"." + std::wstring(ext.begin(), ext.end());
+    std::wstring local = dir + fname;
+    if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::wstring wpath(url_path.begin(), url_path.end());
+        auto dr = net::request(L"GET", wpath.c_str(), "", L"");
+        if (!dr.ok()) return L"";
+        HANDLE f = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
+                               nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return L"";
+        DWORD wn = 0;
+        WriteFile(f, dr.body.data(), (DWORD)dr.body.size(), &wn, nullptr);
+        CloseHandle(f);
+    }
+    return local;
+}
+
 inline void fetchHistory(HWND notify_hwnd, const std::wstring& slug) {
     auto& m = slugToUuid();
     auto it = m.find(slug);
@@ -284,22 +317,21 @@ inline void fetchHistory(HWND notify_hwnd, const std::wstring& slug) {
     A* a = new A{slug, it->second, notify_hwnd};
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         auto* a = (A*)lp;
+        // 100 条最近（用户原话"最近 100 条"）
         std::string url = "/api/chat/history?session_token=" + ::g_session_token
-            + "&chat_id=" + a->uuid + "&limit=50";
+            + "&chat_id=" + a->uuid + "&limit=100";
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), "", L"");
         if (!r.ok()) {
-            historyFetched()[a->slug] = false;   // 失败：允许下次重试
+            historyFetched()[a->slug] = false;
             delete a; return 0;
         }
-        // body 是 [MessageOut, ...] 倒序（DESC）— 我们要正序贴到 streamFor 前面
         auto& b = wsInbox();
         std::vector<Msg> parsed;
         size_t pos = 0;
         while (true) {
             auto p_id = r.body.find("\"id\":", pos);
             if (p_id == std::string::npos) break;
-            // 取 sender_id / msg_type / payload.text
             auto next = r.body.find("\"id\":", p_id + 5);
             std::string seg = r.body.substr(p_id, (next == std::string::npos)
                                                   ? std::string::npos : next - p_id);
@@ -316,6 +348,25 @@ inline void fetchHistory(HWND notify_hwnd, const std::wstring& slug) {
                 pos = (next == std::string::npos) ? r.body.size() : next;
                 continue;
             }
+
+            // 媒体类型：把远程 URL 改成本地 cache path（同步下载）
+            std::wstring body_w;
+            bool is_media = (msg_type == "image" || msg_type == "gif"
+                          || msg_type == "sticker" || msg_type == "video");
+            if (is_media) {
+                std::wstring local = downloadMediaToCache(text);
+                if (!local.empty()) {
+                    loadMedia(local);   // 提前进 mediaCache
+                    body_w = local;
+                } else {
+                    // 下载失败 → 退化为 system 消息显示原 URL
+                    msg_type = "system";
+                    int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+                    body_w.assign(n > 0 ? n - 1 : 0, 0);
+                    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, body_w.data(), n);
+                }
+            }
+
             std::lock_guard<std::mutex> lk(b.mu);
             Msg m;
             bool is_me = (sender == ::g_user_id) && !sender.empty();
@@ -323,12 +374,18 @@ inline void fetchHistory(HWND notify_hwnd, const std::wstring& slug) {
             m.author = poolWString(b, sender);
             m.status = L"online";
             m.read = true; m.time = L"";
-            if (msg_type == "text")              { m.kind = MsgKind::Text;  m.body = poolWString(b, text); }
-            else if (msg_type == "image")        { m.kind = MsgKind::Image; m.body = poolWString(b, text); }
-            else if (msg_type == "gif"
-                  || msg_type == "sticker")      { m.kind = MsgKind::Gif;   m.body = poolWString(b, text); }
-            else if (msg_type == "video")        { m.kind = MsgKind::Video; m.body = poolWString(b, text); }
-            else                                 { m.kind = MsgKind::System;m.body = poolWString(b, text); }
+            if (msg_type == "text") {
+                m.kind = MsgKind::Text;  m.body = poolWString(b, text);
+            } else if (is_media && !body_w.empty()) {
+                if      (msg_type == "image")   m.kind = MsgKind::Image;
+                else if (msg_type == "video")   m.kind = MsgKind::Video;
+                else                            m.kind = MsgKind::Gif;
+                b.str_pool.push_back(body_w);
+                m.body = b.str_pool.back().c_str();
+            } else {
+                m.kind = MsgKind::System;
+                m.body = poolWString(b, text);
+            }
             parsed.push_back(m);
             pos = (next == std::string::npos) ? r.body.size() : next;
         }
@@ -732,29 +789,46 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
     // ---------- Image / GIF / Video 媒体气泡 ----------
     if (isImage || isGif || isVideo) {
         const Media* mm = loadMedia(m.body ? m.body : L"");
+        // 最小尺寸 — 防小源图(32x32 sticker)缩成纽扣大小，meta 覆到图上
+        const float bub_min_w = isGif ? 120.0f : 140.0f;
+        const float bub_min_h = isGif ?  90.0f : 100.0f;
         const float bub_max_w = std::min(maxw * 0.55f, 320.0f);
         float bub_w = 240.0f, bub_h = 180.0f;
         if (mm && mm->img && mm->width > 0 && mm->height > 0) {
             float aspect = (float)mm->height / (float)mm->width;
+            // 先按 max_w 拉到上限，再钳到 min；高度同理
             bub_w = std::min(bub_max_w, (float)mm->width);
+            if (bub_w < bub_min_w) bub_w = std::min(bub_max_w, bub_min_w);
             bub_h = bub_w * aspect;
             if (bub_h > 240.0f) { bub_h = 240.0f; bub_w = bub_h / aspect; }
+            if (bub_h < bub_min_h) bub_h = bub_min_h;
         } else if (isVideo) {
             bub_w = 260.0f; bub_h = 160.0f;
+        } else {
+            bub_w = bub_min_w; bub_h = bub_min_h;
         }
-        const float gutter_m = 38.0f;
-        float bub_x = me ? (x + maxw - 14.0f - bub_w) : (x + gutter_m);
+        const float gutter_m = 36.0f;
+        float bub_x = me ? (x + maxw - 12.0f - bub_w) : (x + gutter_m);
 
-        // 头像（非自己 + 非连续）
+        // 头像（非自己 + 非连续）— 缩到 12 半径跟文字气泡一致
         if (!me && !prev_same_author) {
-            drawAvatar(g, x, y + bub_h - 28.0f, 14.0f, m.author, m.status, palette());
+            drawAvatar(g, x, y + bub_h - 24.0f, 12.0f, m.author, m.status, palette());
         }
 
-        // 圆角裁剪 + 画图 / 视频封面
+        // 圆角裁剪 + 画图 / 视频封面（图片用 bicubic 插值跟 fit）
         GraphicsPath cp; buildRoundRect(cp, bub_x, y, bub_w, bub_h, 12.0f);
         g.SetClip(&cp);
         if (mm && mm->img) {
-            g.DrawImage(mm->img, RectF(bub_x, y, bub_w, bub_h));
+            // 等比 fit 到 bub_w x bub_h（保持 aspect）— 之前直接拉伸到 bub 让小图变形
+            float iw = (float)mm->width, ih = (float)mm->height;
+            float scale = std::min(bub_w / iw, bub_h / ih);
+            float dw = iw * scale, dh = ih * scale;
+            float dx = bub_x + (bub_w - dw) / 2;
+            float dy = y + (bub_h - dh) / 2;
+            // 先填一层 bg 防 letter-box 透明
+            SolidBrush bg2(Color(255, 0x18, 0x16, 0x14));
+            g.FillRectangle(&bg2, bub_x, y, bub_w, bub_h);
+            g.DrawImage(mm->img, RectF(dx, dy, dw, dh));
         } else {
             // video 没缩略 / 图片解码失败 — 纯色占位
             SolidBrush bg(Color(255, 0x28, 0x24, 0x20));
@@ -797,18 +871,26 @@ float paintBubble(Graphics& g, const Msg& m, float x, float y, float maxw,
                 }
             }, true);
         }
-        // time + 双勾
-        const Palette& palc = palette();
-        Color metaC(220, 255, 255, 255);
-        drawText_(g, m.time, bub_x, y + bub_h - 14.0f, bub_w - 10.0f,
-                  7.0f, metaC, StringAlignmentFar);
-        if (me) {
-            Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
-            icons::drawSvg(g, icons::Name::Check2,
-                           bub_x + bub_w - 24.0f, y + bub_h - 16.0f, 12.0f, tickC);
+        // time + 双勾 — 半透明黑色 pill 背景防 meta 浮在图上看不清
+        Color metaC(235, 255, 255, 255);
+        std::wstring time_w = m.time ? m.time : L"";
+        if (!time_w.empty() || me) {
+            float meta_t_w = measureText(g, time_w.c_str(), 7.0f).Width;
+            float tick_w = me ? 14.0f : 0.0f;
+            float pill_w = meta_t_w + tick_w + 12.0f;
+            float pill_h = 14.0f;
+            float pill_x = bub_x + bub_w - pill_w - 6.0f;
+            float pill_y = y + bub_h - pill_h - 6.0f;
+            fillRR(g, pill_x, pill_y, pill_w, pill_h, 7.0f, Color(120, 0, 0, 0));
+            drawText_(g, time_w.c_str(), pill_x + 4.0f, pill_y + 2.0f,
+                      meta_t_w + 4.0f, 7.0f, metaC, StringAlignmentNear);
+            if (me) {
+                Color tickC = m.read ? Color(255, 0x7D, 0xD3, 0xFC) : metaC;
+                icons::drawSvg(g, icons::Name::Check2,
+                               pill_x + pill_w - tick_w - 2.0f, pill_y + 1.0f, 11.0f, tickC);
+            }
         }
-        (void)palc;
-        return bub_h + 10.0f;
+        return bub_h + 6.0f;
     }
 
     // Telegram 风：紧凑 padding + meta 默认 inline（同行最右），文字塞不下才换行
@@ -1077,6 +1159,7 @@ struct Pack {
     std::wstring name;
     std::vector<std::wstring> stickers;   // 本地路径（已 loadMedia）
     std::vector<std::string>  sticker_ids;// 后端 uuid 同步用
+    std::wstring cover_path;     // 自定义封面本地路径（loadMedia 后用作 tab 缩略图）
     bool is_system{false};       // 系统 emoji（不可改/删）
     bool is_public{false};       // 已分享
 };
@@ -1346,9 +1429,13 @@ void importEmojiSingle() {
     ::g_toast.show(msg);
 }
 
-// 当前 pack 头部 kebab 菜单（点 ⋯ 弹）— 简化版，直接列三个选项
+// Pack 右键 context menu — 在 tab 上右键弹出（分享/重命名/更改缩略图/删除）
 struct PackMenu { bool open{false}; int pack_idx{-1}; float ax{0}, ay{0}; };
 inline PackMenu& packMenu() { static PackMenu m; return m; }
+
+// 头部 "+" 导入选项（单图 / 文件夹）小弹层
+struct ImportMenu { bool open{false}; float ax{0}, ay{0}; };
+inline ImportMenu& importMenu() { static ImportMenu m; return m; }
 
 void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
     if (g_picker_t.value() < 0.001f && !g_picker_open) return;
@@ -1377,56 +1464,21 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
     if (activePack() < 0 || activePack() >= (int)ps.size()) activePack() = 0;
     Pack& cur = ps[activePack()];
 
-    // header: pack name + 操作按钮
-    drawText_(g, cur.name.c_str(), content_x + 6, py + 12, content_w - 60, 11.0f,
+    // header — 简洁：左 pack name + 右 计数（用户 pack 时）
+    drawText_(g, cur.name.c_str(), content_x + 6, py + 12, content_w - 80, 11.0f,
               fade(pal.text), StringAlignmentNear, FontStyleBold);
-
-    // 用户 pack 才有 "+ 添加" / kebab 菜单 按钮
     if (!cur.is_system) {
-        // kebab "⋯" — 右侧倒数第 1 个
-        float bx = content_x + content_w - 26;
-        RectF mb(bx, py + 10, 24, 22);
-        bool mh = inRect(g_mouse, mb);
-        if (mh) fillRR(g, mb.X, mb.Y, mb.Width, mb.Height, 5, fade(pal.bg));
-        drawText_(g, L"⋯", mb.X, mb.Y + 2, mb.Width, 12.0f, fade(pal.text_muted),
-                  StringAlignmentCenter, FontStyleBold);
-        int idx_capt = activePack();
-        hit(mb, [idx_capt, mb](){
-            auto& m = packMenu();
-            m.open = !m.open || m.pack_idx != idx_capt;
-            m.pack_idx = idx_capt;
-            m.ax = mb.X; m.ay = mb.Y + 26;
-        }, true);
-
-        // "+图片" — 倒数第 2
-        float bx2 = content_x + content_w - 26 - 56;
-        RectF abi(bx2, py + 10, 50, 22);
-        bool ahi = inRect(g_mouse, abi);
-        fillRR(g, abi.X, abi.Y, abi.Width, abi.Height, 5,
-               fade(ahi ? pal.primary_hover : pal.primary));
-        drawText_(g, L"+ 图片", abi.X, abi.Y + 4, abi.Width, 8.0f,
-                  Color((BYTE)(255 * t), 255, 255, 255),
-                  StringAlignmentCenter, FontStyleBold);
-        hit(abi, [](){ importEmojiSingle(); }, true);
-
-        // "+文件夹" — 倒数第 3
-        float bx3 = bx2 - 60;
-        RectF abf(bx3, py + 10, 54, 22);
-        bool ahf = inRect(g_mouse, abf);
-        fillRR(g, abf.X, abf.Y, abf.Width, abf.Height, 5,
-               fade(ahf ? pal.primary_hover : pal.primary));
-        drawText_(g, L"+ 文件夹", abf.X, abf.Y + 4, abf.Width, 8.0f,
-                  Color((BYTE)(255 * t), 255, 255, 255),
-                  StringAlignmentCenter, FontStyleBold);
-        hit(abf, [](){ importEmojiFolder(); }, true);
+        wchar_t cap[40]; swprintf_s(cap, 40, L"%zu / %d", cur.stickers.size(), kPackMaxStickers);
+        drawText_(g, cap, content_x + content_w - 70, py + 14, 60, 7.5f,
+                  fade(pal.text_muted), StringAlignmentFar);
     }
 
     // 分隔
     Pen sep(fade(pal.divider), 1.0f);
-    g.DrawLine(&sep, content_x, py + 40, content_x + content_w, py + 40);
+    g.DrawLine(&sep, content_x, py + 36, content_x + content_w, py + 36);
 
     // body grid
-    float gy = py + 50;
+    float gy = py + 46;
     if (cur.is_system) {
         // 系统 emoji 8 列
         int n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
@@ -1451,36 +1503,57 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
             }, true);
         }
     } else {
-        // 用户 pack：5 列图片 grid + 计数
-        wchar_t cap[40]; swprintf_s(cap, 40, L"%zu / %d", cur.stickers.size(), kPackMaxStickers);
-        drawText_(g, cap, content_x + content_w - 70, py + 44, 64, 7.5f,
-                  fade(pal.text_muted), StringAlignmentFar);
-        if (cur.stickers.empty()) {
-            drawText_(g, L"点上方『+ 图片』或『+ 文件夹』添加（每组 ≤ 25）",
-                      content_x + 6, py + 76, content_w - 12, 8.5f, fade(pal.text_muted));
-        } else {
-            const float cell = (content_w - 4) / 5;
-            int n = std::min((int)cur.stickers.size(), 25);
-            for (int i = 0; i < n; ++i) {
-                int row = i / 5, col = i % 5;
-                float cx = content_x + 2 + col * (cell + 2);
-                float cy = gy + 8 + row * (cell + 2);
-                bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
-                if (hov) fillRR(g, cx, cy, cell, cell, 6, fade(pal.bg));
-                const Media* m = loadMedia(cur.stickers[i]);
-                if (m && m->img) {
-                    GraphicsPath cp; buildRoundRect(cp, cx + 2, cy + 2, cell - 4, cell - 4, 6);
-                    g.SetClip(&cp);
-                    g.DrawImage(m->img, RectF(cx + 2, cy + 2, cell - 4, cell - 4));
-                    g.ResetClip();
-                }
-                std::wstring path = cur.stickers[i];
-                hit(RectF(cx, cy, cell, cell), [path]() {
-                    appendMedia(path);
-                    g_picker_open = false;
-                    g_picker_t.exit(0.94f, 0.18f);
-                }, true);
+        // 用户 pack：5 列 grid，**第 0 个 cell = "+" 导入按钮**（用户原话"左上角点击 +"）
+        const float cell = (content_w - 4) / 5;
+        // grid index 0 总是 + 按钮
+        {
+            float cx = content_x + 2;
+            float cy = gy + 8;
+            bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
+            // 虚线圆角 + 大 "+"
+            Color bgC = hov ? fade(pal.bg) : fade(Color(0, 0, 0, 0));
+            fillRR(g, cx, cy, cell, cell, 8, bgC);
+            strokeRR(g, cx + 1, cy + 1, cell - 2, cell - 2, 8,
+                     hov ? fade(pal.primary) : fade(pal.divider), hov ? 1.4f : 1.0f);
+            Font af(kFontFace, cell * 0.4f, FontStyleBold, UnitPixel);
+            SolidBrush ab(hov ? fade(pal.primary) : fade(pal.text_muted));
+            StringFormat afmt; afmt.SetAlignment(StringAlignmentCenter); afmt.SetLineAlignment(StringAlignmentCenter);
+            g.DrawString(L"+", -1, &af, RectF(cx, cy, cell, cell), &afmt, &ab);
+            // 点击 → 弹小菜单 (单图 / 文件夹)
+            hit(RectF(cx, cy, cell, cell), [cx, cy](){
+                auto& m = importMenu();
+                m.open = !m.open;
+                m.ax = cx; m.ay = cy + 4;
+            }, true);
+        }
+        // 已有 stickers 从 index 1 开始
+        int n = std::min((int)cur.stickers.size(), kPackMaxStickers);
+        for (int i = 0; i < n; ++i) {
+            int slot = i + 1;        // 占位 0 给 "+"
+            int row = slot / 5, col = slot % 5;
+            float cx = content_x + 2 + col * (cell + 2);
+            float cy = gy + 8 + row * (cell + 2);
+            bool hov = inRect(g_mouse, RectF(cx, cy, cell, cell));
+            if (hov) fillRR(g, cx, cy, cell, cell, 6, fade(pal.bg));
+            const Media* m = loadMedia(cur.stickers[i]);
+            if (m && m->img) {
+                GraphicsPath cp; buildRoundRect(cp, cx + 2, cy + 2, cell - 4, cell - 4, 6);
+                g.SetClip(&cp);
+                g.DrawImage(m->img, RectF(cx + 2, cy + 2, cell - 4, cell - 4));
+                g.ResetClip();
             }
+            std::wstring path = cur.stickers[i];
+            hit(RectF(cx, cy, cell, cell), [path]() {
+                appendMedia(path);
+                g_picker_open = false;
+                g_picker_t.exit(0.94f, 0.18f);
+            }, true);
+        }
+        // 空 pack 提示文字 (在 + 按钮旁边)
+        if (cur.stickers.empty()) {
+            drawText_(g, L"← 点 + 添加表情（单图 / GIF / 文件夹）",
+                      content_x + cell + 10, gy + 8 + cell * 0.4f, content_w - cell - 16, 8.5f,
+                      fade(pal.text_muted));
         }
     }
 
@@ -1497,22 +1570,21 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
         if (active) {
             strokeRR(g, tr.X, tr.Y, tr.Width, tr.Height, 8, fade(pal.primary), 1.4f);
         }
+        // 缩略图优先级：cover_path（用户上传的） > 第一张 sticker > 首字母
+        const Media* thumb = nullptr;
+        if (!ps[i].cover_path.empty())   thumb = loadMedia(ps[i].cover_path);
+        if (!thumb && !ps[i].stickers.empty()) thumb = loadMedia(ps[i].stickers.front());
         if (ps[i].is_system) {
             Font ef(L"Segoe UI Emoji", 22.0f, FontStyleRegular, UnitPixel);
             SolidBrush eb(fade(pal.text));
             StringFormat efmt; efmt.SetAlignment(StringAlignmentCenter); efmt.SetLineAlignment(StringAlignmentCenter);
             g.DrawString(L"😀", -1, &ef, tr, &efmt, &eb);
-        } else if (!ps[i].stickers.empty()) {
-            // 用第一张作为 thumbnail
-            const Media* m = loadMedia(ps[i].stickers.front());
-            if (m && m->img) {
-                GraphicsPath cp; buildRoundRect(cp, tr.X + 6, tr.Y + 6, tr.Width - 12, tr.Height - 12, 6);
-                g.SetClip(&cp);
-                g.DrawImage(m->img, RectF(tr.X + 6, tr.Y + 6, tr.Width - 12, tr.Height - 12));
-                g.ResetClip();
-            }
+        } else if (thumb && thumb->img) {
+            GraphicsPath cp; buildRoundRect(cp, tr.X + 6, tr.Y + 6, tr.Width - 12, tr.Height - 12, 6);
+            g.SetClip(&cp);
+            g.DrawImage(thumb->img, RectF(tr.X + 6, tr.Y + 6, tr.Width - 12, tr.Height - 12));
+            g.ResetClip();
         } else {
-            // 空 pack：首字母
             wchar_t init[2] = { ps[i].name.empty() ? L'?' : (wchar_t)towupper(ps[i].name[0]), 0 };
             Font af(kFontFace, 14.0f, FontStyleBold, UnitPoint);
             SolidBrush ab(fade(pal.text_muted));
@@ -1520,7 +1592,18 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
             g.DrawString(init, -1, &af, tr, &afmt, &ab);
         }
         int idx_capt = i;
-        hit(tr, [idx_capt](){ activePack() = idx_capt; packMenu().open = false; }, true);
+        // 左键切 active；右键弹 context menu（只对用户 pack）
+        std::function<void()> rclick;
+        if (!ps[i].is_system) {
+            rclick = [idx_capt, tr](){
+                auto& m = packMenu();
+                m.open = true; m.pack_idx = idx_capt;
+                m.ax = tr.X - 130; m.ay = tr.Y;
+            };
+        }
+        hit_lr(tr,
+               [idx_capt](){ activePack() = idx_capt; packMenu().open = false; importMenu().open = false; },
+               rclick, true);
         ty += cell + 4;
     }
     // 末尾 "+" 创建 tab
@@ -1536,31 +1619,62 @@ void paintPicker(Graphics& g, float anchor_x, float anchor_y) {
         hit(tr, [](){ ::modal::openCreatePack(); }, true);
     }
 
-    // ---------------- kebab 菜单 (overlay) ----------------
-    auto& pm = packMenu();
-    if (pm.open && pm.pack_idx == activePack() && !cur.is_system) {
-        float mw = 130, mh = 96;
-        float mx = pm.ax - mw + 24;
-        float my = pm.ay;
+    // ---------------- 导入弹层 (单图 / 文件夹) ----------------
+    auto& im = importMenu();
+    if (im.open && !cur.is_system) {
+        float mw = 140, mh = 70;
+        float mx = im.ax;
+        float my = im.ay + 50.0f;          // 弹在 + 按钮下面
         if (mx + mw > px + pw) mx = px + pw - mw - 4;
+        if (my + mh > py + ph) my = im.ay - mh - 4;   // 不够下面就翻上面
         drawShadow(g, mx, my, mw, mh, 8, fade(pal.shadow_card), 3, 2);
         fillRR(g, mx, my, mw, mh, 8, fade(pal.card));
         strokeRR(g, mx, my, mw, mh, 8, fade(pal.divider));
-        struct Item { const wchar_t* label; std::function<void()> click; bool danger; };
+        struct Item { const wchar_t* label; std::function<void()> click; };
         Item items[] = {
-            { L"重命名", [](){ ::requestRenamePack(activePack()); packMenu().open = false; }, false },
-            { L"分享",   [](){ ::requestSharePack(activePack());   packMenu().open = false; }, false },
-            { L"删除",   [](){ ::requestDeletePack(activePack());   packMenu().open = false; }, true  },
+            { L"单张图片 / GIF", [](){ importEmojiSingle(); importMenu().open = false; } },
+            { L"整个文件夹",      [](){ importEmojiFolder(); importMenu().open = false; } },
         };
         float iy = my + 6;
         for (auto& it : items) {
             RectF r(mx + 4, iy, mw - 8, 26);
             bool h = inRect(g_mouse, r);
             if (h) fillRR(g, r.X, r.Y, r.Width, r.Height, 4, fade(pal.bg));
-            Color tc = it.danger ? fade(Color(255, 0xE3, 0x4B, 0x4B)) : fade(pal.text);
-            drawText_(g, it.label, r.X + 12, r.Y + 6, r.Width - 24, 9.0f, tc);
+            drawText_(g, it.label, r.X + 12, r.Y + 6, r.Width - 24, 9.0f, fade(pal.text));
             hit(r, it.click, true);
-            iy += 28;
+            iy += 30;
+        }
+    }
+
+    // ---------------- 右键 context menu (overlay) ----------------
+    auto& pm = packMenu();
+    if (pm.open && pm.pack_idx >= 0 && pm.pack_idx < (int)ps.size() && !ps[pm.pack_idx].is_system) {
+        float mw = 140, mh = 124;
+        float mx = pm.ax;
+        float my = pm.ay;
+        if (mx + mw > px + pw) mx = px + pw - mw - 4;
+        if (my + mh > py + ph) my = py + ph - mh - 4;
+        if (mx < px + 4) mx = px + 4;
+        drawShadow(g, mx, my, mw, mh, 8, fade(pal.shadow_card), 3, 2);
+        fillRR(g, mx, my, mw, mh, 8, fade(pal.card));
+        strokeRR(g, mx, my, mw, mh, 8, fade(pal.divider));
+        int idx_capt = pm.pack_idx;
+        struct Item { const wchar_t* label; std::function<void()> click; bool danger; };
+        Item items[] = {
+            { L"重命名",        [idx_capt](){ ::requestRenamePack(idx_capt);    packMenu().open = false; }, false },
+            { L"分享",          [idx_capt](){ ::requestSharePack(idx_capt);     packMenu().open = false; }, false },
+            { L"更改缩略图",    [idx_capt](){ ::requestChangePackCover(idx_capt); packMenu().open = false; }, false },
+            { L"删除",          [idx_capt](){ ::requestDeletePack(idx_capt);    packMenu().open = false; }, true  },
+        };
+        float iy = my + 4;
+        for (auto& it : items) {
+            RectF r(mx + 4, iy, mw - 8, 28);
+            bool h = inRect(g_mouse, r);
+            if (h) fillRR(g, r.X, r.Y, r.Width, r.Height, 4, fade(pal.bg));
+            Color tc = it.danger ? fade(Color(255, 0xE3, 0x4B, 0x4B)) : fade(pal.text);
+            drawText_(g, it.label, r.X + 12, r.Y + 7, r.Width - 24, 9.0f, tc);
+            hit(r, it.click, true);
+            iy += 30;
         }
     }
 }

@@ -119,6 +119,7 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/sticker/pack/rename",   post(sticker::rename_pack))
         .route("/sticker/pack/delete",   post(sticker::delete_pack))
         .route("/sticker/pack/share",    post(sticker::share_pack))
+        .route("/sticker/pack/cover",    post(sticker::set_pack_cover))
         .route("/sticker/packs/public",  get(sticker::list_public_packs))
         .route("/sticker/packs/mine",    get(sticker::my_packs))
         .route("/sticker/mine",          get(sticker::my_stickers))

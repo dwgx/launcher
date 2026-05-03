@@ -115,6 +115,14 @@ pub async fn create_pack(
         req.is_public.unwrap_or(true))
         .fetch_one(&s.db).await.map_err(internal)?;
 
+    // 创建者自动 install — 否则 /api/sticker/packs/mine 看不到自己创建的 pack
+    // (my_packs 走 user_sticker_packs join，需要这一行)
+    sqlx::query!(
+        r#"INSERT INTO user_sticker_packs (user_id, pack_id) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING"#,
+        me, row.id)
+        .execute(&s.db).await.ok();
+
     Ok(Json(PackOut {
         id: row.id.to_string(),
         name: req.name, short_name: req.short_name,
@@ -124,6 +132,42 @@ pub async fn create_pack(
         install_count: 0,
         stickers: vec![],
     }))
+}
+
+// ---------- 设置 pack 缩略图 ----------
+// 客户端先 POST /api/media/upload 拿 media_id，再调这里把它绑到 pack.cover_media_id
+#[derive(Deserialize)]
+pub struct SetCoverReq {
+    pub session_token: String,
+    pub pack_id:       Uuid,
+    pub media_id:      i64,
+}
+
+pub async fn set_pack_cover(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<SetCoverReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let pack = sqlx::query!(
+        "SELECT creator_id FROM sticker_packs WHERE id = $1", req.pack_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
+    if pack.creator_id != Some(me) {
+        return Err((StatusCode::FORBIDDEN, "not your pack".into()));
+    }
+    // 校验 media 存在
+    let exists = sqlx::query_scalar!(
+        "SELECT 1 as ok FROM media_files WHERE id = $1", req.media_id)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .is_some();
+    if !exists {
+        return Err((StatusCode::BAD_REQUEST, "media not found".into()));
+    }
+    sqlx::query!(
+        "UPDATE sticker_packs SET cover_media_id = $1 WHERE id = $2",
+        req.media_id, req.pack_id)
+        .execute(&s.db).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------- 给 pack 加 sticker ----------

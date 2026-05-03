@@ -870,10 +870,19 @@ std::wstring W(const char* utf8) {
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w.data(), n);
     return w;
 }
-struct HitArea { RectF rect; std::function<void()> on_click; bool draggable_off = true; };
+struct HitArea {
+    RectF rect;
+    std::function<void()> on_click;
+    std::function<void()> on_rclick;     // 右键回调（可选）
+    bool draggable_off = true;
+};
 std::vector<HitArea> g_hits;
 void hit(RectF r, std::function<void()> fn, bool drag_off = true) {
-    g_hits.push_back({r, std::move(fn), drag_off});
+    g_hits.push_back({r, std::move(fn), {}, drag_off});
+}
+// 同时绑左右键 — 左键 fn，右键 rfn
+void hit_lr(RectF r, std::function<void()> fn, std::function<void()> rfn, bool drag_off = true) {
+    g_hits.push_back({r, std::move(fn), std::move(rfn), drag_off});
 }
 bool inRect(POINT p, RectF r) {
     return p.x >= r.X && p.x <= r.X + r.Width && p.y >= r.Y && p.y <= r.Y + r.Height;
@@ -978,6 +987,7 @@ void submitRenamePack();
 void requestRenamePack(int idx);
 void requestDeletePack(int idx);
 void requestSharePack(int idx);
+void requestChangePackCover(int idx);
 #include "modals.inl"
 #include "market_view.inl"
 #include "chat_view.inl"
@@ -1352,6 +1362,98 @@ void requestDeletePack(int idx) {
             return 0;
         }, a, 0, nullptr);
     });
+}
+
+// 更改 pack 缩略图：选图 → /api/media/upload → /api/sticker/pack/cover →
+// 把 sha 缓存到本地 + 设到 packs()[idx].cover_path
+void requestChangePackCover(int idx) {
+    auto& ps = chatv::packs();
+    if (idx <= 0 || idx >= (int)ps.size() || ps[idx].id.empty()) {
+        g_toast.show(L"该分组未同步到云端，无法改缩略图");
+        return;
+    }
+    if (g_session_token.empty()) { g_toast.show(L"未登录"); return; }
+
+    OPENFILENAMEW ofn{};
+    wchar_t buf[MAX_PATH]; buf[0] = 0;
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = L"图片\0*.png;*.jpg;*.jpeg;*.gif;*.webp\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    std::wstring file = buf;
+
+    struct A { std::wstring file; std::string pack_id; int idx; HWND h; };
+    A* a = new A{file, ps[idx].id, idx, g_hwnd};
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        auto* a = (A*)lp;
+        // 1. 读文件 → /api/media/upload 拿 media_id
+        HANDLE f = CreateFileW(a->file.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { delete a; return 0; }
+        DWORD sz = GetFileSize(f, nullptr);
+        std::vector<BYTE> bytes(sz);
+        DWORD rd = 0;
+        ReadFile(f, bytes.data(), sz, &rd, nullptr);
+        CloseHandle(f);
+
+        std::string mime = "image/png";
+        auto dot = a->file.find_last_of(L'.');
+        std::wstring fn = a->file;
+        auto sl = a->file.find_last_of(L"\\/");
+        if (sl != std::wstring::npos) fn = a->file.substr(sl + 1);
+        if (dot != std::wstring::npos) {
+            std::wstring ext = a->file.substr(dot);
+            for (auto& c : ext) c = (wchar_t)towlower(c);
+            if (ext == L".jpg" || ext == L".jpeg") mime = "image/jpeg";
+            else if (ext == L".gif")  mime = "image/gif";
+            else if (ext == L".webp") mime = "image/webp";
+        }
+        auto mr = net::uploadMultipart(L"/api/media/upload", g_session_token,
+                                        L"file", fn, mime, bytes);
+        if (!mr.ok()) {
+            PostMessageW(a->h, WM_APP + 24, 0, 0);
+            delete a; return 0;
+        }
+        long long media_id = net::jsonInt(mr.body, "media_id");
+        // 2. POST /api/sticker/pack/cover
+        std::string body = std::string("{\"session_token\":\"") + g_session_token
+            + "\",\"pack_id\":\"" + a->pack_id
+            + "\",\"media_id\":" + std::to_string(media_id) + "}";
+        auto r = net::postJson(L"/api/sticker/pack/cover", body);
+        if (!r.ok()) {
+            PostMessageW(a->h, WM_APP + 24, 0, 0);
+            delete a; return 0;
+        }
+        // 3. 本地把这张图作为 pack.cover_path（用 stickers/<media_id>.<ext> 缓存名稳定）
+        std::wstring dir = chatv::stickerCacheDir();
+        std::wstring local;
+        if (!dir.empty()) {
+            const wchar_t* ext_w = L"png";
+            if (mime == "image/jpeg") ext_w = L"jpg";
+            else if (mime == "image/gif") ext_w = L"gif";
+            else if (mime == "image/webp") ext_w = L"webp";
+            wchar_t fname[64];
+            swprintf_s(fname, 64, L"cover_%lld.%ls", media_id, ext_w);
+            local = dir + fname;
+            HANDLE wf = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
+                                    nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (wf != INVALID_HANDLE_VALUE) {
+                DWORD wn = 0;
+                WriteFile(wf, bytes.data(), (DWORD)bytes.size(), &wn, nullptr);
+                CloseHandle(wf);
+                chatv::loadMedia(local);   // 进 cache
+            }
+        }
+        // 4. 通过 PostMessage 把 idx + local path 传回 UI 线程
+        struct R { int idx; std::wstring local; };
+        R* rr = new R{a->idx, local};
+        PostMessageW(a->h, WM_APP + 24, 1, (LPARAM)rr);
+        delete a;
+        return 0;
+    }, a, 0, nullptr);
 }
 
 // ====================================================================
@@ -3190,6 +3292,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        case WM_APP + 24: {
+            // 更改 pack 缩略图结果：wp = ok? lp = R{idx, local}*
+            struct R { int idx; std::wstring local; };
+            if (wp == 1 && lp) {
+                R* rr = (R*)lp;
+                auto& ps = chatv::packs();
+                if (rr->idx >= 0 && rr->idx < (int)ps.size()) {
+                    ps[rr->idx].cover_path = rr->local;
+                }
+                g_toast.show(L"缩略图已更新 ✓");
+                delete rr;
+            } else {
+                if (lp) { struct R { int idx; std::wstring local; }; delete (R*)lp; }
+                g_toast.show(L"缩略图上传失败");
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         case WM_TIMER:
             if (wp == 0xA2) {
                 // 旧 0xA2 计时器：早期版本登录成功后用 850ms 拖延再 enterExpandMain。
@@ -3275,7 +3395,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        case WM_RBUTTONUP:  hideToTray(hwnd); return 0;
+        case WM_RBUTTONUP: {
+            // 1. 先看有没有 hit 注册了 on_rclick — 倒序遍历（与左键一致，最上层优先）
+            for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it) {
+                if (!it->on_rclick) continue;
+                if (inRect(g_mouse, it->rect)) {
+                    it->on_rclick();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+            }
+            // 2. 没人吃掉就走原来的"右键最小化到托盘"
+            hideToTray(hwnd);
+            return 0;
+        }
         case WM_DESTROY:    trayRemove(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
