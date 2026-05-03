@@ -5,7 +5,8 @@ if errorlevel 1 (echo vcvars failed & exit /b 1)
 pushd "%~dp0"
 
 cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE /I. ^
-   d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp main.cpp /link ^
+   d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp ^
+   chat.cpp modals.cpp main.cpp /link ^
    /SUBSYSTEM:WINDOWS /OUT:LauncherD2D.exe
 set RC=%ERRORLEVEL%
 del /q *.obj 2>nul

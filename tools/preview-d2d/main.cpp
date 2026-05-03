@@ -17,6 +17,8 @@
 #include "auth.h"
 #include "hit.h"
 #include "ui_main.h"
+#include "chat.h"
+#include "modals.h"
 
 #pragma comment(lib, "user32.lib")
 
@@ -66,6 +68,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             g_mouse = physToDip(pt);
             g_mouse_pressed = true;
+            // modal 优先吃事件（含点击外部关闭）
+            if (modal::onMouseLDown(hwnd, g_mouse)) return 0;
             if (inAuthOrMain()) dispatchClick(g_mouse);
             return 0;
         }
@@ -76,9 +80,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN: {
             bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            if (wp == VK_ESCAPE) { PostQuitMessage(0); return 0; }
+            // ESC 优先关 modal
+            if (wp == VK_ESCAPE) {
+                if (modal::onKey(hwnd, (int)wp, shift, ctrl)) return 0;
+                PostQuitMessage(0);
+                return 0;
+            }
+            // modal 吃键盘
+            if (modal::onKey(hwnd, (int)wp, shift, ctrl)) return 0;
             if (stages::g_stage == stages::Stage::Auth) {
                 auth::onKey(hwnd, (int)wp, shift, ctrl);
+                return 0;
+            }
+            // chat composer focused 时 chat 吃键
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && chat::g_focus_composer) {
+                chat::onKey(hwnd, (int)wp, shift, ctrl);
                 return 0;
             }
             // 入场期 / Main：保留快捷键
@@ -96,8 +114,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_CHAR: {
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (modal::onChar(hwnd, (wchar_t)wp, ctrl)) return 0;
             if (stages::g_stage == stages::Stage::Auth) {
                 auth::onChar(hwnd, (wchar_t)wp, ctrl);
+                return 0;
+            }
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && chat::g_focus_composer) {
+                chat::onChar(hwnd, (wchar_t)wp, ctrl);
                 return 0;
             }
             return 0;
@@ -108,6 +133,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 2: {                     // Auth submit result (后台线程 PostMessage)
             auth::onSubmitResult(hwnd, wp != 0);
+            // 登录成功 → 异步拉 official channels
+            if (wp != 0) chat::fetchOfficialChannels(hwnd);
+            return 0;
+        }
+        case WM_APP + 4: {                     // ChangePw result
+            modal::onChangePwResult(wp != 0);
+            return 0;
+        }
+        case WM_APP + 5: {                     // Chat official channels result
+            chat::applyOfficialResult();
             return 0;
         }
         case WM_RBUTTONDOWN:

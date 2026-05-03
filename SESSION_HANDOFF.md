@@ -4,42 +4,62 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-03 22:35**
-最后 commit：**`239f3db`** feat(skia-d3d): D2D 渲染矢量图形 — 转圈 spinner + 圆角卡 + 阴影 + 相位扫描条
+最后更新：**2026-05-04 00:20**
+最后 commit：**`7ff312d`** feat(preview-d2d): Phase 2.1 Step 1-5 + Step 8 骨架 + 真后端登录
+（batch B 待 commit — Step 6 Chat 简化版 + Step 7 Modals 4 个）
 **已部署后端**：migration 0010_user_status 应用 + 全套 sticker/profile/status 端点上线 ✓
 GitHub：https://github.com/dwgx/launcher (private, master)
 
 ## ⚠️ 给下一个 Agent 的强制读物
 
-**Phase 2 渲染选型已定**：**Direct2D + DirectComposition + DXGI flip-model +
-waitable swap chain**（**不是 Skia**）。
-
-用户原话"**太丝滑了 就用它**"。下一阶段任务：把 `tools/preview/loading_demo.cpp`
-（GDI+ 3700+ 行）的全部 UI 渲染移植到 D2D pipeline，目标目录 `tools/preview-d2d/`。
+**Phase 2.1 D2D 移植进行中** — `tools/preview-d2d/` 已经把 GDI+ Preview 的入场动画 + Auth + Topbar/Sidebar/AccountDropdown + 各 view 骨架 + Chat 简化版 + 主要 Modals 1:1 复刻完毕。
+真后端登录已接通（POST /api/auth/{login,register} 异步线程）。
 
 **必读**：
 1. [`docs/PHASE_2_D2D_MIGRATION.md`](./docs/PHASE_2_D2D_MIGRATION.md) — 完整迁移规范、API 映射、坑、组件命名
-2. [`tools/preview-skia/skia_d3d.cpp`](./tools/preview-skia/skia_d3d.cpp) — 唯一权威参考实现（156 KB exe，跑通）
-3. memory `feedback_d2d_pipeline.md` — 选型理由 + 8 个具体坑
+2. [`tools/preview-d2d/`](./tools/preview-d2d/) — 已交付的 D2D 实现（25+ 文件）
+3. [`tools/preview/`](./tools/preview/) — 旧 GDI+ Preview，保留作为剩余功能 parity 的参考源
+4. [`tools/preview-skia/skia_d3d.cpp`](./tools/preview-skia/skia_d3d.cpp) — Phase 2.0 PoC
 
-### 最近 15 个 commit（这一轮的密集改动）
+### Phase 2.1 进度
+
+| Step | 状态 | 文件 |
+|------|------|------|
+| 1. D2DApp pipeline | ✓ | d2d_app.{h,cpp}, render/{brush,text,stroke,image,primitives,path_builder}_cache.h |
+| 2. 入场动画 5 阶段 | ✓ | anim.h, palette.h, stages.{h,cpp} |
+| 3. Auth view (InputBox + 浮动 label) | ✓ | hit.h, inputbox.h, auth.{h,cpp} |
+| 4. Topbar + Sidebar + AccountDropdown + 30 icons | ✓ | icons.{h,cpp}, ui_main.{h,cpp} |
+| 5. Home view (profile-card + stat 卡 + chips) | ✓ | ui_main.cpp::paintHomeView |
+| 6. Chat view (简化：list + text bubble + composer，**没** picker/sticker/GIF/video/WS) | ⚠ 简化 | chat.{h,cpp} |
+| 7. Modals (ChangePw/Confirm/CS2/History — **没** AddTag/CreatePack/RenamePack) | ⚠ 部分 | modals.{h,cpp} |
+| 8. Lunching/Market/Cloud/Settings/Profile (骨架，**没** 详细 listing/ofn 上传/seg 滑块 tween) | ⚠ 骨架 | ui_main.cpp |
+| 9. 删 tools/preview/ | ☐ 等功能完整 parity 后 | — |
+
+### Batch B 剩余 TODO（功能完整 parity）
+
+- **Chat 完整版**：emoji picker (8 列 + 系统 emoji) / sticker pack 分组 / GIF/video/image bubble / 媒体下载 / 引用气泡 / @ mention / drag-drop 文件 / WS 实时接收 (`net::WsClient` 已经有)
+- **Modals 剩余**：AddTag / CreatePack / RenamePack / 头像上传 (OFN + 异步 multipart)
+- **History modal**：拉真 `/api/profile/login-history` 数据 + 5/page 分页
+- **Toast**：右下角通知 (上传成功 / 错误反馈)
+- **Settings 完整**：language seg + 三语 i18n (en / zh-cn / ja-jp)
+- **Profile**：tags chips 真接 `/api/profile/tags` (g_user_tags 已经有 mutex 保护)
+- **真头像**：登录后 GET `/api/profile/avatar/:id` → 写 `%LOCALAPPDATA%/Launcher/avatars/<uid>.png` → `g_avatar_path`
+- **隐秘注册表 persist**：30 候选路径 + DPAPI 加密；启动遍历找 `_m=LUNC` magic
+- **托盘**：Shell_NotifyIcon + ESC 最小化到托盘
+- **WM_DROPFILES**：拖文件进 chat 自动发媒体
+- **Sticker mine / pack public/share/rename/delete**：全套 sticker 管理 4 个 modal + GET /api/sticker/mine
+- **真 HWID**：ComputerName + UserName + VolSerial → SHA256
+- **退出登录的真后端**：POST /api/auth/logout + persist::clearCreds
+
+### 最近的 commit（Phase 2.1 D2D 移植）
 
 ```
+(batch B 待 commit) Phase 2.1 Step 6+7: Chat 简化版 + Modals 4 个 (ChangePw/Confirm/CS2/History)
+7ff312d  feat(preview-d2d): Phase 2.1 Step 1-5 + Step 8 骨架 + 真后端登录
+b262d6e  docs(phase2): 锁死 D2D + DComp 路线 — 给下一个 agent 完整规范
 239f3db  feat(skia-d3d): D2D 渲染矢量 — 转圈 spinner + 圆角卡 + 阴影 + 相位扫描条
 07eda15  fix(skia-d3d): ClearRenderTargetView RGBA 顺序写反成 BGRA → 蓝色渐变
 c730614  feat(skia): 金标准 pipeline foundation — NOREDIRECT + DComp + DXGI flip + waitable
-def4d28  perf(skia): vsync-locked render loop — SwapBuffers + DwmFlush 替代 Sleep
-5461f3c  feat(skia): Phase 2 起手 — Win32 + WGL + Skia/Ganesh PoC 跑通 (废弃路线)
-dd4f0a8  perf(preview): 修弹出来还卡顿 — 高精度 timer + 跳擦背景 + 缩窗优化
-4219dfc  perf(preview): AA / 细腻度六件套 — DPI / 32bpp / Bezier / Pen Inset / 字号 hint / 120Hz
-d2675b3  feat(sticker+chat): 分组可见 / 右键菜单 / +导入入 grid / 缩略图 / 历史 100 + 媒体
-e65cad0  feat(preview): 登录过渡 + 头像云同步 + 购物车 icon + 气泡 Telegram 风 + emoji 字体 fallback
-3e7568d  fix(preview): chat 文字乱码 + 历史拉取 + pack 内容下载
-2f955ac  fix(preview): 真 HWID + 退出登录彻底清干净
-591afd7  fix(admin): invites 空字段 deserialize + 加删除用户 + 双重确认
-50a9934  feat(preview): WS receive + sticker pack 重构 + status 同步 + 右上角 wedge fix
-447ceb1  feat(backend): pack mgmt + status sync + 0010 user_status
-d966cd6  feat(preview): sticker 真上传 + transitions 框架
 ```
 
 ---

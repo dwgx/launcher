@@ -9,6 +9,8 @@
 #include "user_state.h"
 #include "auth.h"
 #include "hit.h"
+#include "chat.h"
+#include "modals.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -280,29 +282,32 @@ void paintAccountDropdown(D2DApp& app, float W) {
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
         { L"登录历史", icons::Name::History, [](){
-            // History modal 留 Step 7
+            modal::openHistory();
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
         { L"修改密码", icons::Name::Shield, [](){
-            // ChangePw modal 留 Step 7
+            modal::openChangePw();
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
         { L"退出登录", icons::Name::Logout, [](){
-            // 简化：清 session + 回到 Auth
-            g_session_token.clear();
-            g_user_id.clear();
+            modal::openConfirm(L"退出登录", L"将清除本机会话，下次启动需重新登录。",
+                [](){
+                    g_session_token.clear();
+                    g_user_id.clear();
+                    auth::g_form.username.text.clear(); auth::g_form.username.cursor = 0;
+                    auth::g_form.password.text.clear(); auth::g_form.password.cursor = 0;
+                    auth::g_form.invite.text.clear();   auth::g_form.invite.cursor   = 0;
+                    auth::g_form.focus = 0;
+                    auth::g_form.error_msg.clear();
+                    stages::g_stage = stages::Stage::Auth;
+                    stages::g_auth_card_op.start(0.0f, 1.0f, 0.40f, 0.05f, curve::easeOutCubic);
+                    stages::g_auth_card_y.start(12.0f, 0.0f, 0.45f, 0.05f, curve::easeOutQuint);
+                },
+                L"退出", L"取消", true);
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
-            auth::g_form.username.text.clear(); auth::g_form.username.cursor = 0;
-            auth::g_form.password.text.clear(); auth::g_form.password.cursor = 0;
-            auth::g_form.invite.text.clear();   auth::g_form.invite.cursor   = 0;
-            auth::g_form.focus = 0;
-            auth::g_form.error_msg.clear();
-            stages::g_stage = stages::Stage::Auth;
-            stages::g_auth_card_op.start(0.0f, 1.0f, 0.40f, 0.05f, curve::easeOutCubic);
-            stages::g_auth_card_y.start(12.0f, 0.0f, 0.45f, 0.05f, curve::easeOutQuint);
         }, true },
     };
     auto* item_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
@@ -500,9 +505,7 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::fillCircle(ctx, pcx, pcy, 22, br.solidA(0xFFFFFF, op * 0.85f));
     icons::drawIcon(app, icons::Name::Play, pcx - 10, pcy - 10, 20, 0xFF1F1E1D);
 
-    hit(LayoutRect{ cx, cy, 240, 140 }, [](){
-        // CS2 modal 留 Step 7
-    }, true);
+    hit(LayoutRect{ cx, cy, 240, 140 }, [](){ modal::openCS2(); }, true);
 }
 
 void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
@@ -679,25 +682,10 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     br.solidA(pal.text, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER,
                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    hit(pw, [](){
-        // ChangePw modal 留 Step 7
-    }, true);
+    hit(pw, [](){ modal::openChangePw(); }, true);
 }
 
-void paintChatViewPlaceholder(D2DApp& app, float ax, float ay, float aw, float ah) {
-    const Palette& pal = palette();
-    auto* ctx = app.ctx();
-    auto& br = app.brushes();
-    float op = fadeOp();
-    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
-                                  DWRITE_FONT_WEIGHT_BOLD);
-    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
-    prim::drawText_(ctx, L"聊天", h1,
-                    ax + 32, ay + 28, aw - 64, 36, br.solidA(pal.text, op));
-    prim::drawText_(ctx, L"Chat view 1759 行 GDI+ 移植中（list/bubble/composer/picker），下一 batch 接通", sub,
-                    ax + 32, ay + 72, aw - 64, 22,
-                    br.solidA(pal.text_muted, op));
-}
+// Chat view 走 chat::paintChatView
 
 }  // anon
 
@@ -714,6 +702,8 @@ void tickMain(float dt) {
     g_seg_lang_w.tick(dt);
     g_seg_theme_x.tick(dt);
     g_seg_theme_w.tick(dt);
+    chat::tick(dt);
+    modal::tickAll(dt);
 }
 
 void paintMain(D2DApp& app, float W, float H) {
@@ -729,16 +719,22 @@ void paintMain(D2DApp& app, float W, float H) {
     switch (stages::g_view) {
         case stages::View::Home:     paintHomeView(app, ax, ay, aw, ah);     break;
         case stages::View::Lunching: paintLunchingView(app, ax, ay, aw, ah); break;
-        case stages::View::Chat:     paintChatViewPlaceholder(app, ax, ay, aw, ah); break;
+        case stages::View::Chat:     chat::paintChatView(app, ax, ay, aw, ah); break;
         case stages::View::Market:   paintMarketView(app, ax, ay, aw, ah);   break;
         case stages::View::Cloud:    paintCloudView(app, ax, ay, aw, ah);    break;
         case stages::View::Settings: paintSettingsView(app, ax, ay, aw, ah); break;
         case stages::View::Profile:  paintProfileView(app, ax, ay, aw, ah);  break;
     }
 
-    // dropdown 在最上层
+    // dropdown 在 view 之上
     paintAccountDropdown(app, W);
     registerDropdownDismissHits(W, H);
+
+    // modals 在最顶层
+    modal::paintCS2Modal(app, W, H);
+    modal::paintChangePwModal(app, W, H);
+    modal::paintConfirmModal(app, W, H);
+    modal::paintHistoryModal(app, W, H);
 }
 
 }  // namespace launcher::d2d::ui
