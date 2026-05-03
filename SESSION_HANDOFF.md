@@ -4,12 +4,19 @@
 > 用户每次交接前会让我更新这份，所以它**永远是最新的**。
 > （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
 
-最后更新：**2026-05-04 00:40**
-最后 commit：**`b4ef216`** Phase 2.1 Step 6 Chat 简化版 + Step 7 Modals 4 个
-（batch C 待 commit — 全部业务功能补全：persist/HWID/Steam/Toast/i18n/WS/tray/
-AddTag/CreatePack/RenamePack/picker/image bubble/autologin/WM_DROPFILES/真退登录）
-**已部署后端**：migration 0010_user_status 应用 + 全套 sticker/profile/status 端点上线 ✓
+最后更新：**2026-05-04 08:30**
+最后 commit：**`1b55979`** CS2 modal 加标题栏让 ✕ 不被 WebView2 覆盖 + peer profile path 对齐后端
+**已部署后端**：migration 0011 + /api/profile/update + /api/profile/peer/:key 全部 active
 GitHub：https://github.com/dwgx/launcher (private, master)
+
+## ⚡ 当前可用产物
+
+`D:\Project\Launcher\dist\` 三个文件，双击 LauncherD2D.exe 跑：
+- `LauncherD2D.exe` (~640 KB) — D2D + DComp + DXGI flip + waitable + WebView2 嵌入
+- `WebView2Loader.dll` (156 KB) — 必须跟 exe 同级（dynamic load）
+- `cs2_header.jpg` (33 KB) — Lunching CS2 game-card / CS2 modal 后备封面图
+
+build 一键：`tools/preview-d2d/build_d2d.bat` — 自动 copy 到 dist。
 
 ## ⚠️ 给下一个 Agent 的强制读物
 
@@ -61,25 +68,48 @@ GitHub：https://github.com/dwgx/launcher (private, master)
 - ✓ **autologin**：启动 persist::loadSession 找到 token → 跳过 Auth 直进 Main + WS / fetch
 - ✓ **主题持久化**：D 切换调 persist::saveTheme
 
+### 业务功能（最新一轮加的）
+
+- ✓ **i18n 全贯通**：Sidebar / Account dropdown / Home / Settings 全用 trW(key)，切语言立即生效。i18n.cpp 60+ 三语条目
+- ✓ **Home 时间精确秒 + 时区 + 国家**：HH:MM:SS UTC+8 CN 格式，VPN 出口国家也显示
+- ✓ **VPN/国家异步检测**：fetch::geoIP 调 ip-api.com:80/json/ → g_geo_country
+- ✓ **状态自定义标语**：modal::EditStatusText (POST /api/profile/update {status_text})
+- ✓ **个人签名**：modal::EditBio (POST /api/profile/update {bio}) — 240 字以内 textarea
+- ✓ **看别人主页**：chat 头像左键 → modal::UserProfile (GET /api/profile/peer/:key)，显 nickname/uid/status dot/status_text/tags chips/bio
+- ✓ **Sticker pack 全套**：share/delete/install/rename/create + 文件夹批量导入 + GET /api/sticker/mine + 删单个 sticker (hover ✕)
+- ✓ **WebView2 嵌入**：CS2 modal 内嵌 Steam store widget 真播 mp4 trailer + chat video bubble 点击 → 全屏 WebView 播本地 mp4 + chat text 含 https 自动检测点击 → 内嵌打开网页
+- ✓ **fetchHistory**：切频道时拉 GET /api/chat/history?session_token=&chat_id=&limit=100 + 解析 [{kind,from,author,body,time},...] merge 到 streamFor 前面
+- ✓ **真发 sticker / GIF**：sendChatMessage(body, kind="sticker"/"gif") 真 POST /api/chat/send
+- ✓ **picker / composer 自动 dismiss**：点外部自动收起
+- ✓ **圆角真 mask**：pushLayerRR (ID2D1RoundedRectangleGeometry + PushLayer) 替代 PushAxisAlignedClip，bitmap 不再被切方角
+
 ### 剩余 polish（不影响主流程）
 
-- emoji 字体 fallback：Win11 系统默认 fallback 已经够用，自定义 IDWriteFontFallback 留 Phase 2.2
-- 头像 24/28/72 三档预生成：D2D DrawBitmap linear interpolation 视觉够；如需极致清晰再加 GDI+ 等价 Bitmap 缩放
-- WS 收到的非 text 消息（sticker / pack_share / image / video）— 当前 chat::ws_user.cpp 只解析 text，其他类型扩展几行
-- Sticker pack 全套：share / delete / install / uninstall / 系统文件夹导入 + GET /api/sticker/mine + sticker pack 浏览面板（picker 第二 tab 当前是占位）
-- Settings：language seg control 滑块 tween + 字号 / 字体回退链选择
-- Market：拉真 /api/market/listings 渲染商品卡（当前 3 行占位）
-- Cloud view：真功能未定义（GDI+ 那边也是空状态卡）
+- 字体 fallback：Win11 默认 fallback 够用，自定义 IDWriteFontFallback 留 Phase 2.2
+- 头像 24/28/72 三档预生成：D2D linear interpolation 已够清晰
+- 客户端发的 sticker/video body 是本地路径 → 对方收到本地无文件显空。要真 cross-user 同步：发时上传 sha256/sticker_id，对方 ws 收到根据 sha256 GET /api/media/<sha> 自动拉到本地
+- @mention 自动补全 (输入 @ → 弹用户列表)
+- WebView2 缓存上次 URL 不重新加载（视频不每次从头播）
+- WebView2 完全融合到 D2D（IDXGISwapChain shared surface + D2D BitmapBrush 包 surface texture 真 H5 video → 跟 D2D 卡片混合渲染） — 大工程留 Phase 2.3
 
-### 最近的 commit（Phase 2.1 D2D 移植）
+### 最近 15 个 commit（这一轮 D2D 全套 + 后端联接）
 
 ```
-(batch B 待 commit) Phase 2.1 Step 6+7: Chat 简化版 + Modals 4 个 (ChangePw/Confirm/CS2/History)
-7ff312d  feat(preview-d2d): Phase 2.1 Step 1-5 + Step 8 骨架 + 真后端登录
-b262d6e  docs(phase2): 锁死 D2D + DComp 路线 — 给下一个 agent 完整规范
-239f3db  feat(skia-d3d): D2D 渲染矢量 — 转圈 spinner + 圆角卡 + 阴影 + 相位扫描条
-07eda15  fix(skia-d3d): ClearRenderTargetView RGBA 顺序写反成 BGRA → 蓝色渐变
-c730614  feat(skia): 金标准 pipeline foundation — NOREDIRECT + DComp + DXGI flip + waitable
+1b55979  fix: CS2 modal 加标题栏让 ✕ 不被 WebView2 覆盖 + peer profile path
+e966c56  feat: WebView2 全屏视频播放器 + 链接卡片 + chat 视频可播
+75baccb  fix: 我的表情去重 / picker+composer 自动 dismiss / 真发 sticker GIF / 历史消息
+9e00a99  fix: 圆角 mask 全套 + 我的表情自动 ensure + CreatePack 即时刷新
+f0190f9  chore: gitignore third_party/webview2/
+76224b1  feat: WebView2 嵌入 Steam 视频 + 删单个 sticker + 我的表情导入提示
+564c3f1  feat: i18n 全贯通 + 时间秒+时区 + IP 地理 + Pack 分享链接 + 50/user 限额
+5672625  feat: GIF 多帧动画 (gif_cache.h)
+5a0a30a  fix: Auth label / picker / sticker import / CS2 cover / Settings seg 滑块 / 3 个新 modal
+1d1c1ab  build: build 完自动 copy LauncherD2D.exe 到 dist/
+45007b6  fix: 登录字段 hwid_hex+client_ver / 头像真圆形 / Auth 紧凑布局 / sticker 文件夹导入
+22d84d9  feat: sticker pack 全套 / Market 真接通 / Settings i18n / WS 多类型
+27c9467  feat: 业务功能 1:1 全部复刻
+b4ef216  feat: Step 6 Chat 简化版 + Step 7 Modals 4 个
+7ff312d  feat: Step 1-5 + Step 8 骨架 + 真后端登录
 ```
 
 ---
@@ -114,18 +144,15 @@ c730614  feat(skia): 金标准 pipeline foundation — NOREDIRECT + DComp + DXGI
                     bump_chat_last_message 触发器
 0006_market         market_categories(5 预置) / market_listings / market_orders /
                     market_reviews / credit_ledger + users.credit_balance
-0007_official_channels  chats.slug / is_official / group_label + 8 官方频道写入
-                        (announcements/rules/general/random/helpdesk/cs2/market/trades)
-                        — 不要 touhou/vrchat
-0008_channel_roles      chats.write_role (admin_only / user) + users.is_admin
-                        general/random = user (聊天频道 2 个)，其他 = admin_only
-0009_user_roles         users.role/role_label + user_roles_catalog (4 预设：
-                        admin/oldhand/newhand/user 中文头衔) + user_tags
-                        ⚠ 改过 hash 后 _sqlx_migrations DELETE row 9 重跑过
-                        ⚠ 表 owner = helix（兜底 ALTER OWNER 在 SQL 里）
-0010_user_status        users.status TEXT 'online' + users.last_seen TIMESTAMPTZ + index
-                        ⚠ 这一轮手动 psql 应用（避开 sqlx 编译期 query check 死锁）
-                        + INSERT _sqlx_migrations row 10 防启动重跑
+0007_official_channels  chats.slug / is_official / group_label + 8 官方频道
+0008_channel_roles      chats.write_role + users.is_admin
+0009_user_roles         users.role/role_label + user_roles_catalog + user_tags
+0010_user_status        users.status TEXT 'online' + users.last_seen TIMESTAMPTZ
+0011_user_bio_status_text  users.status_text TEXT '' + users.bio TEXT ''
+                           ⚠ 这一轮加的 — psql 手动 apply + sqlx 自动 register checksum
+                           ⚠ 如果 cargo build 后启动报 "migration 11 modified"：
+                              psql DELETE FROM _sqlx_migrations WHERE version=11
+                              再 systemctl restart 让 sqlx 自动重 INSERT 正确 checksum
 ```
 
 ### 新加 API（这一轮）
@@ -146,7 +173,19 @@ config.toml 新字段:
   media_generic_max_bytes = 100MB
 ```
 
-### 新加 API（这一轮 — 已部署 ✓）
+### 新加 API（最新一轮 — 已部署 active ✓）
+
+```
+POST /api/profile/update                {session_token, status_text?, bio?}
+                                        status_text 48 字 / bio 240 字 clamp，DB UPDATE
+GET  /api/profile/peer/:key             ?session_token= (key = uid 7-digit / username / user_id)
+                                        → PeerProfileResp { uid, username, nickname,
+                                          avatar_url, status, status_text, bio, tags[],
+                                          role, role_label }
+                                        tags 从 user_tags 表 ORDER BY sort_order, tag
+```
+
+### 新加 API（之前一轮 — 已部署 ✓）
 
 ```
 GET  /api/sticker/mine?session_token=       自己上传过的所有 sticker（含 media_url）
@@ -335,17 +374,29 @@ production 不再依赖 Skia。`third_party/skia/` 已 gitignore（~250MB 预编
 
 ## 5. SSH 部署
 
-```powershell
-# 改后端代码后部署：
-cd D:\Project\Launcher
-tar --exclude='target' --exclude='*.png' --exclude='build_src' -czf /tmp/launcher_build.tgz SystemBackend
-scp -i ~/.ssh/launcher_deploy ... root@154.40.36.22:/opt/systembackend/build_src/launcher_build.tgz
-ssh -i ~/.ssh/launcher_deploy ... 'cd /opt/systembackend/build_src && tar xzf ... && cd SystemBackend && cargo build --release -p launcher-api && install -m 755 target/release/systembackend /opt/systembackend/systembackend && systemctl restart systembackend'
+```bash
+# SSH key 已设置 — 不需密码
+ssh -i ~/.ssh/launcher_deploy root@154.40.36.22
+
+# 直接在服务器改 + 编译（避免 scp 整包）：
+ssh -i ~/.ssh/launcher_deploy root@154.40.36.22 \
+  "cd /opt/systembackend/build_src/SystemBackend && \
+   DATABASE_URL='postgres://helix:wlimhnMg21lFsFITS7wfsEFK7GcKYx7S@127.0.0.1:5432/helix' \
+   cargo build --release -p launcher-api && \
+   install -m 755 target/release/systembackend /opt/systembackend/systembackend && \
+   systemctl restart systembackend"
+
+# 改 migration 时：
+# 1. 写 .sql 到 migrations/00XX_xxx.sql
+# 2. PGPASSWORD=wlimhnMg21lFsFITS7wfsEFK7GcKYx7S psql -U helix -h 127.0.0.1 -d helix -f 文件
+# 3. cargo build → 启动如果 "migration N was modified"：
+#      psql DELETE FROM _sqlx_migrations WHERE version=N;
+#    然后 systemctl restart，sqlx 会自动重 INSERT 正确 checksum
 ```
 
-服务器侧每次写 CHANGELOG：
+服务器侧每次必写 CHANGELOG（AGENTS.md 守则）：
 ```bash
-echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不影响" >> /root/workspace/CHANGELOG.md
+echo "$(date +%Y-%m-%d\ %H:%M) | claude-<model> | <动作> | 影响生产/不影响" >> /root/workspace/CHANGELOG.md
 ```
 
 ---
@@ -362,7 +413,21 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 ---
 
-## 7. 下一步候选（用户未指定时不要主动开干）
+## 7. WebView2 SDK（new this session）
+
+`third_party/webview2/` (gitignored) — Microsoft.Web.WebView2 NuGet 包解压。重下：
+```powershell
+iwr https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2 -O wv2.nupkg
+Expand-Archive wv2.nupkg D:/Project/Launcher/third_party/webview2 -Force
+```
+
+build_d2d.bat 用 `/I ..\..\third_party\webview2\build\native\include` 拿 WebView2.h，
+runtime 复制 `runtimes/win-x64/native/WebView2Loader.dll` 到 dist/。
+`webview.cpp` 用 LoadLibrary + GetProcAddress 动态加载 Loader.dll（runtime 没装也能跑）。
+
+CS2 modal cover + chat 视频 bubble + chat 链接 都走 webview。
+
+## 8. 下一步候选（用户未指定时不要主动开干）
 
 ### 用户明确点过但还没做（高优先）
 
@@ -405,7 +470,7 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 ---
 
-## 8. 重要的硬约束（这一轮才确认下来的）
+## 9. 重要的硬约束（这一轮才确认下来的）
 
 - **不要 hover 自动展开 popover** — 用户明确否决；所有 dropdown 改 click 切换
 - **官方频道写死，不要 touhou/vrchat** — chat_view.inl kChannels 数组
