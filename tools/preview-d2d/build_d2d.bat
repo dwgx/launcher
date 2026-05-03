@@ -11,5 +11,10 @@ cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE /I. ^
    /SUBSYSTEM:WINDOWS /OUT:LauncherD2D.exe
 set RC=%ERRORLEVEL%
 del /q *.obj 2>nul
+if "%RC%"=="0" (
+    if not exist ..\..\dist mkdir ..\..\dist
+    copy /y LauncherD2D.exe ..\..\dist\LauncherD2D.exe >nul
+    echo [build_d2d] LauncherD2D.exe -^> dist\
+)
 popd
 exit /b %RC%

@@ -354,6 +354,7 @@ echo "$(date +%Y-%m-%d\ %H:%M) | claude-opus-4-7 | <动作> | 影响生产/不�
 
 - **不要在回复贴截图**，自己看自己用 Playwright/computer-use 但不嵌图
 - **每轮收尾必须 build**，client 走 Preview cl.exe + server 走 cargo build；失败修不要默默交付
+- **打包不要 zip**：build 出来直接放 `dist/LauncherD2D.exe`，用户双击即跑（build_d2d.bat 已经自动复制）
 - **凭据零明文**：admin password / DB 密码不进对话历史；要看让用户自己 SSH grep
 - **遇到不懂的事记到 QUESTIONS.md**，不打断流程问
 - **代码风格**：Google C++ Style + m_ 前缀；少 RTTI/异常；关键字符串走 CRYPT_STR；注释只写 why
