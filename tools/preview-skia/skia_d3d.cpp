@@ -199,13 +199,13 @@ static void render() {
     // 时间驱动的颜色：演示 vsync 锁定下颜色脉冲不抖
     float t = elapsed();
     float pulse = 0.5f + 0.5f * std::sin(t * 2.0f);
-    // BGRA premul alpha — DComp 要求 premul
-    float r = 0.78f * pulse;
-    float g = 0.39f * pulse;
-    float b = 0.26f * pulse;
-    float a = pulse;
-    // 反 premul: dst = (r*a, g*a, b*a, a)
-    float clr[4] = { b * a, g * a, r * a, a };
+    // ClearRenderTargetView 的 float[4] 永远是 RGBA 逻辑顺序，DX 自己把它
+    // swizzle 到纹理实际格式（BGRA8_UNORM 在内存里是 BGRA bytes，但 API 拿
+    // RGBA floats）。之前写反成 BGRA 出现"蓝渐变"。
+    // DComp 又要 premul alpha → 每个 channel 乘 alpha。
+    float r = 0.85f, g = 0.42f, b = 0.27f;     // 主橙 (Launcher primary 调一档亮)
+    float a = pulse;                            // 整体 alpha 脉冲
+    float clr[4] = { r * a, g * a, b * a, a };  // RGBA premul
     g_app.ctx->OMSetRenderTargets(1, g_app.rtv.GetAddressOf(), nullptr);
     g_app.ctx->ClearRenderTargetView(g_app.rtv.Get(), clr);
 }
