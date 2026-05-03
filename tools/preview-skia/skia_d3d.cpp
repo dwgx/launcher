@@ -19,6 +19,8 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <d3d11.h>
+#include <d2d1_1.h>
+#include <d2d1.h>
 #include <dxgi1_3.h>
 #include <dcomp.h>
 #include <wrl/client.h>
@@ -27,6 +29,7 @@
 #include <cstdio>
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dcomp.lib")
 #pragma comment(lib, "user32.lib")
@@ -58,6 +61,14 @@ struct App {
     ComPtr<IDCompositionDevice>    dcomp;
     ComPtr<IDCompositionTarget>    dcomp_target;
     ComPtr<IDCompositionVisual>    dcomp_visual;
+
+    // Direct2D — 在同一个 D3D11 device / swap chain 上画矢量
+    ComPtr<ID2D1Factory1>          d2d_factory;
+    ComPtr<ID2D1Device>            d2d_device;
+    ComPtr<ID2D1DeviceContext>     d2d_ctx;
+    ComPtr<ID2D1SolidColorBrush>   brush_primary;
+    ComPtr<ID2D1SolidColorBrush>   brush_text;
+    ComPtr<ID2D1SolidColorBrush>   brush_card;
 
     bool resize_pending = false;
     int  pending_w = 0, pending_h = 0;
@@ -157,6 +168,56 @@ static void rebuildRTV() {
         "CreateRenderTargetView");
 }
 
+// ================== 让 D2D 把 swap chain back buffer 当 target ==================
+// FLIP_DISCARD 每次 Present 后 buffer[0] 是 fresh 的（上一帧内容丢弃），
+// 所以每帧 GetBuffer(0) → CreateBitmapFromDxgiSurface → SetTarget。
+// 不能跨帧重用 ID2D1Bitmap1，否则 d2d 持有 buffer 让 Present 不能 flip。
+static ComPtr<ID2D1Bitmap1> bindD2DTarget() {
+    ComPtr<IDXGISurface> dxgi_back;
+    hr_check(g_app.swap->GetBuffer(0, IID_PPV_ARGS(&dxgi_back)), "GetBuffer(IDXGISurface)");
+    D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap1> bmp;
+    hr_check(g_app.d2d_ctx->CreateBitmapFromDxgiSurface(
+        dxgi_back.Get(), &bp, &bmp),
+        "D2D CreateBitmapFromDxgiSurface");
+    g_app.d2d_ctx->SetTarget(bmp.Get());
+    return bmp;
+}
+
+// ================== 初始化 Direct2D ==================
+// D2D1 跟 D3D11 共享 GPU resource，零拷贝。在 swap chain back buffer 上画矢量。
+static void initD2D() {
+    D2D1_FACTORY_OPTIONS opts{};
+#ifdef _DEBUG
+    opts.debugLevel = D2D1_DEBUG_LEVEL_INFORMATION;
+#endif
+    hr_check(D2D1CreateFactory(
+        D2D1_FACTORY_TYPE_SINGLE_THREADED,
+        __uuidof(ID2D1Factory1),
+        &opts,
+        (void**)g_app.d2d_factory.GetAddressOf()),
+        "D2D1CreateFactory");
+
+    ComPtr<IDXGIDevice> dxgi_dev;
+    hr_check(g_app.device.As(&dxgi_dev), "device.As<IDXGIDevice>");
+    hr_check(g_app.d2d_factory->CreateDevice(dxgi_dev.Get(), &g_app.d2d_device),
+        "D2D Factory->CreateDevice");
+    hr_check(g_app.d2d_device->CreateDeviceContext(
+        D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &g_app.d2d_ctx),
+        "D2D Device->CreateDeviceContext");
+
+    // 主色：跟 GDI+ Preview 一致 (#C96442 + 一档亮)
+    g_app.d2d_ctx->CreateSolidColorBrush(
+        D2D1::ColorF(0.85f, 0.42f, 0.27f, 1.0f), &g_app.brush_primary);
+    g_app.d2d_ctx->CreateSolidColorBrush(
+        D2D1::ColorF(0.96f, 0.94f, 0.91f, 0.85f), &g_app.brush_text);
+    g_app.d2d_ctx->CreateSolidColorBrush(
+        D2D1::ColorF(0.14f, 0.13f, 0.12f, 0.92f), &g_app.brush_card);
+}
+
 // ================== DComp 视觉树挂 swap chain ==================
 static void initDComp() {
     ComPtr<IDXGIDevice> dxgi_dev;
@@ -194,20 +255,107 @@ static float elapsed() {
     return std::chrono::duration<float>(
         std::chrono::steady_clock::now() - g_t0).count();
 }
+// 真正的渲染：D2D 在 swap chain back buffer 上画矢量图形 — 跟 Skia 同档次
+// 的硬件 AA 矢量渲染（D2D 用 D3D11 GPU 后端，~16x analytic AA）。
 static void render() {
-    if (!g_app.rtv) rebuildRTV();
-    // 时间驱动的颜色：演示 vsync 锁定下颜色脉冲不抖
+    auto bmp = bindD2DTarget();   // 帧末走出作用域时自动 release，让 Present flip
+
+    g_app.d2d_ctx->BeginDraw();
+    // 整窗暗 bg (Launcher kDark.bg = 0x1A1816 + premul)
+    g_app.d2d_ctx->Clear(D2D1::ColorF(0x1A1816, 1.0f));
+
     float t = elapsed();
-    float pulse = 0.5f + 0.5f * std::sin(t * 2.0f);
-    // ClearRenderTargetView 的 float[4] 永远是 RGBA 逻辑顺序，DX 自己把它
-    // swizzle 到纹理实际格式（BGRA8_UNORM 在内存里是 BGRA bytes，但 API 拿
-    // RGBA floats）。之前写反成 BGRA 出现"蓝渐变"。
-    // DComp 又要 premul alpha → 每个 channel 乘 alpha。
-    float r = 0.85f, g = 0.42f, b = 0.27f;     // 主橙 (Launcher primary 调一档亮)
-    float a = pulse;                            // 整体 alpha 脉冲
-    float clr[4] = { r * a, g * a, b * a, a };  // RGBA premul
-    g_app.ctx->OMSetRenderTargets(1, g_app.rtv.GetAddressOf(), nullptr);
-    g_app.ctx->ClearRenderTargetView(g_app.rtv.Get(), clr);
+    float W = (float)g_app.width, H = (float)g_app.height;
+    float cx = W * 0.5f, cy = H * 0.5f;
+
+    // ===== 1) 中心圆角卡 (240x140) — 跟 Launcher game-card 一档 =====
+    float card_w = 240, card_h = 140;
+    D2D1_ROUNDED_RECT card = {
+        D2D1::RectF(cx - card_w * 0.5f, cy - card_h * 0.5f,
+                    cx + card_w * 0.5f, cy + card_h * 0.5f),
+        12, 12
+    };
+    // 阴影 — 用 8 层逐渐放大递减 alpha 模拟柔和高斯（廉价但视觉够用）
+    for (int i = 0; i < 6; ++i) {
+        float spread = 2.0f + i * 1.6f;
+        float a = 0.06f / (i + 1);
+        D2D1_ROUNDED_RECT sh = {
+            D2D1::RectF(card.rect.left  - spread, card.rect.top   - spread + 4,
+                        card.rect.right + spread, card.rect.bottom + spread + 4),
+            12.0f + spread, 12.0f + spread
+        };
+        ComPtr<ID2D1SolidColorBrush> sb;
+        g_app.d2d_ctx->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, a), &sb);
+        g_app.d2d_ctx->FillRoundedRectangle(sh, sb.Get());
+    }
+    g_app.d2d_ctx->FillRoundedRectangle(card, g_app.brush_card.Get());
+
+    // ===== 2) 中心转圈圈 spinner — 跟 Launcher loading 一致 =====
+    // 旋转的 270° 弧 + 圆角端帽，1.4s 一圈
+    float spin_r = 22.0f;
+    float angle = std::fmod(t * 360.0f / 1.4f, 360.0f);
+    float start = angle * 3.14159265f / 180.0f;
+    float sweep = 270.0f * 3.14159265f / 180.0f;
+    float end = start + sweep;
+
+    // path geom：先在原点画弧（中心 0,0），后面 SetTransform 平移到 (cx, cy)
+    ComPtr<ID2D1PathGeometry> arc_geo;
+    g_app.d2d_factory->CreatePathGeometry(&arc_geo);
+    ComPtr<ID2D1GeometrySink> sink;
+    arc_geo->Open(&sink);
+    sink->BeginFigure(
+        D2D1::Point2F(spin_r * std::cos(start), spin_r * std::sin(start)),
+        D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddArc(D2D1::ArcSegment(
+        D2D1::Point2F(spin_r * std::cos(end), spin_r * std::sin(end)),
+        D2D1::SizeF(spin_r, spin_r),
+        0.0f,
+        D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        D2D1_ARC_SIZE_LARGE));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+
+    // 圆角端帽用 stroke style
+    ComPtr<ID2D1StrokeStyle> stroke;
+    g_app.d2d_factory->CreateStrokeStyle(
+        D2D1::StrokeStyleProperties(
+            D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_FLAT,
+            D2D1_LINE_JOIN_ROUND, 10.0f,
+            D2D1_DASH_STYLE_SOLID, 0.0f),
+        nullptr, 0, &stroke);
+
+    g_app.d2d_ctx->SetTransform(D2D1::Matrix3x2F::Translation(cx, cy));
+    g_app.d2d_ctx->DrawGeometry(arc_geo.Get(), g_app.brush_primary.Get(),
+                                 3.0f, stroke.Get());
+    g_app.d2d_ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+
+    // ===== 3) 中心打勾静态 (不旋转) — 给眼睛对比"动 vs 静" =====
+    float dot_r = 4.0f;
+    g_app.d2d_ctx->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(cx, cy), dot_r, dot_r),
+        g_app.brush_primary.Get());
+
+    // ===== 4) 左下角 FPS / 时间 戳记号 (用画的小 tick 表示动画顺) =====
+    // 画 60 个小竖条，按时间相位左→右扫过 — 任何卡顿在这条尺上都会显出来
+    float bar_y = H - 12;
+    for (int i = 0; i < 60; ++i) {
+        float phase = std::fmod(t * 0.5f + i / 60.0f, 1.0f);
+        float bar_h = 2.0f + 6.0f * (1.0f - phase);
+        float bar_x = 12 + i * 4.0f;
+        ComPtr<ID2D1SolidColorBrush> bar_b;
+        g_app.d2d_ctx->CreateSolidColorBrush(
+            D2D1::ColorF(0.85f, 0.42f, 0.27f, 0.4f * (1.0f - phase)),
+            &bar_b);
+        g_app.d2d_ctx->FillRectangle(
+            D2D1::RectF(bar_x, bar_y - bar_h, bar_x + 2, bar_y),
+            bar_b.Get());
+    }
+
+    HRESULT hr = g_app.d2d_ctx->EndDraw();
+    if (FAILED(hr)) {
+        // 可能 device removed — 现实代码要重建
+    }
+    g_app.d2d_ctx->SetTarget(nullptr);   // release 掉，否则 Present 不能 flip
 }
 
 // ================== Present（带 ALLOW_TEARING） ==================
@@ -269,6 +417,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
 
     initD3D();
     initSwapChain();
+    initD2D();
     initDComp();
     rebuildRTV();
 
