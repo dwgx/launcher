@@ -111,6 +111,39 @@ void openRenamePack(const std::string& pack_id, const std::wstring& orig_name);
 void paintRenamePackModal(D2DApp& app, float W, float H);
 void onRenamePackResult(bool success);
 
+// 看别人主页 (chat 头像右键)
+struct UserProfileState {
+    bool open = false;
+    Tween t;
+};
+extern UserProfileState g_user_profile;
+void openUserProfile(const std::wstring& uid_or_nickname);
+void paintUserProfileModal(D2DApp& app, float W, float H);
+
+// 编辑自己的状态消息（"在做什么..."）
+struct EditStatusTextState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+};
+extern EditStatusTextState g_edit_status;
+void openEditStatusText();
+void paintEditStatusTextModal(D2DApp& app, float W, float H);
+void onEditStatusTextResult(bool success);
+
+// 编辑自己的个人签名 bio
+struct EditBioState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+};
+extern EditBioState g_edit_bio;
+void openEditBio();
+void paintEditBioModal(D2DApp& app, float W, float H);
+void onEditBioResult(bool success);
+
 // 主帧循环 tick
 void tickAll(float dt);
 

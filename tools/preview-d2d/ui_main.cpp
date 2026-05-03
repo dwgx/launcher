@@ -16,6 +16,7 @@
 #include "toast.h"
 #include "ws_user.h"
 #include "i18n.h"
+#include "game_assets.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -234,7 +235,7 @@ void paintAccountDropdown(D2DApp& app, float W) {
     prim::drawLine(ctx, dx + 8, dy + 50, dx + dw - 8, dy + 50,
                    br.solidA(pal.divider, t), 1.0f);
 
-    // status fold trigger
+    // status fold trigger — 显当前状态 + 状态消息
     float iy = dy + 58;
     LayoutRect strigger{ dx + 6, iy, dw - 12, 30 };
     bool shov = strigger.contains(g_mouse);
@@ -257,6 +258,33 @@ void paintAccountDropdown(D2DApp& app, float W) {
         g_status_fold_t.start(g_status_fold_t.value(),
                               g_status_fold_open ? 1.0f : 0.0f,
                               0.22f, 0, curve::easeOutCubic);
+    }, true);
+    iy += 32;
+
+    // 状态消息行 — 点击编辑（48 字内自定义文字）
+    LayoutRect status_text_row{ dx + 6, iy, dw - 12, 28 };
+    bool stm_h = status_text_row.contains(g_mouse);
+    if (stm_h) {
+        prim::fillRR(ctx, status_text_row.x, status_text_row.y,
+                     status_text_row.w, status_text_row.h, 6.0f,
+                     br.solidA(pal.text, t * 0.06f));
+    }
+    auto* sm_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+    icons::drawIcon(app, icons::Name::Edit, dx + 14, iy + 6, 14,
+                    fadeArgb(pal.text_muted, t));
+    if (g_user.status_text.empty()) {
+        prim::drawText_(ctx, L"添加状态消息…", sm_fmt,
+                        dx + 32, iy + 7, dw - 60, 16,
+                        br.solidA(pal.text_faint, t));
+    } else {
+        prim::drawText_(ctx, g_user.status_text, sm_fmt,
+                        dx + 32, iy + 7, dw - 60, 16,
+                        br.solidA(pal.text_muted, t));
+    }
+    hit(status_text_row, [](){
+        modal::openEditStatusText();
+        g_account_dropdown = false;
+        g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
     }, true);
     iy += 32;
 
@@ -539,24 +567,54 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
 
-    // CS2 game-card 240×140
+    // CS2 game-card 240×140 — 真 cover 缩略图
     float cx = ax + 32, cy = ay + 80;
-    prim::drawShadow(ctx, br, cx, cy, 240, 140, 12.0f, pal.shadow_card_hover, op, 4.0f, 4);
-    prim::fillRR(ctx, cx, cy, 240, 140, 12.0f, br.solidA(0xC96442, op));
-    auto* gn_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(16.0f),
+    LayoutRect game_card{ cx, cy, 240, 140 };
+    bool gc_hov = game_card.contains(g_mouse);
+    float lift = gc_hov ? -2.0f : 0.0f;
+    prim::drawShadow(ctx, br, cx, cy + lift, 240, 140, 12.0f,
+                     pal.shadow_card_hover, op, gc_hov ? 5.0f : 4.0f, 4);
+
+    auto cs2_path = cs2HeaderPath();
+    auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
+    if (cover) {
+        // 圆角裁剪 + cover fill
+        ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy + lift, cx + 240, cy + 140 + lift),
+                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        D2D1_SIZE_F sz = cover->GetSize();
+        float scale = (std::max)(240.0f / sz.width, 140.0f / sz.height);
+        float dw = sz.width * scale, dh = sz.height * scale;
+        float dx = cx + (240 - dw) * 0.5f, dy = cy + lift + (140 - dh) * 0.5f;
+        ctx->DrawBitmap(cover, D2D1::RectF(dx, dy, dx + dw, dy + dh),
+                        op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        // 底部黑色渐变 + 标题
+        prim::fillRect(ctx, cx, cy + lift + 80, 240, 60,
+                       br.solidA(0x000000, op * 0.55f));
+        ctx->PopAxisAlignedClip();
+        // 圆角描边覆盖回去（裁剪后矩形角丢了）
+        prim::strokeRR(ctx, cx, cy + lift, 240, 140, 12.0f,
+                       br.solidA(0xFFFFFF, op * 0.05f));
+    } else {
+        prim::fillRR(ctx, cx, cy + lift, 240, 140, 12.0f, br.solidA(0xC96442, op));
+    }
+
+    auto* gn_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
                                       DWRITE_FONT_WEIGHT_BOLD);
     prim::drawText_(ctx, L"Counter-Strike 2", gn_fmt,
-                    cx + 16, cy + 16, 240 - 32, 28,
+                    cx + 16, cy + lift + 96, 240 - 32, 24,
                     br.solidA(0xFFFFFF, op));
-    prim::drawText_(ctx, L"点击启动", sub,
-                    cx + 16, cy + 110, 240 - 32, 18,
-                    br.solidA(0xFFFFFF, op * 0.85f));
-    // 中央 ▶
-    float pcx = cx + 120, pcy = cy + 70;
-    prim::fillCircle(ctx, pcx, pcy, 22, br.solidA(0xFFFFFF, op * 0.85f));
-    icons::drawIcon(app, icons::Name::Play, pcx - 10, pcy - 10, 20, 0xFF1F1E1D);
+    prim::drawText_(ctx, L"点击查看 / 启动", sub,
+                    cx + 16, cy + lift + 118, 240 - 32, 16,
+                    br.solidA(0xFFFFFF, op * 0.78f));
+    // 中央 ▶ (hover 才显)
+    if (gc_hov) {
+        float pcx = cx + 120, pcy = cy + lift + 60;
+        prim::fillCircle(ctx, pcx, pcy, 22, br.solidA(0x000000, op * 0.55f));
+        prim::strokeCircle(ctx, pcx, pcy, 22, br.solidA(0xFFFFFF, op), 1.5f);
+        icons::drawIcon(app, icons::Name::Play, pcx - 9, pcy - 9, 18, fadeArgb(0xFFFFFFFF, op));
+    }
 
-    hit(LayoutRect{ cx, cy, 240, 140 }, [](){ modal::openCS2(); }, true);
+    hit(game_card, [](){ modal::openCS2(); }, true);
 }
 
 void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
@@ -663,24 +721,29 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
     float vx = ax + 32, sy_ = ay + 80;
 
-    // 主题 seg control
+    // 主题 seg control — pill 滑块 tween
     prim::drawText_(ctx, L"主题", lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
     sy_ += 24;
     float seg_w = 240, seg_h = 36;
     prim::fillRR(ctx, vx, sy_, seg_w, seg_h, 8.0f, br.solidA(pal.surface, op));
-    bool theme_dark = g_dark;
     float pill_w_t = seg_w * 0.5f;
-    float pill_x = vx + (theme_dark ? pill_w_t : 0);
-    prim::fillRR(ctx, pill_x + 2, sy_ + 2, pill_w_t - 4, seg_h - 4, 6.0f,
+    float theme_target = g_dark ? pill_w_t : 0.0f;
+    if (!g_seg_theme_x.started) {
+        g_seg_theme_x.start(theme_target, theme_target, 0.001f, 0, curve::easeOutQuint);
+    } else if (std::abs(g_seg_theme_x.to - theme_target) > 0.5f) {
+        g_seg_theme_x.start(g_seg_theme_x.value(), theme_target, 0.30f, 0, curve::easeOutQuint);
+    }
+    float theme_pill_x = vx + g_seg_theme_x.value();
+    prim::fillRR(ctx, theme_pill_x + 2, sy_ + 2, pill_w_t - 4, seg_h - 4, 6.0f,
                  br.solidA(pal.card, op));
     prim::drawText_(ctx, L"亮", sub,
                     vx, sy_ + 9, pill_w_t, 18,
-                    br.solidA(theme_dark ? pal.text_muted : pal.text, op),
+                    br.solidA(g_dark ? pal.text_muted : pal.text, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
     prim::drawText_(ctx, L"暗", sub,
                     vx + pill_w_t, sy_ + 9, pill_w_t, 18,
-                    br.solidA(theme_dark ? pal.text : pal.text_muted, op),
+                    br.solidA(g_dark ? pal.text : pal.text_muted, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
     hit(LayoutRect{ vx, sy_, pill_w_t, seg_h },
         [](){ g_dark = false; persist::saveTheme(false); }, true);
@@ -688,7 +751,7 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
         [](){ g_dark = true; persist::saveTheme(true); }, true);
     sy_ += seg_h + 28;
 
-    // 语言 seg control (3 段)
+    // 语言 seg control (3 段) — pill 滑块 tween
     prim::drawText_(ctx, L"语言", lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
     sy_ += 24;
@@ -696,7 +759,14 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::fillRR(ctx, vx, sy_, lseg_w, seg_h, 8.0f, br.solidA(pal.surface, op));
     int cur_lang = (int)g_lang;
     float lp_w = lseg_w / 3.0f;
-    prim::fillRR(ctx, vx + cur_lang * lp_w + 2, sy_ + 2, lp_w - 4, seg_h - 4, 6.0f,
+    float lang_target = cur_lang * lp_w;
+    if (!g_seg_lang_x.started) {
+        g_seg_lang_x.start(lang_target, lang_target, 0.001f, 0, curve::easeOutQuint);
+    } else if (std::abs(g_seg_lang_x.to - lang_target) > 0.5f) {
+        g_seg_lang_x.start(g_seg_lang_x.value(), lang_target, 0.32f, 0, curve::easeOutQuint);
+    }
+    float lang_pill_x = vx + g_seg_lang_x.value();
+    prim::fillRR(ctx, lang_pill_x + 2, sy_ + 2, lp_w - 4, seg_h - 4, 6.0f,
                  br.solidA(pal.card, op));
     const wchar_t* langs[3] = { L"English", L"简体中文", L"日本語" };
     for (int i = 0; i < 3; ++i) {
@@ -758,6 +828,23 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
     field(cy + 90, L"昵称",      g_user.nickname.c_str(), true);
     field(cy + 124, L"邮箱",     g_user.email.c_str(),    false);
     field(cy + 158, L"订阅到期", g_user.expires.c_str(),  false);
+
+    // 个人签名 — 大 textarea + 编辑按钮
+    prim::drawText_(ctx, L"个人签名", lab_fmt,
+                    cx + 16, cy + 196, 100, 14, br.solidA(pal.text_muted, op));
+    LayoutRect bio_box{ cx + 16, cy + 214, cw - 32, 80 };
+    prim::fillRR(ctx, bio_box.x, bio_box.y, bio_box.w, bio_box.h, 8.0f,
+                 br.solidA(pal.surface, op));
+    if (g_user.bio.empty()) {
+        prim::drawText_(ctx, L"还没设置签名 — 点击编辑", val_fmt,
+                        bio_box.x + 12, bio_box.y + 8, bio_box.w - 24, 64,
+                        br.solidA(pal.text_faint, op));
+    } else {
+        prim::drawText_(ctx, g_user.bio, val_fmt,
+                        bio_box.x + 12, bio_box.y + 8, bio_box.w - 24, 64,
+                        br.solidA(pal.text, op));
+    }
+    hit(bio_box, [](){ modal::openEditBio(); }, true);
 
     // 上传头像 + 改密码 按钮
     float by = cy + ch - 40;
@@ -870,6 +957,9 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintAddTagModal(app, W, H);
     modal::paintCreatePackModal(app, W, H);
     modal::paintRenamePackModal(app, W, H);
+    modal::paintUserProfileModal(app, W, H);
+    modal::paintEditStatusTextModal(app, W, H);
+    modal::paintEditBioModal(app, W, H);
 
     // toast 在最最顶层
     toast::paint(app, W, H);

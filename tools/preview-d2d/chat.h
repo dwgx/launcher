@@ -51,6 +51,8 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah);
 void tick(float dt);
 
 bool onMouseLDown(HWND hwnd, POINT dip);
+// 右键命中头像 → 弹"看主页"菜单（PostMessage WM_APP+37 with std::wstring* from）
+bool onMouseRDown(HWND hwnd, POINT dip);
 void onChar(HWND hwnd, wchar_t c, bool ctrl);
 void onKey(HWND hwnd, int vk, bool shift, bool ctrl);
 

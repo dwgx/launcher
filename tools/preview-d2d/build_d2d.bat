@@ -14,7 +14,10 @@ del /q *.obj 2>nul
 if "%RC%"=="0" (
     if not exist ..\..\dist mkdir ..\..\dist
     copy /y LauncherD2D.exe ..\..\dist\LauncherD2D.exe >nul
-    echo [build_d2d] LauncherD2D.exe -^> dist\
+    if exist ..\..\assets\images\games\cs2_header.jpg (
+        copy /y ..\..\assets\images\games\cs2_header.jpg ..\..\dist\cs2_header.jpg >nul
+    )
+    echo [build_d2d] LauncherD2D.exe + cs2_header.jpg -^> dist\
 )
 popd
 exit /b %RC%

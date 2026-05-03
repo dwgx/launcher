@@ -14,6 +14,8 @@ namespace launcher::d2d::fetch {
 
 std::vector<Listing> g_market_listings;
 std::mutex g_market_mtx;
+PeerProfile g_peer;
+std::mutex g_peer_mtx;
 
 namespace {
 struct StrArg { std::wstring s; HWND h; };
@@ -28,6 +30,14 @@ std::wstring utf8ToW(const std::string& s) {
     std::wstring w(n - 1, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
+}
+std::string wToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string s(n - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+    return s;
 }
 }
 
@@ -153,10 +163,16 @@ void loginHistory(HWND notify) {
     auto* a = new VoidArg{ notify };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<VoidArg> a((VoidArg*)lp);
-        std::string body = "{\"session_token\":\"" + g_session_token + "\"}";
-        auto r = net::postJson(L"/api/profile/login-history", body);
+        // 后端是 GET（GDI+ Preview 没接通过这个端点；试 GET 失败再 POST）
+        std::string url = "/api/profile/login-history?session_token=" + g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        if (!r.ok()) {
+            // 退到 POST
+            std::string body = "{\"session_token\":\"" + g_session_token + "\"}";
+            r = net::postJson(L"/api/profile/login-history", body);
+        }
         if (!r.ok()) return 0;
-        // 把整个 body 透传（modal 里再解析）
         auto* p = new std::string(std::move(r.body));
         PostMessageW(a->h, WM_APP + 30, 1, (LPARAM)p);
         return 0;
@@ -192,6 +208,54 @@ void marketListings(HWND notify) {
             g_market_listings = std::move(tmp);
         }
         PostMessageW(a->h, WM_APP + 33, 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+void profileUpdate(HWND notify, const std::string& fields) {
+    if (g_session_token.empty()) return;
+    struct A { std::string f; HWND h; };
+    auto* a = new A{ fields, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token + "\"," + a->f + "}";
+        auto r = net::postJson(L"/api/profile/update", body);
+        PostMessageW(a->h, WM_APP + 35, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
+    {
+        std::lock_guard<std::mutex> lk(g_peer_mtx);
+        g_peer = PeerProfile{};
+        g_peer.uid = uid_or_nickname;
+    }
+    struct A { std::wstring k; HWND h; };
+    auto* a = new A{ uid_or_nickname, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string key = wToUtf8(a->k);
+        std::string url = "/api/profile/" + key;
+        if (!g_session_token.empty()) url += "?session_token=" + g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        {
+            std::lock_guard<std::mutex> lk(g_peer_mtx);
+            if (r.ok()) {
+                g_peer.uid         = utf8ToW(net::jsonStr(r.body, "uid"));
+                g_peer.username    = utf8ToW(net::jsonStr(r.body, "username"));
+                g_peer.nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
+                g_peer.status      = utf8ToW(net::jsonStr(r.body, "status"));
+                g_peer.status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
+                g_peer.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
+                g_peer.loaded = true;
+            } else {
+                g_peer.err = utf8ToW(r.body.empty() ? "无法连接" : r.body.substr(0, 80));
+                g_peer.loaded = true;
+            }
+        }
+        PostMessageW(a->h, WM_APP + 36, r.ok() ? 1 : 0, 0);
         return 0;
     }, a, 0, nullptr);
 }

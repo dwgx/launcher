@@ -284,7 +284,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp > 0) {
                 swprintf_s(buf, L"已导入 %d 张表情 ✓", (int)wp);
                 toast::show(buf);
-                sticker::fetchMyPacks(hwnd);   // 重拉
+                // 不重拉 packs — 重拉会清空当前 pack 的本地 stickers 又异步重新拉，
+                // 在 1 秒空白期间用户看不到刚导入的图。importFromFolder 内部已经把
+                // 路径加进 g_packs[pid].stickers 了，本地状态已经是最新。
             } else {
                 toast::show(L"未上传任何文件（检查文件夹）");
             }
@@ -297,17 +299,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP + 35: {                    // profile update result
+            modal::onEditStatusTextResult(wp != 0);
+            modal::onEditBioResult(wp != 0);
+            if (wp) toast::show(L"已保存");
+            return 0;
+        }
+        case WM_APP + 36: {                    // peer profile fetched
+            // paint 帧自动用最新 g_peer
+            return 0;
+        }
+        case WM_APP + 37: {                    // chat 头像右键 → 看主页 (lp = std::wstring*)
+            std::unique_ptr<std::wstring> p((std::wstring*)lp);
+            if (p && !p->empty()) modal::openUserProfile(*p);
+            return 0;
+        }
         case tray::kTrayCallbackMsg: {
             if (tray::onCallback(hwnd, wp, lp)) return 0;
             return 0;
         }
-        case WM_RBUTTONDOWN:
+        case WM_RBUTTONDOWN: {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            POINT dip = physToDip(pt);
+            // 在 chat 里右键命中头像 → 看主页（不要最小化）
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && chat::onMouseRDown(hwnd, dip)) {
+                return 0;
+            }
             if (stages::g_stage == stages::Stage::Main) {
                 tray::hideToTray(hwnd);
                 return 0;
             }
             PostQuitMessage(0);
             return 0;
+        }
         case WM_DESTROY:
             ws::stop();
             tray::remove();

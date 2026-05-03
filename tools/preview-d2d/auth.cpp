@@ -97,9 +97,11 @@ static void drawField(D2DApp& app, InputBox& box,
                        br.solidA(pal.primary, op * 0.15f), 4.0f);
     }
 
-    // floating label：size 14→11px，y center→top，颜色 muted→primary
-    float lab_size = 14.0f - 3.0f * anim_v;
-    float lab_y = iy + 5.0f + (ih * 0.5f - 10.0f) * (1.0f - anim_v);
+    // floating label：filled 时 size 9 顶部，empty 时 size 12 中央
+    // 之前 size 11 + body 10.5 在 iy+22 → 只 1px 间距，filled 时 label 渲染框顶到 body 顶
+    // 新方案：label 顶部 iy+4，filled 时只占 iy+4..iy+19；body iy+22+ → 3px 留白
+    float lab_size = 12.0f - 3.0f * anim_v;
+    float lab_y = iy + 4.0f + (ih * 0.5f - 10.0f) * (1.0f - anim_v);
     auto interp = [&](uint32_t a, uint32_t b) -> uint32_t {
         auto byte = [](uint32_t c, int sh) { return (c >> sh) & 0xFFu; };
         uint32_t r = (uint32_t)(byte(a, 16) + (int)((byte(b, 16) - byte(a, 16)) * anim_v));
@@ -112,7 +114,7 @@ static void drawField(D2DApp& app, InputBox& box,
                                        anim_v > 0.5f ? DWRITE_FONT_WEIGHT_BOLD
                                                      : DWRITE_FONT_WEIGHT_NORMAL);
     prim::drawText_(ctx, labelStr, lab_fmt,
-                    ix + 14.0f, lab_y, iw - 28.0f, lab_size + 8.0f,
+                    ix + 14.0f, lab_y, iw - 28.0f, lab_size + 6.0f,
                     br.solidA(lab_rgb, op),
                     DWRITE_TEXT_ALIGNMENT_LEADING,
                     DWRITE_PARAGRAPH_ALIGNMENT_NEAR);

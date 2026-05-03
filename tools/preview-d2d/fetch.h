@@ -48,4 +48,19 @@ extern std::mutex g_market_mtx;
 // GET /api/market/listings → 写 g_market_listings + WM_APP+33
 void marketListings(HWND notify);
 
+// POST /api/profile/update — 更新 nickname / status_text / bio 任一字段
+// fields = JSON object 片段，e.g. "\"bio\":\"...\""
+void profileUpdate(HWND notify, const std::string& fields);
+
+// GET /api/profile/:uid — 拿别人的资料 (nickname/status/bio/avatar)
+struct PeerProfile {
+    std::wstring uid, username, nickname, status, status_text, bio;
+    std::wstring avatar_path;
+    bool loaded = false;
+    std::wstring err;
+};
+extern PeerProfile g_peer;
+extern std::mutex g_peer_mtx;
+void peerProfile(HWND notify, const std::wstring& uid_or_nickname);
+
 }  // namespace launcher::d2d::fetch

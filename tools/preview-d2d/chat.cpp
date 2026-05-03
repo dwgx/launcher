@@ -52,6 +52,10 @@ static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 static std::unordered_map<std::wstring, bool> g_group_collapsed;
 static std::mutex g_streams_mtx;
 
+// 头像 hit 表 — paintChatPane 帧首清空，paintBubble 填充，WM_RBUTTONDOWN 命中
+struct AvatarHit { LayoutRect rect; std::wstring from; };
+static std::vector<AvatarHit> g_avatar_hits;
+
 std::vector<Msg>& streamFor(const std::wstring& slug) {
     auto it = g_streams.find(slug);
     if (it == g_streams.end()) {
@@ -218,7 +222,7 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
     auto* time_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
     auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
 
-    // 头像 28×28
+    // 头像 28×28 + 注册右键命中
     float ar = 14.0f;
     float ay = y + 4;
     if (!prev_same_author) {
@@ -231,6 +235,17 @@ static float paintBubble(D2DApp& app, const Msg& m, float x, float y, float maxw
                         br.solid(0xFFFFFFFF),
                         DWRITE_TEXT_ALIGNMENT_CENTER,
                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        // 注册头像 hit (左键插 @mention，右键看主页 — me 自己除外)
+        if (m.from != L"me" && !m.from.empty()) {
+            g_avatar_hits.push_back({ { x, ay, ar * 2, ar * 2 }, m.from });
+            std::wstring fcopy = m.from;
+            hit({ x, ay, ar * 2, ar * 2 }, [fcopy](){
+                // 左键插 @
+                std::wstring at = L"@" + fcopy + L" ";
+                g_composer.replaceSelection(at);
+                g_focus_composer = true;
+            }, true);
+        }
     }
     float bub_x = x + ar * 2 + 10;
     float bub_y = y + (prev_same_author ? 0 : 22);
@@ -488,6 +503,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* ctx = app.ctx();
     auto& br = app.brushes();
     prim::fillRect(ctx, ax, ay, aw, ah, br.solid(pal.bg));
+    g_avatar_hits.clear();   // 帧首清，paintBubble 会填充
 
     // header
     float hdr_h = 56;
@@ -655,7 +671,10 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             const auto& p = packs[i];
             wchar_t buf[32];
             swprintf_s(buf, L"%.10ls", p.name.c_str());
-            float bw = (std::min)(60.0f, measureW(app, buf, hint_fmt) + 16.0f);
+            // bw 给充足宽度避免 DirectWrite 自动换行（之前 60 限太紧"系统 emoji"换行）
+            float bw = measureW(app, buf, hint_fmt) + 16.0f;
+            if (bw > 100.0f) bw = 100.0f;
+            if (bw < 40.0f) bw = 40.0f;
             LayoutRect tab_r{ bx, by, bw, 24 };
             bool ph = tab_r.contains(g_mouse);
             bool pa = (i == active_pack);
@@ -825,6 +844,18 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
 // ============== 事件 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     return dispatchClick(dip);
+}
+
+bool onMouseRDown(HWND hwnd, POINT dip) {
+    // 倒序找命中头像，命中就 PostMessage WM_APP+37 with std::wstring* from
+    for (auto it = g_avatar_hits.rbegin(); it != g_avatar_hits.rend(); ++it) {
+        if (it->rect.contains(dip)) {
+            auto* p = new std::wstring(it->from);
+            PostMessageW(hwnd, WM_APP + 37, 0, (LPARAM)p);
+            return true;
+        }
+    }
+    return false;
 }
 
 void onChar(HWND hwnd, wchar_t c, bool ctrl) {

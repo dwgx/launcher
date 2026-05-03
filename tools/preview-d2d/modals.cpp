@@ -9,6 +9,7 @@
 #include "stages.h"
 #include "fetch.h"
 #include "steam.h"
+#include "game_assets.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -19,13 +20,16 @@
 
 namespace launcher::d2d::modal {
 
-ChangePwState   g_change_pw;
-ConfirmState    g_confirm;
-CS2State        g_cs2;
-HistoryState    g_history;
-AddTagState     g_addtag;
-CreatePackState g_createpack;
-RenamePackState g_renamepack;
+ChangePwState     g_change_pw;
+ConfirmState      g_confirm;
+CS2State          g_cs2;
+HistoryState      g_history;
+AddTagState       g_addtag;
+CreatePackState   g_createpack;
+RenamePackState   g_renamepack;
+UserProfileState  g_user_profile;
+EditStatusTextState g_edit_status;
+EditBioState      g_edit_bio;
 
 namespace {
 
@@ -161,11 +165,17 @@ void tickAll(float dt) {
     g_createpack.input.float_t.tick(dt);
     g_renamepack.t.tick(dt);
     g_renamepack.input.float_t.tick(dt);
+    g_user_profile.t.tick(dt);
+    g_edit_status.t.tick(dt);
+    g_edit_status.input.float_t.tick(dt);
+    g_edit_bio.t.tick(dt);
+    g_edit_bio.input.float_t.tick(dt);
 }
 
 bool anyOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
-        || g_addtag.open || g_createpack.open || g_renamepack.open;
+        || g_addtag.open || g_createpack.open || g_renamepack.open
+        || g_user_profile.open || g_edit_status.open || g_edit_bio.open;
 }
 
 // ============== ChangePw ==============
@@ -386,26 +396,44 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
 
-    // 顶部 cover (主色渐变占位)
+    // 顶部 cover — 真 CS2 头图（找不到才退化到主色渐变）
     float cover_h = 200;
-    prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
+    auto cs2_path = cs2HeaderPath();
+    auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
+    if (cover_bmp) {
+        // 圆角顶部裁剪
+        ctx->PushAxisAlignedClip(D2D1::RectF(cx, cy, cx + cw, cy + cover_h),
+                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        D2D1_SIZE_F sz = cover_bmp->GetSize();
+        // 等比 fill (cover)
+        float scale = (std::max)(cw / sz.width, cover_h / sz.height);
+        float dw = sz.width * scale, dh = sz.height * scale;
+        float dx = cx + (cw - dw) * 0.5f, dy = cy + (cover_h - dh) * 0.5f;
+        ctx->DrawBitmap(cover_bmp, D2D1::RectF(dx, dy, dx + dw, dy + dh),
+                        t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        // 底部黑色渐变蒙版（让标题文字可读）
+        prim::fillRect(ctx, cx, cy + cover_h - 80, cw, 80,
+                       br.solidA(0x000000, 0.55f * t));
+        ctx->PopAxisAlignedClip();
+    } else {
+        prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
+    }
     auto* hh = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     prim::drawText_(ctx, L"Counter-Strike 2", hh,
-                    cx + 24, cy + 24, cw - 48, 36,
+                    cx + 24, cy + cover_h - 60, cw - 48, 30,
                     br.solidA(0xFFFFFF, t));
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
     prim::drawText_(ctx, L"Valve  ·  Source 2", sub,
-                    cx + 24, cy + 60, cw - 48, 18,
+                    cx + 24, cy + cover_h - 28, cw - 48, 18,
                     br.solidA(0xFFFFFF, t * 0.85f));
 
-    // 中央 ▶
-    float pcx = cx + cw * 0.5f, pcy = cy + cover_h * 0.5f + 20;
-    prim::fillCircle(ctx, pcx, pcy, 32, br.solidA(0xFFFFFF, t * 0.92f));
-    icons::drawIcon(app, icons::Name::Play, pcx - 14, pcy - 14, 28, 0xFF1F1E1D);
-    hit(LayoutRect{ pcx - 32, pcy - 32, 64, 64 }, [](){
-        // 真启动 Steam 留 polish
-    }, true);
+    // 中央 ▶ — 真打开 Steam 商店页（带视频自动播放，浏览器播）
+    float pcx = cx + cw * 0.5f, pcy = cy + cover_h * 0.5f;
+    prim::fillCircle(ctx, pcx, pcy, 32, br.solidA(0x000000, t * 0.55f));
+    prim::strokeCircle(ctx, pcx, pcy, 32, br.solidA(0xFFFFFF, t), 2.0f);
+    icons::drawIcon(app, icons::Name::Play, pcx - 14, pcy - 14, 28, fadeArgb(0xFFFFFFFF, t));
+    hit(LayoutRect{ pcx - 32, pcy - 32, 64, 64 }, [](){ openCS2Store(); }, true);
 
     // 底部 stat
     auto* stat_lbl = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
@@ -765,6 +793,245 @@ void onRenamePackResult(bool success) {
     if (success) closeRenamePack();
     else g_renamepack.error_msg = L"重命名失败";
 }
+// ============== UserProfile modal ==============
+void openUserProfile(const std::wstring& uid_or_nickname) {
+    g_user_profile.open = true;
+    g_user_profile.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+    fetch::peerProfile(GetActiveWindow(), uid_or_nickname);
+}
+static void closeUserProfile() {
+    g_user_profile.t.start(g_user_profile.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_user_profile.open = false;
+}
+void paintUserProfileModal(D2DApp& app, float W, float H) {
+    if (!g_user_profile.open && g_user_profile.t.value() < 0.001f) return;
+    float t = g_user_profile.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 380, ch = 460;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    // 头部主色 banner
+    prim::fillRR(ctx, cx, cy, cw, 100, 16.0f, br.solidA(pal.primary, t));
+    prim::fillRect(ctx, cx, cy + 60, cw, 40, br.solidA(pal.primary, t));
+
+    // 头像（用 peer.avatar_path 或占位）
+    fetch::PeerProfile peer;
+    {
+        std::lock_guard<std::mutex> lk(fetch::g_peer_mtx);
+        peer = fetch::g_peer;
+    }
+    float ar = 36.0f;
+    float ax = cx + (cw - ar * 2) * 0.5f, ay = cy + 60;
+    prim::fillCircle(ctx, ax + ar, ay + ar, ar + 4, br.solidA(pal.card, t));
+    prim::fillCircle(ctx, ax + ar, ay + ar, ar, br.solidA(pal.primary_hover, t));
+    auto* init_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(20.0f),
+                                         DWRITE_FONT_WEIGHT_BOLD);
+    wchar_t init[2] = { (wchar_t)towupper(peer.nickname.empty()
+                        ? (peer.uid.empty() ? L'?' : peer.uid[0])
+                        : peer.nickname[0]), 0 };
+    prim::drawText_(ctx, init, init_fmt,
+                    ax, ay, ar * 2, ar * 2,
+                    br.solidA(0xFFFFFF, t),
+                    DWRITE_TEXT_ALIGNMENT_CENTER,
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
+                                  DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    auto* mt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+
+    if (!peer.loaded) {
+        prim::drawText_(ctx, L"加载中…", sub,
+                        cx, cy + 200, cw, 20,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else if (!peer.err.empty()) {
+        prim::drawText_(ctx, L"获取失败", h1,
+                        cx, cy + 180, cw, 24,
+                        br.solidA(pal.text, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        prim::drawText_(ctx, peer.err, sub,
+                        cx + 20, cy + 210, cw - 40, 40,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else {
+        // nickname + status dot
+        prim::drawText_(ctx, peer.nickname.empty() ? peer.uid : peer.nickname, h1,
+                        cx, cy + 150, cw, 26,
+                        br.solidA(pal.text, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        // uid + username
+        wchar_t handle[128];
+        swprintf_s(handle, L"@%.32ls  ·  UID %.16ls",
+                   peer.username.c_str(), peer.uid.c_str());
+        prim::drawText_(ctx, handle, mt,
+                        cx, cy + 178, cw, 18,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        // status text
+        if (!peer.status_text.empty()) {
+            prim::drawText_(ctx, peer.status_text, sub,
+                            cx + 24, cy + 210, cw - 48, 40,
+                            br.solidA(pal.text_muted, t),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        // bio
+        if (!peer.bio.empty()) {
+            prim::drawText_(ctx, L"个人签名", mt,
+                            cx + 24, cy + 270, cw - 48, 16,
+                            br.solidA(pal.text_muted, t));
+            prim::fillRR(ctx, cx + 24, cy + 290, cw - 48, 80, 8.0f,
+                         br.solidA(pal.surface, t));
+            prim::drawText_(ctx, peer.bio, sub,
+                            cx + 36, cy + 300, cw - 72, 64,
+                            br.solidA(pal.text, t));
+        }
+    }
+
+    // 关闭 ✕
+    LayoutRect close_btn{ cx + cw - 36, cy + 12, 24, 24 };
+    bool ch_h = close_btn.contains(g_mouse);
+    if (ch_h) {
+        prim::fillRR(ctx, close_btn.x, close_btn.y, 24, 24, 6,
+                     br.solidA(0x000000, t * 0.20f));
+    }
+    icons::drawIcon(app, icons::Name::X, close_btn.x + 4, close_btn.y + 4, 16,
+                    fadeArgb(0xFFFFFFFF, t));
+    hit(close_btn, [](){ closeUserProfile(); }, true);
+
+    drawGhostBtn(app, cx + 30, cy + ch - 48, cw - 60, 36,
+                 L"关闭", t, [](){ closeUserProfile(); });
+}
+
+// ============== EditStatusText modal ==============
+void openEditStatusText() {
+    g_edit_status.open = true;
+    g_edit_status.input.text = g_user.status_text;
+    g_edit_status.input.cursor = (int)g_user.status_text.size();
+    g_edit_status.input.clearSel();
+    g_edit_status.busy = false;
+    g_edit_status.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeEditStatusText() {
+    g_edit_status.t.start(g_edit_status.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_edit_status.open = false;
+}
+static void submitEditStatusText(HWND hwnd) {
+    if (g_edit_status.busy) return;
+    std::wstring s = g_edit_status.input.text;
+    if (s.size() > 48) s = s.substr(0, 48);
+    g_edit_status.busy = true;
+    g_user.status_text = s;
+    // utf-8 escape
+    auto wto8 = [](const std::wstring& w) -> std::string {
+        if (w.empty()) return {};
+        int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (n <= 0) return {};
+        std::string s(n - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+        return s;
+    };
+    std::string fields = "\"status_text\":\"" + net::jsonEscape(s) + "\"";
+    fetch::profileUpdate(hwnd, fields);
+    closeEditStatusText();   // 立即关，乐观更新（失败 toast）
+}
+void onEditStatusTextResult(bool success) {
+    g_edit_status.busy = false;
+    if (!success) {
+        // 后端可能不支持 status_text 字段，本地更新无所谓
+    }
+}
+void paintEditStatusTextModal(D2DApp& app, float W, float H) {
+    if (!g_edit_status.open && g_edit_status.t.value() < 0.001f) return;
+    float t = g_edit_status.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 360, ch = 220;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, L"状态消息", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, L"显示在你的状态旁，48 字以内", sub,
+                    cx + 30, cy + 50, cw - 60, 18, br.solidA(pal.text_muted, t));
+    drawField(app, g_edit_status.input, cx + 30, cy + 80, cw - 60, 40,
+              L"在做什么…", true, t);
+    hit(g_edit_status.input.bounds, [](){}, true);
+    float by = cy + ch - 52;
+    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeEditStatusText(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   g_edit_status.busy ? L"保存中…" : L"保存", t,
+                   [hwnd = GetActiveWindow()](){ submitEditStatusText(hwnd); });
+}
+
+// ============== EditBio modal ==============
+void openEditBio() {
+    g_edit_bio.open = true;
+    g_edit_bio.input.text = g_user.bio;
+    g_edit_bio.input.cursor = (int)g_user.bio.size();
+    g_edit_bio.input.clearSel();
+    g_edit_bio.busy = false;
+    g_edit_bio.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeEditBio() {
+    g_edit_bio.t.start(g_edit_bio.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_edit_bio.open = false;
+}
+static void submitEditBio(HWND hwnd) {
+    if (g_edit_bio.busy) return;
+    std::wstring s = g_edit_bio.input.text;
+    if (s.size() > 240) s = s.substr(0, 240);
+    g_edit_bio.busy = true;
+    g_user.bio = s;
+    std::string fields = "\"bio\":\"" + net::jsonEscape(s) + "\"";
+    fetch::profileUpdate(hwnd, fields);
+    closeEditBio();
+}
+void onEditBioResult(bool success) {
+    g_edit_bio.busy = false;
+    (void)success;
+}
+void paintEditBioModal(D2DApp& app, float W, float H) {
+    if (!g_edit_bio.open && g_edit_bio.t.value() < 0.001f) return;
+    float t = g_edit_bio.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 460, ch = 320;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, L"个人签名", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, L"显示在你的资料卡，240 字以内", sub,
+                    cx + 30, cy + 50, cw - 60, 18, br.solidA(pal.text_muted, t));
+    drawField(app, g_edit_bio.input, cx + 30, cy + 80, cw - 60, 140,
+              L"写点什么…", true, t);
+    hit(g_edit_bio.input.bounds, [](){}, true);
+    float by = cy + ch - 52;
+    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeEditBio(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   g_edit_bio.busy ? L"保存中…" : L"保存", t,
+                   [hwnd = GetActiveWindow()](){ submitEditBio(hwnd); });
+}
+
 void paintRenamePackModal(D2DApp& app, float W, float H) {
     if (!g_renamepack.open && g_renamepack.t.value() < 0.001f) return;
     float t = g_renamepack.t.value();
@@ -802,7 +1069,10 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
     bool consumed = dispatchClick(dip);
     if (!consumed) {
-        if (g_renamepack.open) closeRenamePack();
+        if (g_edit_bio.open) closeEditBio();
+        else if (g_edit_status.open) closeEditStatusText();
+        else if (g_user_profile.open) closeUserProfile();
+        else if (g_renamepack.open) closeRenamePack();
         else if (g_createpack.open) closeCreatePack();
         else if (g_addtag.open) closeAddTag();
         else if (g_change_pw.open) closeChangePw();
@@ -814,6 +1084,8 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
 }
 
 bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
+    if (g_edit_bio.open) { g_edit_bio.input.onChar(c, ctrl, hwnd); return true; }
+    if (g_edit_status.open) { g_edit_status.input.onChar(c, ctrl, hwnd); return true; }
     if (g_addtag.open) { g_addtag.input.onChar(c, ctrl, hwnd); return true; }
     if (g_createpack.open) { g_createpack.input.onChar(c, ctrl, hwnd); return true; }
     if (g_renamepack.open) { g_renamepack.input.onChar(c, ctrl, hwnd); return true; }
@@ -828,6 +1100,9 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!anyOpen()) return false;
     if (vk == VK_ESCAPE) {
+        if (g_edit_bio.open) { closeEditBio(); return true; }
+        if (g_edit_status.open) { closeEditStatusText(); return true; }
+        if (g_user_profile.open) { closeUserProfile(); return true; }
         if (g_renamepack.open) { closeRenamePack(); return true; }
         if (g_createpack.open) { closeCreatePack(); return true; }
         if (g_addtag.open) { closeAddTag(); return true; }
@@ -835,6 +1110,16 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (g_confirm.open) { closeConfirm(); return true; }
         if (g_cs2.open) { closeCS2(); return true; }
         if (g_history.open) { closeHistory(); return true; }
+    }
+    if (g_edit_status.open) {
+        if (vk == VK_RETURN) { submitEditStatusText(hwnd); return true; }
+        g_edit_status.input.onKey(vk, shift, ctrl);
+        return true;
+    }
+    if (g_edit_bio.open) {
+        if (vk == VK_RETURN && !ctrl) { submitEditBio(hwnd); return true; }
+        g_edit_bio.input.onKey(vk, shift, ctrl);
+        return true;
     }
     if (g_addtag.open) {
         if (vk == VK_RETURN) { submitAddTag(hwnd); return true; }
