@@ -405,50 +405,76 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     auto* ctx = app.ctx();
     auto& br = app.brushes();
 
-    float cw = 600, ch = 380;
+    float cw = 720, ch = 560;       // 加大让 store widget 装下
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
 
-    // 顶部 cover 区域 — 默认显示真 CS2 头图；WebView2 ready 后用 Steam 嵌入视频替代
-    float cover_h = 220;
+    // 标题栏 44px — ✕ 在右上角；WebView2 子窗口不会覆盖这里 (z-order 高但 bounds 不到这)
+    float bar_h = 44.0f;
+    auto* bar_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
+                                       DWRITE_FONT_WEIGHT_BOLD);
+    prim::drawText_(ctx, L"Counter-Strike 2", bar_fmt,
+                    cx + 18, cy + 11, 300, 22,
+                    br.solidA(pal.text, t));
+    auto* bar_sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+    prim::drawText_(ctx, L"Valve · Source 2", bar_sub,
+                    cx + 18 + 130, cy + 14, 200, 18,
+                    br.solidA(pal.text_muted, t));
+    prim::fillRect(ctx, cx, cy + bar_h - 1, cw, 1, br.solidA(pal.divider, t));
+
+    // ✕ 在标题栏右上 (bar_h 内，WebView 不覆盖)
+    {
+        LayoutRect xb{ cx + cw - 36, cy + 8, 28, 28 };
+        bool xh = xb.contains(g_mouse);
+        if (xh) {
+            prim::fillRR(ctx, xb.x, xb.y, 28, 28, 6,
+                         br.solidA(pal.text, t * 0.10f));
+        }
+        icons::drawIcon(app, icons::Name::X, xb.x + 6, xb.y + 6, 16,
+                        fadeArgb(pal.text, t));
+        hit(xb, [](){ closeCS2(); }, true);
+    }
+
+    // 顶部 cover 区域 — 在标题栏下方 (cy+bar_h)
+    float cover_y = cy + bar_h;
+    float cover_h = 280;            // 加大视频区
     bool wv_ready = webview::isReady();
     if (wv_ready && t > 0.95f) {
         float scale = app.dpi() / 96.0f;
         int wl = (int)((cx + 8) * scale);
-        int wt = (int)((cy + 8) * scale);
+        int wt = (int)(cover_y * scale);
         int wr = (int)((cx + cw - 8) * scale);
-        int wb = (int)((cy + cover_h) * scale);
+        int wb = (int)((cover_y + cover_h) * scale);
         webview::setBounds(wl, wt, wr, wb);
         webview::show(true);
-        prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(pal.surface, t));
+        prim::fillRR(ctx, cx + 8, cover_y, cw - 16, cover_h, 8.0f,
+                     br.solidA(pal.surface, t));
     } else {
         webview::show(false);
         auto cs2_path = cs2HeaderPath();
         auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
         if (cover_bmp) {
-            // 真圆角顶部裁剪 — pushLayerRR 而不是矩形 PushAxisAlignedClip
-            prim::pushLayerRR(ctx, app.factory(), cx, cy, cw, cover_h, 16.0f);
+            prim::pushLayerRR(ctx, app.factory(), cx + 8, cover_y, cw - 16, cover_h, 8.0f);
             D2D1_SIZE_F sz = cover_bmp->GetSize();
-            float scale_ = (std::max)(cw / sz.width, cover_h / sz.height);
+            float scale_ = (std::max)((cw - 16) / sz.width, cover_h / sz.height);
             float dw = sz.width * scale_, dh = sz.height * scale_;
-            float dx = cx + (cw - dw) * 0.5f, dy = cy + (cover_h - dh) * 0.5f;
+            float dx = cx + 8 + ((cw - 16) - dw) * 0.5f;
+            float dy = cover_y + (cover_h - dh) * 0.5f;
             ctx->DrawBitmap(cover_bmp, D2D1::RectF(dx, dy, dx + dw, dy + dh),
                             t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            prim::fillRect(ctx, cx, cy + cover_h - 80, cw, 80,
+            prim::fillRect(ctx, cx + 8, cover_y + cover_h - 60, cw - 16, 60,
                            br.solidA(0x000000, 0.55f * t));
             prim::popLayer(ctx);
         } else {
-            prim::fillRR(ctx, cx, cy, cw, cover_h, 16.0f, br.solidA(0xC96442, t));
+            prim::fillRR(ctx, cx + 8, cover_y, cw - 16, cover_h, 8.0f,
+                         br.solidA(0xC96442, t));
         }
-        auto* hh = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
-                                      DWRITE_FONT_WEIGHT_BOLD);
-        prim::drawText_(ctx, L"Counter-Strike 2", hh,
-                        cx + 24, cy + cover_h - 60, cw - 48, 30,
-                        br.solidA(0xFFFFFF, t));
-        auto* sub_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
-        prim::drawText_(ctx, L"Valve  ·  Source 2  ·  视频加载中…", sub_fmt,
-                        cx + 24, cy + cover_h - 28, cw - 48, 18,
+        auto* sub_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+        prim::drawText_(ctx, webview::runtimeAvailable() ? L"视频加载中…" :
+                              L"WebView2 Runtime 未装 — 装 Edge 即可看视频",
+                        sub_fmt,
+                        cx + 24, cover_y + cover_h - 28, cw - 48, 18,
                         br.solidA(0xFFFFFF, t * 0.85f));
     }
 
@@ -456,36 +482,25 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     auto* stat_lbl = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
     auto* stat_val = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
                                         DWRITE_FONT_WEIGHT_BOLD);
-    struct S { const wchar_t* l; const wchar_t* v; };
+    struct S { const wchar_t* l; std::wstring v; };
     S stats[] = {
-        { L"账号", L"未登录 Steam" },
-        { L"最近玩", L"--" },
-        { L"总时长", L"--" },
+        { L"账号",   g_steam.persona.empty() ? std::wstring(L"未登录 Steam") : g_steam.persona },
+        { L"最近玩", g_steam.last_played.empty() ? std::wstring(L"--") : g_steam.last_played },
+        { L"总时长", g_steam.playtime_label.empty() ? std::wstring(L"--") : g_steam.playtime_label },
     };
-    float sx = cx + 24, sy = cy + cover_h + 24;
+    float sx = cx + 24, sy = cover_y + cover_h + 16;
     for (auto& s : stats) {
         prim::drawText_(ctx, s.l, stat_lbl,
                         sx, sy, 160, 14, br.solidA(pal.text_muted, t));
-        prim::drawText_(ctx, s.v, stat_val,
+        prim::drawText_(ctx, s.v.c_str(), stat_val,
                         sx, sy + 18, 160, 22, br.solidA(pal.text, t));
-        sx += 180;
+        sx += 220;
     }
 
     drawPrimaryBtn(app, cx + 24, cy + ch - 56, 200, 40,
                    L"启动 CS2", t, [](){ launchCS2(); });
     drawGhostBtn(app, cx + 240, cy + ch - 56, 160, 40,
                  L"商店页面", t, [](){ openCS2Store(); });
-
-    // 关闭 ✕
-    LayoutRect close_btn{ cx + cw - 40, cy + 12, 28, 28 };
-    bool close_hov = close_btn.contains(g_mouse);
-    if (close_hov) {
-        prim::fillRR(ctx, close_btn.x, close_btn.y, 28, 28, 6.0f,
-                     br.solidA(0x000000, t * 0.20f));
-    }
-    icons::drawIcon(app, icons::Name::X, close_btn.x + 6, close_btn.y + 6, 16,
-                    fadeArgb(0xFFFFFFFF, t));
-    hit(close_btn, [](){ closeCS2(); }, true);
 }
 
 // ============== History ==============

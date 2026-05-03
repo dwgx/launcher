@@ -236,7 +236,8 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<A> a((A*)lp);
         std::string key = wToUtf8(a->k);
-        std::string url = "/api/profile/" + key;
+        // backend route: /api/profile/peer/:key (key = uid 7-digit / username / user_id uuid)
+        std::string url = "/api/profile/peer/" + key;
         if (!g_session_token.empty()) url += "?session_token=" + g_session_token;
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
