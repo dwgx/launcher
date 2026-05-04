@@ -694,7 +694,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
                             br.solid(0xFFFFFFFF),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
         }
-        g_msg_hits.push_back({ { bub_x, bub_y, bub_w, bub_h }, idx });
+        // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
+        // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
+        {
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
+        }
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
     }
 
@@ -723,7 +728,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
             PostMessageW(GetActiveWindow(), WM_APP + 46,
                          (WPARAM)&g_pending_video, 0);
         }, true);
-        g_msg_hits.push_back({ { bub_x, bub_y, bub_w, bub_h }, idx });
+        // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
+        // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
+        {
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
+        }
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
     }
 
@@ -750,7 +760,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
             prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 16.0f,
                          br.solid(pal.surface));
         }
-        g_msg_hits.push_back({ { bub_x, bub_y, bub_w, bub_h }, idx });
+        // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
+        // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
+        {
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
+        }
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
     }
 
@@ -838,7 +853,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
             PostMessageW(GetActiveWindow(), WM_APP + 49,
                          (WPARAM)&g_pending_short, 0);
         }, true);
-        g_msg_hits.push_back({ { bub_x, bub_y, bub_w, bub_h }, idx });
+        // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
+        // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
+        {
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
+        }
         return (prev_same_author ? bub_h : bub_h + 22) + 6;
     }
 
