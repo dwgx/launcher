@@ -408,3 +408,69 @@ pub async fn delete_msg(
         .execute(&s.db).await.map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+// ---------------- 全文搜索 ----------------
+// Ctrl+F 触发 — 模糊匹配 messages.payload (text/sticker_alias) 在所有当前用户可见的频道。
+// 公开频道 + 用户加入的非公开频道。
+#[derive(Deserialize)]
+pub struct SearchQ {
+    pub session_token: String,
+    pub q:             String,
+    pub limit:         Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct SearchHit {
+    pub id:         i64,
+    pub chat_id:    String,
+    pub chat_slug:  Option<String>,
+    pub sender_id:  Option<String>,
+    pub msg_type:   String,
+    pub payload:    String,
+    pub created_at: i64,
+}
+
+pub async fn search(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<SearchQ>,
+) -> Result<Json<Vec<SearchHit>>, (StatusCode, String)> {
+    let me = auth_user(&s, &q.session_token).await?;
+    let term = q.q.trim();
+    if term.chars().count() < 2 {
+        return Ok(Json(vec![]));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let pattern = format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let rows = sqlx::query!(
+        r#"SELECT m.id, m.chat_id, m.sender_id, m.msg_type,
+                  m.payload::text as "payload!",
+                  m.created_at, c.slug
+           FROM messages m JOIN chats c ON c.id = m.chat_id
+           WHERE m.deleted_at IS NULL
+             AND m.msg_type IN ('text', 'sticker', 'system')
+             AND (
+                  (c.kind = 'channel' AND c.is_official = TRUE)
+                  OR m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)
+             )
+             AND m.payload::text ILIKE $2 ESCAPE '\'
+           ORDER BY m.id DESC
+           LIMIT $3"#,
+        me, pattern, limit)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    Ok(Json(rows.into_iter().map(|r| {
+        // payload::text 会带引号 — 简单 trim
+        let mut p = r.payload;
+        if p.len() >= 2 && p.starts_with('"') && p.ends_with('"') {
+            p = p[1..p.len()-1].to_string();
+        }
+        SearchHit {
+            id: r.id,
+            chat_id: r.chat_id.to_string(),
+            chat_slug: r.slug,
+            sender_id: r.sender_id.map(|u| u.to_string()),
+            msg_type: r.msg_type,
+            payload: p,
+            created_at: r.created_at.timestamp(),
+        }
+    }).collect()))
+}

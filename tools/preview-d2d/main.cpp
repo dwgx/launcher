@@ -127,6 +127,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (wp == VK_ESCAPE) {
                 if (modal::onKey(hwnd, (int)wp, shift, ctrl)) return 0;
+                if (ui::g_account_dropdown) {
+                    ui::g_account_dropdown = false;
+                    ui::g_status_fold_open = false;
+                    ui::g_dropdown_t.start(ui::g_dropdown_t.value(), 0.0f, 0.15f,
+                                            0, curve::easeOutCubic);
+                    ui::g_status_fold_t.start(ui::g_status_fold_t.value(), 0.0f, 0.15f,
+                                               0, curve::easeOutCubic);
+                    return 0;
+                }
                 if (chat::g_picker_open) {
                     chat::g_picker_open = false;
                     chat::g_picker_t.start(chat::g_picker_t.value(), 0, 0.18f,
@@ -150,6 +159,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 && stages::g_view == stages::View::Chat
                 && chat::g_focus_composer) {
                 chat::onKey(hwnd, (int)wp, shift, ctrl);
+                return 0;
+            }
+            if (wp == 'F' && ctrl
+                && stages::g_stage == stages::Stage::Main) {
+                modal::openSearch();
                 return 0;
             }
             if (wp == 'D') { g_dark = !g_dark; persist::saveTheme(g_dark); return 0; }
@@ -441,6 +455,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 54: {                    // myProfile 拉回
             // g_user / g_status 已经在 fetch::myProfile worker 线程里写好；这里仅触发重画
+            return 0;
+        }
+        case WM_APP + 55: {                    // chat search 结果回来
+            modal::drainSearchResult();
             return 0;
         }
         case WM_APP + 51: {                    // chat picker → 卸载非 owner pack (wp/lp 同 +32)

@@ -38,6 +38,7 @@ EditBioState      g_edit_bio;
 WebViewModalState g_webview_modal;
 MsgContextMenuState g_msg_menu;
 PackPreviewState  g_pack_preview_modal;
+SearchState       g_search;
 
 namespace {
 
@@ -186,13 +187,16 @@ void tickAll(float dt) {
     g_webview_modal.t.tick(dt);
     g_msg_menu.t.tick(dt);
     g_pack_preview_modal.t.tick(dt);
+    g_search.t.tick(dt);
+    g_search.input.float_t.tick(dt);
 }
 
 bool anyOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
         || g_addtag.open || g_createpack.open || g_renamepack.open
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
-        || g_webview_modal.open || g_msg_menu.open || g_pack_preview_modal.open;
+        || g_webview_modal.open || g_msg_menu.open || g_pack_preview_modal.open
+        || g_search.open;
 }
 
 // ============== ChangePw ==============
@@ -1551,6 +1555,227 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
     hit(close_btn, [](){ closePackPreview(); }, true);
 }
 
+// ============== Search modal (Ctrl+F) ==============
+void openSearch() {
+    g_search.open = true;
+    g_search.input.text.clear();
+    g_search.input.cursor = 0;
+    g_search.input.clearSel();
+    g_search.results.clear();
+    g_search.scroll = 0;
+    g_search.last_query.clear();
+    g_search.busy = false;
+    g_search.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeSearch() {
+    g_search.t.start(g_search.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_search.open = false;
+}
+namespace {
+struct SearchArg { std::wstring q; HWND h; };
+std::mutex g_search_mtx;
+std::string g_search_pending_body;
+
+std::wstring utf8wSearch(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(n - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
+}
+
+void kickSearch(HWND hwnd, const std::wstring& q) {
+    g_search.busy = true;
+    auto* a = new SearchArg{ q, hwnd };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<SearchArg> a((SearchArg*)lp);
+        if (g_session_token.empty()) return 0;
+        std::string qu = net::jsonEscape(a->q);
+        // URL-encode 简单替换 (空格/中文不太行 — 走 form 不太适合，简化用 raw)
+        // qu 已经 utf-8 encoded（jsonEscape 不 url encode），需要走 query-string encode
+        std::string enc;
+        for (unsigned char c : qu) {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+                enc.push_back(c);
+            else { char buf[4]; sprintf_s(buf, "%%%02X", c); enc += buf; }
+        }
+        std::string url = "/api/chat/search?session_token=" + g_session_token
+                        + "&q=" + enc + "&limit=50";
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        if (r.ok()) {
+            std::lock_guard<std::mutex> lk(g_search_mtx);
+            g_search_pending_body = r.body;
+        }
+        PostMessageW(a->h, WM_APP + 55, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+void runSearchIfChanged(HWND hwnd) {
+    std::wstring q = g_search.input.text;
+    while (!q.empty() && (q.front() == L' ')) q.erase(q.begin());
+    while (!q.empty() && (q.back()  == L' ')) q.pop_back();
+    if (q == g_search.last_query) return;
+    g_search.last_query = q;
+    if (q.size() < 2) {
+        g_search.results.clear();
+        return;
+    }
+    kickSearch(hwnd, q);
+}
+}  // anon
+
+void drainSearchResult() {
+    std::string body;
+    {
+        std::lock_guard<std::mutex> lk(g_search_mtx);
+        body = std::move(g_search_pending_body);
+        g_search_pending_body.clear();
+    }
+    onSearchResult(body);
+}
+
+void onSearchResult(const std::string& body) {
+    g_search.busy = false;
+    g_search.results.clear();
+    g_search.scroll = 0;
+    // body = [{id,chat_id,chat_slug,sender_id,msg_type,payload,created_at}, ...]
+    size_t pos = 0;
+    while (true) {
+        auto ob = body.find('{', pos);
+        if (ob == std::string::npos) break;
+        auto cb = body.find('}', ob);
+        if (cb == std::string::npos) break;
+        std::string obj = body.substr(ob, cb - ob + 1);
+        SearchHit h;
+        h.msg_id    = net::jsonInt(obj, "id");
+        h.chat_id   = utf8wSearch(net::jsonStr(obj, "chat_id"));
+        h.slug      = utf8wSearch(net::jsonStr(obj, "chat_slug"));
+        h.sender_id = utf8wSearch(net::jsonStr(obj, "sender_id"));
+        h.kind      = utf8wSearch(net::jsonStr(obj, "msg_type"));
+        std::string pl = net::jsonStr(obj, "payload");
+        if (pl.size() >= 2 && pl.front() == '"' && pl.back() == '"') {
+            pl = pl.substr(1, pl.size() - 2);
+        }
+        h.payload = utf8wSearch(pl);
+        int64_t ts = net::jsonInt(obj, "created_at");
+        if (ts > 0) {
+            time_t tt = (time_t)ts;
+            struct tm lt{};
+            localtime_s(&lt, &tt);
+            wchar_t tbuf[24];
+            swprintf_s(tbuf, L"%02d-%02d %02d:%02d",
+                       lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+            h.time = tbuf;
+        }
+        if (h.msg_id > 0) g_search.results.push_back(std::move(h));
+        pos = cb + 1;
+    }
+}
+
+void paintSearchModal(D2DApp& app, float W, float H) {
+    if (!g_search.open && g_search.t.value() < 0.001f) return;
+    float t = g_search.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    float cw = 540, ch = 480;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
+                                  DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    auto* row_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    auto* meta = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+
+    prim::drawText_(ctx, L"搜索消息", h1,
+                    cx + 24, cy + 22, cw - 48, 22,
+                    br.solidA(pal.text, t));
+    wchar_t hint_buf[64];
+    swprintf_s(hint_buf, L"在所有可见频道里查找 · %d 条结果",
+               (int)g_search.results.size());
+    prim::drawText_(ctx, hint_buf, sub,
+                    cx + 24, cy + 50, cw - 48, 18,
+                    br.solidA(pal.text_muted, t));
+
+    // 搜索框
+    drawField(app, g_search.input, cx + 24, cy + 78, cw - 48, 40,
+              L"输入关键词…", true, t);
+    hit(g_search.input.bounds, [](){}, true);
+
+    // 结果列表
+    float lx = cx + 24, ly = cy + 130;
+    float lw = cw - 48, lh = ch - 130 - 60;
+    prim::fillRR(ctx, lx, ly, lw, lh, 8.0f, br.solidA(pal.surface, t * 0.4f));
+    ctx->PushAxisAlignedClip(D2D1::RectF(lx, ly, lx + lw, ly + lh),
+                             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (g_search.results.empty()) {
+        const wchar_t* m_ = g_search.busy ? L"搜索中…"
+                          : (g_search.input.text.size() < 2
+                                ? L"输入至少 2 个字开始搜索"
+                                : L"无匹配结果");
+        prim::drawText_(ctx, m_, sub,
+                        lx, ly + lh * 0.4f, lw, 22,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else {
+        float row_h = 56;
+        float ry = ly + 4 - g_search.scroll;
+        for (size_t i = 0; i < g_search.results.size(); ++i) {
+            auto& r = g_search.results[i];
+            if (ry + row_h < ly) { ry += row_h + 4; continue; }
+            if (ry > ly + lh) break;
+            LayoutRect rr{ lx + 4, ry, lw - 8, row_h };
+            bool hov = rr.contains(g_mouse);
+            if (hov) {
+                prim::fillRR(ctx, rr.x, rr.y, rr.w, rr.h, 8.0f,
+                             br.solidA(pal.primary, t * 0.10f));
+            }
+            // 第一行：#频道 · 时间
+            wchar_t head[128];
+            swprintf_s(head, L"#%.16ls  ·  %.16ls",
+                       r.slug.empty() ? L"?" : r.slug.c_str(),
+                       r.time.c_str());
+            prim::drawText_(ctx, head, meta,
+                            rr.x + 12, rr.y + 8, rr.w - 24, 14,
+                            br.solidA(pal.text_muted, t));
+            // 第二行：消息内容
+            std::wstring body = r.payload;
+            if (body.size() > 80) body = body.substr(0, 80) + L"…";
+            prim::drawText_(ctx, body, row_fmt,
+                            rr.x + 12, rr.y + 26, rr.w - 24, 24,
+                            br.solidA(pal.text, t));
+            int64_t mid = r.msg_id;
+            std::wstring sl = r.slug;
+            hit(rr, [mid, sl](){
+                // 切到对应频道 + 用 mid 给 chat 让它滚到那条
+                if (!sl.empty()) chat::switchChannel(sl);
+                // 设当前频道的 scroll target — 先让 history fetch 完整，再定位
+                // 简化：直接置 offset = 0（锁底），未来 Phase 2.2 用 mid 真定位
+                auto& s = chat::g_scroll[chat::g_active];
+                s.offset_from_bottom = 0;
+                s.initialized = true;
+                closeSearch();
+            }, true);
+            ry += row_h + 4;
+        }
+    }
+    ctx->PopAxisAlignedClip();
+
+    // 底部按钮：取消
+    drawGhostBtn(app, cx + cw - 24 - 100, cy + ch - 52, 100, 36,
+                 trW("common.close").c_str(), t, [](){ closeSearch(); });
+}
+
 // ============== 事件路由 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
@@ -1566,7 +1791,8 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     }
     bool consumed = dispatchClick(dip);
     if (!consumed) {
-        if (g_pack_preview_modal.open) closePackPreview();
+        if (g_search.open) closeSearch();
+        else if (g_pack_preview_modal.open) closePackPreview();
         else if (g_edit_bio.open) closeEditBio();
         else if (g_edit_status.open) closeEditStatusText();
         else if (g_user_profile.open) closeUserProfile();
@@ -1582,6 +1808,11 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
 }
 
 bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
+    if (g_search.open) {
+        g_search.input.onChar(c, ctrl, hwnd);
+        runSearchIfChanged(hwnd);
+        return true;
+    }
     if (g_edit_bio.open) { g_edit_bio.input.onChar(c, ctrl, hwnd); return true; }
     if (g_edit_status.open) { g_edit_status.input.onChar(c, ctrl, hwnd); return true; }
     if (g_addtag.open) { g_addtag.input.onChar(c, ctrl, hwnd); return true; }
@@ -1598,6 +1829,7 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!anyOpen()) return false;
     if (vk == VK_ESCAPE) {
+        if (g_search.open) { closeSearch(); return true; }
         if (g_msg_menu.open) { closeMsgMenu(); return true; }
         if (g_pack_preview_modal.open) { closePackPreview(); return true; }
         if (g_webview_modal.open) { closeWebViewModal(); return true; }
@@ -1611,6 +1843,11 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (g_confirm.open) { closeConfirm(); return true; }
         if (g_cs2.open) { closeCS2(); return true; }
         if (g_history.open) { closeHistory(); return true; }
+    }
+    if (g_search.open) {
+        g_search.input.onKey(vk, shift, ctrl);
+        runSearchIfChanged(hwnd);
+        return true;
     }
     if (g_edit_status.open) {
         if (vk == VK_RETURN) { submitEditStatusText(hwnd); return true; }

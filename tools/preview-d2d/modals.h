@@ -171,6 +171,32 @@ extern PackPreviewState g_pack_preview_modal;
 void openPackPreviewModal(const std::string& short_name);
 void paintPackPreviewModal(D2DApp& app, float W, float H);
 
+// 全局消息搜索 — Ctrl+F 触发
+struct SearchHit {
+    int64_t      msg_id = 0;
+    std::wstring slug;
+    std::wstring chat_id;
+    std::wstring sender_id;
+    std::wstring kind;
+    std::wstring payload;
+    std::wstring time;
+};
+struct SearchState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+    int  scroll = 0;          // 列表滚动偏移
+    std::vector<SearchHit> results;
+    std::wstring last_query;  // 防抖
+};
+extern SearchState g_search;
+void openSearch();
+void paintSearchModal(D2DApp& app, float W, float H);
+void onSearchResult(const std::string& body);
+// main thread drain — 把后台 thread 拉来的 body 解析并填进 g_search.results
+void drainSearchResult();
+
 // 通用 WebView 弹窗 — 视频 / 网页都用这个，全屏铺开 WebView2 子窗口
 struct WebViewModalState {
     bool open = false;

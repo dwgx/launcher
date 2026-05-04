@@ -201,6 +201,13 @@ void paintSidebar(D2DApp& app, float H) {
 }
 
 void paintAccountDropdown(D2DApp& app, float W) {
+    // modal 打开时强制关 dropdown — 避免两层浮窗叠加（用户图1 反馈）
+    if (modal::anyOpen() && g_account_dropdown) {
+        g_account_dropdown = false;
+        g_status_fold_open = false;
+        g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
+        g_status_fold_t.start(g_status_fold_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
+    }
     if (!g_account_dropdown && g_dropdown_t.value() < 0.001f) return;
     const Palette& pal = palette();
     auto* ctx = app.ctx();
@@ -998,6 +1005,8 @@ void paintMain(D2DApp& app, float W, float H) {
 
     // pack 预览 modal
     modal::paintPackPreviewModal(app, W, H);
+    // 搜索 modal — Ctrl+F
+    modal::paintSearchModal(app, W, H);
     // 消息右键菜单 — 在所有 modal 之上、toast 之下
     modal::paintMsgContextMenu(app, W, H);
 

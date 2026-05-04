@@ -442,6 +442,8 @@ static void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
 // 用来在真画之前一次过算 total，给 scroll offset 定位。
 static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_author) {
     auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    // 空 body 直接占 0 高度（与 paintBubble 行为一致）
+    if (m.kind == MsgKind::Text && m.body.empty()) return 0;
     if (m.kind == MsgKind::DayDivider) return 30;
     if (m.kind == MsgKind::System)     return 32;
     if (m.kind == MsgKind::Image || m.kind == MsgKind::Gif) {
@@ -506,6 +508,11 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
     const Palette& pal = palette();
     auto* ctx = app.ctx();
     auto& br = app.brushes();
+
+    // Text 类型 + body 全空 — 整条直接跳过（避免画了头像/作者却没气泡的"幽灵行"）
+    if (m.kind == MsgKind::Text && m.body.empty()) {
+        return 0;
+    }
 
     if (m.kind == MsgKind::DayDivider) {
         auto* pill_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.5f));
@@ -1180,8 +1187,10 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         // 消息没把 viewport 填满 — 顶端开始，不滚
         my_top = stream_y + 12;
     } else {
-        // total > viewport：起点 = stream_bottom - total + offset
-        my_top = stream_y + stream_h - total - sc.offset_from_bottom + 12;
+        // total > viewport：offset_from_bottom 表示从底部往上滚了多少 px
+        // offset = 0 → 锁底（最新消息在底部）→ my_top = stream_bottom - total
+        // offset = max_off → 顶部（最早消息在顶部）→ my_top = stream_y
+        my_top = stream_y + stream_h - total + sc.offset_from_bottom + 12;
     }
 
     // ----- Pass 2：实际画 + 注册 hit -----
@@ -1203,6 +1212,23 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         my += heights[i];
     }
     ctx->PopAxisAlignedClip();
+
+    // 右侧滚动条
+    if (total > stream_h) {
+        float bar_x = ax + aw - 6;
+        float bar_w = 4;
+        float bar_track_y = stream_y + 4;
+        float bar_track_h = stream_h - 8;
+        float bar_h = (stream_h / total) * bar_track_h;
+        if (bar_h < 24) bar_h = 24;
+        // offset = 0 → bar 在底；offset = max_off → bar 在顶
+        float t_pos = (max_off > 0) ? (sc.offset_from_bottom / max_off) : 0;
+        float bar_y = bar_track_y + (bar_track_h - bar_h) * (1.0f - t_pos);
+        prim::fillRR(ctx, bar_x, bar_track_y, bar_w, bar_track_h, 2.0f,
+                     br.solidA(pal.text, 0.05f));
+        prim::fillRR(ctx, bar_x, bar_y, bar_w, bar_h, 2.0f,
+                     br.solidA(pal.text, 0.30f));
+    }
 
     // composer
     paintComposer(app, ax, ay + ah - comp_h, aw, comp_h);
