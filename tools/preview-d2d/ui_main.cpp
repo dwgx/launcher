@@ -217,9 +217,13 @@ void paintAccountDropdown(D2DApp& app, float W) {
     if (t < 0.001f) return;
 
     float dw = 240.0f;
-    float fold_extra = g_status_fold_t.value() * 124.0f;
-    float dh = 240.0f + fold_extra;
-    // 对齐 topbar 右边距（pill_x + pill_w = W - 16），dropdown 右边贴齐 W - 16 不出
+    // dropdown 高度严格按内容算：
+    //   8 padding + 50 header + 32 status trigger + 32 status_text 行
+    //   + fold (4 行 × 24 + 8 分割) × ft
+    //   + 4 items × 32 + 8 退出登录前分割线 + 8 bottom padding
+    // 收起 fold = 266；展开 = 370
+    float fold_part = g_status_fold_t.value() * (4 * 24.0f + 8.0f);
+    float dh = 8 + 50 + 32 + 32 + fold_part + 4 * 32.0f + 8 + 8;
     float dx = W - 16.0f - dw;
     float dy = kTopbarH + 4.0f - 6.0f * (1.0f - t);
 
@@ -407,8 +411,9 @@ void paintAccountDropdown(D2DApp& app, float W) {
 void registerDropdownDismissHits(float W, float H) {
     if (!g_account_dropdown && g_dropdown_t.value() < 0.001f) return;
     float dw = 240.0f;
-    float dh = 240.0f + g_status_fold_t.value() * 124.0f;
-    float dx = W - 6.0f - dw;
+    float fold_part = g_status_fold_t.value() * (4 * 24.0f + 8.0f);
+    float dh = 8 + 50 + 32 + 32 + fold_part + 4 * 32.0f + 8 + 8;
+    float dx = W - 16.0f - dw;
     float dy = kTopbarH;
     auto dismiss = [](){
         g_account_dropdown = false;

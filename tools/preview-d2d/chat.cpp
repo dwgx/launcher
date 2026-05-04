@@ -53,6 +53,7 @@ Tween g_top_seg_x, g_top_seg_w;
 Tween g_pack_tab_x, g_pack_tab_w;
 PackDrag g_pack_drag;
 std::unordered_map<std::wstring, ChatScroll> g_scroll;
+ScrollBarDrag g_scroll_drag;
 
 static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 static std::unordered_map<std::wstring, bool> g_group_collapsed;
@@ -100,16 +101,17 @@ void onWheel(int delta) {
     // picker 开 + emoji tab 时，滚轮滚 emoji grid
     if (g_picker_open && g_picker_tab == 0) {
         g_emoji_scroll_y -= (float)delta * 0.5f;
-        // clamp 在 paintPicker 里做（依赖 view_h / total_h）
         return;
     }
     auto& sc = g_scroll[g_active];
     if (sc.total_height <= sc.viewport_h) return;
-    float dy = (float)delta * 0.5f;
-    sc.offset_from_bottom += dy;
+    // 写 target_offset，每帧 lerp 平滑到位（避免一格 60px 跳跃感）
+    // 一次 wheel notch (delta=120) → 滚 90px，连续滚自动累积
+    float dy = (float)delta * 0.75f;
+    sc.target_offset += dy;
     float max_off = sc.total_height - sc.viewport_h;
-    if (sc.offset_from_bottom > max_off) sc.offset_from_bottom = max_off;
-    if (sc.offset_from_bottom < 0) sc.offset_from_bottom = 0;
+    if (sc.target_offset > max_off) sc.target_offset = max_off;
+    if (sc.target_offset < 0) sc.target_offset = 0;
 }
 
 void appendLocalMessage(Msg msg) {
@@ -118,7 +120,10 @@ void appendLocalMessage(Msg msg) {
     bool was_at_bottom = (sc.offset_from_bottom < 8.0f);
     s.push_back(std::move(msg));
     // 在底部就跟随；不在底部说明用户在翻历史，不打扰
-    if (was_at_bottom) sc.offset_from_bottom = 0;
+    if (was_at_bottom) {
+        sc.offset_from_bottom = 0;
+        sc.target_offset = 0;
+    }
 }
 
 void retargetTopSeg() {
@@ -1176,9 +1181,29 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     sc.viewport_h = stream_h;
     if (!sc.initialized) {
         sc.offset_from_bottom = 0;
+        sc.target_offset = 0;
         sc.initialized = true;
     }
     float max_off = (std::max)(0.0f, total - stream_h);
+    if (sc.target_offset > max_off) sc.target_offset = max_off;
+    if (sc.target_offset < 0) sc.target_offset = 0;
+    // 拖动滚动条期间直接同步；否则平滑 lerp 到 target（每帧 18% 趋近 — 连贯但不软）
+    if (g_scroll_drag.active && g_mouse_pressed) {
+        // 鼠标 y 增加 = 滚动条下移 = offset 减少（更接近底部）
+        float dy = (float)g_mouse.y - g_scroll_drag.anchor_mouse_y;
+        float track_h = (std::max)(1.0f, g_scroll_drag.bar_track_h);
+        float content_per_track = (g_scroll_drag.total_height - g_scroll_drag.viewport_h) / track_h;
+        // bar 下移（dy>0）→ offset 减少（向更新消息靠近）
+        float new_off = g_scroll_drag.anchor_offset - dy * content_per_track;
+        if (new_off > max_off) new_off = max_off;
+        if (new_off < 0) new_off = 0;
+        sc.target_offset = new_off;
+        sc.offset_from_bottom = new_off;
+    } else {
+        float diff = sc.target_offset - sc.offset_from_bottom;
+        if (std::abs(diff) < 0.5f) sc.offset_from_bottom = sc.target_offset;
+        else                       sc.offset_from_bottom += diff * 0.22f;
+    }
     if (sc.offset_from_bottom > max_off) sc.offset_from_bottom = max_off;
     if (sc.offset_from_bottom < 0) sc.offset_from_bottom = 0;
 
@@ -1213,21 +1238,38 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     ctx->PopAxisAlignedClip();
 
-    // 右侧滚动条
+    // 右侧滚动条 — 可拖动
     if (total > stream_h) {
-        float bar_x = ax + aw - 6;
-        float bar_w = 4;
+        float bar_x = ax + aw - 8;
+        float bar_w = 6;     // 加宽 4→6 让拖动更好命中
         float bar_track_y = stream_y + 4;
         float bar_track_h = stream_h - 8;
         float bar_h = (stream_h / total) * bar_track_h;
-        if (bar_h < 24) bar_h = 24;
-        // offset = 0 → bar 在底；offset = max_off → bar 在顶
+        if (bar_h < 28) bar_h = 28;
         float t_pos = (max_off > 0) ? (sc.offset_from_bottom / max_off) : 0;
         float bar_y = bar_track_y + (bar_track_h - bar_h) * (1.0f - t_pos);
-        prim::fillRR(ctx, bar_x, bar_track_y, bar_w, bar_track_h, 2.0f,
+        // track
+        prim::fillRR(ctx, bar_x, bar_track_y, bar_w, bar_track_h, 3.0f,
                      br.solidA(pal.text, 0.05f));
-        prim::fillRR(ctx, bar_x, bar_y, bar_w, bar_h, 2.0f,
-                     br.solidA(pal.text, 0.30f));
+        // thumb — hover/拖动时颜色加深
+        LayoutRect bar_rect{ bar_x - 2, bar_y, bar_w + 4, bar_h };
+        bool bar_hov = bar_rect.contains(g_mouse) || g_scroll_drag.active;
+        prim::fillRR(ctx, bar_x, bar_y, bar_w, bar_h, 3.0f,
+                     br.solidA(pal.text, bar_hov ? 0.50f : 0.30f));
+        // 注册 thumb 拖动 hit
+        float anchor_y = (float)g_mouse.y;
+        float anchor_off = sc.offset_from_bottom;
+        float track_h_capt = bar_track_h - bar_h;
+        float total_capt = total;
+        float vp_capt = stream_h;
+        hit(bar_rect, [anchor_y, anchor_off, track_h_capt, total_capt, vp_capt](){
+            g_scroll_drag.active = true;
+            g_scroll_drag.anchor_mouse_y = anchor_y;
+            g_scroll_drag.anchor_offset = anchor_off;
+            g_scroll_drag.bar_track_h = track_h_capt;
+            g_scroll_drag.total_height = total_capt;
+            g_scroll_drag.viewport_h = vp_capt;
+        }, true);
     }
 
     // composer
@@ -1788,6 +1830,7 @@ bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
         sticker::reorderPacks(GetActiveWindow(), ids);
     }
     g_pack_drag = PackDrag{};
+    g_scroll_drag.active = false;
     return false;
 }
 

@@ -48,12 +48,25 @@ extern PackDrag g_pack_drag;
 
 // per-channel 滚动偏移（从底部往上的像素数；0 = 锁底，新消息自动跟）
 struct ChatScroll {
-    float offset_from_bottom = 0;     // [0, total_height - viewport]
-    float total_height       = 0;     // 上一帧测量
+    float offset_from_bottom = 0;     // 当前实际渲染用值（每帧 lerp 朝 target 平滑）
+    float target_offset      = 0;     // 滚轮 / 拖动写这个，offset 跟随
+    float total_height       = 0;
     float viewport_h         = 0;
     bool  initialized        = false; // false = 首次进入这个频道，会自动 stick to bottom
 };
 extern std::unordered_map<std::wstring, ChatScroll> g_scroll;
+
+// 滚动条拖动状态
+struct ScrollBarDrag {
+    bool  active = false;
+    float anchor_mouse_y = 0;
+    float anchor_offset  = 0;
+    float bar_track_y    = 0;
+    float bar_track_h    = 0;
+    float total_height   = 0;
+    float viewport_h     = 0;
+};
+extern ScrollBarDrag g_scroll_drag;
 
 enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
 
