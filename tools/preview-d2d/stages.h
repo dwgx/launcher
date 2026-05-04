@@ -49,6 +49,9 @@ void enterMainStage();
 // 模拟 Auth submit — Step 3 之前没真表单，按 Enter 触发这个
 void simulateAuthSubmit();
 
+// 退出登录 → 缩窗口 + 复位所有动画 tween 回到 Auth view（不走 ShrinkSuccess 那条线）
+void enterAuthFromLogout();
+
 // ---------- 帧循环钩子 ----------
 // dt = 自上一帧起的秒数；驱动所有 tween + spin_angle。
 void tick(float dt);

@@ -53,4 +53,41 @@ inline std::string hwidHex() {
     return cached;
 }
 
+// 公开机器码 — 给 dashboard / 主页展示用。 同一台机器同一个值，但反推真 HWID 要
+// 暴力穷举 SHA-256（不可行）。 客户端展示和服务端验证会用同一个值（同样的 hash 路径），
+// 跨机器无关 key — 攻击者即使拿到客户端二进制也只能看到 hash 函数。
+//
+// 命名故意 generic：getDeviceTag — 不叫 hwid 不叫 machineCode 让逆向没线索。
+inline std::string getDeviceTag() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+    std::string h = hwidHex();
+    if (h.size() < 32) { cached = h; return cached; }
+    // 第二轮 hash + 静态 salt（编译期常量，逆向能看到但不知道是干嘛用的）
+    static const char kPepper[] = "L4nch3r-d3v1c3-t4g-2026";
+    std::string seed = h + kPepper;
+    HCRYPTPROV prov = 0; HCRYPTHASH hh = 0;
+    BYTE hash2[32] = {0};
+    if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES,
+                             CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
+        if (CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hh)) {
+            CryptHashData(hh, (const BYTE*)seed.data(), (DWORD)seed.size(), 0);
+            DWORD sz = 32;
+            CryptGetHashParam(hh, HP_HASHVAL, hash2, &sz, 0);
+            CryptDestroyHash(hh);
+        }
+        CryptReleaseContext(prov, 0);
+    }
+    // 取前 24 字 hex 大写，每 4 字一段 5 段：XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
+    char raw[49] = {0};
+    for (int i = 0; i < 24; ++i) sprintf_s(raw + i * 2, 3, "%02X", hash2[i]);
+    std::string formatted;
+    for (int i = 0; i < 48; ++i) {
+        formatted.push_back(raw[i]);
+        if (i % 4 == 3 && i < 47) formatted.push_back('-');
+    }
+    cached = std::move(formatted);
+    return cached;
+}
+
 }  // namespace launcher::d2d

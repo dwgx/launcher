@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -20,11 +21,18 @@ struct Pack {
     std::vector<std::string>  sticker_ids;
     bool is_system = false;
     bool is_public = false;
-    std::string short_name;
+    bool is_owner  = false;        // 当前用户是否是 pack 创建人
+    std::wstring creator_name;     // by xxx
+    std::string  short_name;
     int  install_count = 0;
 };
 
 extern std::vector<Pack> g_packs;
+extern std::mutex        g_packs_mtx;
+
+// 系统 emoji 是本地伪 pack（无 backend id）— 排序时跟 backend pack 一起拖。
+// 我们在 persist 里单独存 system pack 的 sort_order（默认 0 = 最左）。
+constexpr int kSystemEmojiOrder = 0;
 
 // 启动后异步拉
 void fetchMyPacks(HWND notify);
@@ -35,6 +43,37 @@ void fetchPackContents(HWND notify, const std::string& pack_id);
 void sharePack(HWND notify, const std::string& pack_id, bool is_public);
 void deletePack(HWND notify, const std::string& pack_id);
 void installPack(HWND notify, const std::string& short_name);
+
+// 拖拽排序后调 — 把 backend pack id 顺序提交到云端
+// (跳过系统 emoji 的本地伪 pack，那个 client 端 persist::saveSystemPackOrder 单独存)
+void reorderPacks(HWND notify, const std::vector<std::string>& pack_ids);
+
+// 导出 pack 到指定文件夹 — 把 stickers 本地路径下的文件全部 CopyFile 过去
+// 文件名沿用 sha 哈希。返回成功导出张数（异步执行 + WM_APP+43 通知）
+void exportPackToFolder(HWND notify, const std::string& pack_id);
+
+// 看分享链接对应的 pack（GET /api/sticker/pack/by-short/:short）
+// 完成后写入 g_pack_preview 并 PostMessage WM_APP+44
+void previewPackByShort(HWND notify, const std::string& short_name);
+
+// 一键安装：previewPackByShort + 自动 install + fetchMyPacks
+void installPackByShort(HWND notify, const std::string& short_name);
+
+// pack 预览（PackPreview modal 用）
+struct PackPreview {
+    bool         loaded = false;
+    std::string  err;
+    std::string  id;
+    std::string  short_name;
+    std::wstring name;
+    std::wstring creator_name;
+    int          install_count = 0;
+    bool         already_installed = false;
+    std::vector<std::wstring> sticker_paths;   // 本地 cache 路径
+    std::wstring cover_path;                   // 第一张图本地路径
+};
+extern PackPreview g_pack_preview;
+extern std::mutex  g_pack_preview_mtx;
 
 // 导入文件夹 — 扫描 *.png/*.jpg/*.jpeg/*.gif/*.webp/*.bmp 异步逐张上传：
 //   POST /api/media/upload → media_id

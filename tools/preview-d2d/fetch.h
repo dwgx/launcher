@@ -55,6 +55,10 @@ void profileUpdate(HWND notify, const std::string& fields);
 // GET ip-api.com/json/ — 异步查 IP 地理位置 → 写 g_geo_country (WM_APP+38)
 void geoIP(HWND notify);
 
+// GET /api/profile — 拿自己最新的 nickname / status / status_text / bio / uid
+// 异步线程，完成后 PostMessage WM_APP+54 让 main 把结果写回 g_user / g_status
+void myProfile(HWND notify);
+
 // GET /api/profile/:uid — 拿别人的资料 (nickname/status/bio/avatar)
 struct PeerProfile {
     std::wstring uid, username, nickname, status, status_text, bio;

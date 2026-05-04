@@ -51,6 +51,10 @@ pub struct ProfileResp {
     pub nickname_changed_at: Option<i64>,
     pub password_changed_at: Option<i64>,
     pub nickname_change_cooldown_seconds: i32,
+    // 用户可在客户端编辑的内容 — 客户端登录后拉一次填回 g_user / g_status
+    pub status:      String,
+    pub status_text: String,
+    pub bio:         String,
 }
 
 pub async fn get_profile(
@@ -61,7 +65,10 @@ pub async fn get_profile(
     let row = sqlx::query!(
         r#"SELECT uid, username, nickname, avatar_path,
                   subscription_tier, subscription_expires_at,
-                  nickname_changed_at, password_changed_at
+                  nickname_changed_at, password_changed_at,
+                  status,
+                  COALESCE(status_text, '') as "status_text!",
+                  COALESCE(bio, '') as "bio!"
            FROM users WHERE id = $1"#, uid)
         .fetch_one(&s.db).await.map_err(internal)?;
 
@@ -72,12 +79,15 @@ pub async fn get_profile(
         uid:        row.uid.unwrap_or_default(),
         username:   row.username.unwrap_or_default(),
         nickname:   row.nickname,
-        avatar_url: row.avatar_path.map(|p| format!("/api/avatar/{}", uid)),
+        avatar_url: row.avatar_path.map(|_| format!("/api/avatar/{}", uid)),
         tier:       row.subscription_tier,
         tier_expires_at: row.subscription_expires_at.map(|t| t.timestamp()),
         nickname_changed_at: row.nickname_changed_at.map(|t| t.timestamp()),
         password_changed_at: row.password_changed_at.map(|t| t.timestamp()),
         nickname_change_cooldown_seconds: cooldown,
+        status:      if row.status.is_empty() { "online".into() } else { row.status },
+        status_text: row.status_text,
+        bio:         row.bio,
     }))
 }
 
@@ -416,4 +426,83 @@ pub async fn remove_tag(
         "SELECT tag FROM user_tags WHERE user_id = $1 ORDER BY sort_order, tag", uid)
         .fetch_all(&s.db).await.map_err(internal)?;
     Ok(Json(TagsResp { tags: rows }))
+}
+
+// =====================================================================
+// POST /api/profile/update — status_text + bio (任意可选)
+// =====================================================================
+#[derive(Deserialize)]
+pub struct ProfileUpdateReq {
+    pub session_token: String,
+    pub status_text:   Option<String>,
+    pub bio:           Option<String>,
+}
+
+pub async fn update_profile(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<ProfileUpdateReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let uid = auth_user(&s, &req.session_token).await?;
+    if let Some(t) = req.status_text {
+        let trimmed: String = t.chars().take(48).collect();
+        sqlx::query!("UPDATE users SET status_text = $1 WHERE id = $2",
+                     trimmed, uid)
+            .execute(&s.db).await.map_err(internal)?;
+    }
+    if let Some(b) = req.bio {
+        let trimmed: String = b.chars().take(240).collect();
+        sqlx::query!("UPDATE users SET bio = $1 WHERE id = $2",
+                     trimmed, uid)
+            .execute(&s.db).await.map_err(internal)?;
+    }
+    Ok(StatusCode::OK)
+}
+
+// =====================================================================
+// GET /api/profile/peer/:key — 看别人主页 (key = uid 7-digit / username / user_id uuid)
+// =====================================================================
+#[derive(Serialize)]
+pub struct PeerProfileResp {
+    pub uid:          String,
+    pub username:     String,
+    pub nickname:     Option<String>,
+    pub avatar_url:   Option<String>,
+    pub status:       String,
+    pub status_text:  String,
+    pub bio:          String,
+    pub tags:         Vec<String>,
+    pub role:         Option<String>,
+    pub role_label:   Option<String>,
+}
+
+pub async fn get_peer_profile(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    Query(q): Query<ProfileQuery>,
+) -> Result<Json<PeerProfileResp>, (StatusCode, String)> {
+    let _ = auth_user(&s, &q.session_token).await?;
+    let row = sqlx::query!(
+        r#"SELECT id, uid, username, nickname, avatar_path, status,
+                  COALESCE(status_text, '') as "status_text!",
+                  COALESCE(bio, '') as "bio!",
+                  role, role_label
+           FROM users
+           WHERE uid = $1 OR username = $1 OR id::text = $1"#, key)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "user not found".into()))?;
+    let tags = sqlx::query_scalar!(
+        "SELECT tag FROM user_tags WHERE user_id = $1 ORDER BY sort_order, tag", row.id)
+        .fetch_all(&s.db).await.unwrap_or_default();
+    Ok(Json(PeerProfileResp {
+        uid:         row.uid.unwrap_or_default(),
+        username:    row.username.unwrap_or_default(),
+        nickname:    row.nickname,
+        avatar_url:  row.avatar_path.map(|_| format!("/api/avatar/{}", row.id)),
+        status:      if row.status.is_empty() { "offline".into() } else { row.status },
+        status_text: row.status_text,
+        bio:         row.bio,
+        tags,
+        role:        Some(row.role),
+        role_label:  row.role_label,
+    }))
 }

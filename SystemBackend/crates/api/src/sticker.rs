@@ -96,7 +96,9 @@ pub struct PackOut {
     pub description:  Option<String>,
     pub cover_url:    Option<String>,
     pub creator_id:   Option<String>,
+    pub creator_name: Option<String>,   // nickname / username — 客户端显示「by xxx」
     pub install_count: i32,
+    pub is_public:    bool,
     pub stickers:     Vec<StickerOut>,
 }
 
@@ -123,13 +125,21 @@ pub async fn create_pack(
         me, row.id)
         .execute(&s.db).await.ok();
 
+    // creator_name = 当前用户的 nickname（fallback username）
+    let me_row = sqlx::query!(
+        "SELECT nickname, username FROM users WHERE id = $1", me)
+        .fetch_optional(&s.db).await.map_err(internal)?;
+    let creator_name = me_row.and_then(|r| r.nickname.or(r.username));
+
     Ok(Json(PackOut {
         id: row.id.to_string(),
         name: req.name, short_name: req.short_name,
         description: req.description,
         cover_url: None,
         creator_id: Some(me.to_string()),
+        creator_name,
         install_count: 0,
+        is_public: req.is_public.unwrap_or(true),
         stickers: vec![],
     }))
 }
@@ -231,9 +241,13 @@ pub async fn get_pack(
     Path(id): Path<Uuid>,
 ) -> Result<Json<PackOut>, (StatusCode, String)> {
     let pack = sqlx::query!(
-        r#"SELECT p.id, p.name, p.short_name, p.description, p.creator_id, p.install_count,
-                  m.sha256 as "cover_sha?", m.mime as "cover_mime?"
-           FROM sticker_packs p LEFT JOIN media_files m ON m.id = p.cover_media_id
+        r#"SELECT p.id, p.name, p.short_name, p.description, p.creator_id,
+                  p.install_count, p.is_public,
+                  m.sha256 as "cover_sha?", m.mime as "cover_mime?",
+                  u.nickname as "creator_nick?", u.username as "creator_user?"
+           FROM sticker_packs p
+             LEFT JOIN media_files m ON m.id = p.cover_media_id
+             LEFT JOIN users u ON u.id = p.creator_id
            WHERE p.id = $1"#, id)
         .fetch_optional(&s.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
@@ -269,14 +283,36 @@ pub async fn get_pack(
         format!("/api/media/{}/file.{}", sha, ext)
     });
 
+    let creator_name = pack.creator_nick.or(pack.creator_user);
     Ok(Json(PackOut {
         id: pack.id.to_string(),
         name: pack.name, short_name: pack.short_name,
         description: pack.description, cover_url,
         creator_id: pack.creator_id.map(|u| u.to_string()),
+        creator_name,
         install_count: pack.install_count,
+        is_public: pack.is_public,
         stickers: stickers_out,
     }))
+}
+
+// ---------- 通过 short_name 拿 pack（公开分享链接） ----------
+// launcher://pack/<short_name> 解码后调这个端点拿详情 + stickers
+pub async fn get_pack_by_short(
+    State(s): State<Arc<AppState>>,
+    Path(short_name): Path<String>,
+) -> Result<Json<PackOut>, (StatusCode, String)> {
+    let trimmed = short_name.trim().to_lowercase();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err((StatusCode::BAD_REQUEST, "bad short_name".into()));
+    }
+    let id = sqlx::query_scalar!(
+        r#"SELECT id FROM sticker_packs
+           WHERE short_name = $1 AND is_public = TRUE"#,
+        trimmed)
+        .fetch_optional(&s.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "pack not found or not public".into()))?;
+    get_pack(State(s), Path(id)).await
 }
 
 // ---------- 公开 pack 列表（按安装量降序） ----------
@@ -287,6 +323,9 @@ pub struct ListQ { pub limit: Option<i64> }
 pub struct PackBrief {
     pub id: String, pub name: String, pub short_name: Option<String>,
     pub install_count: i32, pub cover_url: Option<String>,
+    pub creator_name: Option<String>,   // nickname / username — 客户端显示「by xxx」
+    pub is_public:    bool,
+    pub is_owner:     bool,             // 当前 session 是否是 pack 创建人
 }
 
 pub async fn list_public_packs(
@@ -295,9 +334,12 @@ pub async fn list_public_packs(
 ) -> Result<Json<Vec<PackBrief>>, (StatusCode, String)> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows = sqlx::query!(
-        r#"SELECT p.id, p.name, p.short_name, p.install_count,
-                  m.sha256 as "cover_sha?", m.mime as "cover_mime?"
-           FROM sticker_packs p LEFT JOIN media_files m ON m.id = p.cover_media_id
+        r#"SELECT p.id, p.name, p.short_name, p.install_count, p.is_public,
+                  m.sha256 as "cover_sha?", m.mime as "cover_mime?",
+                  u.nickname as "creator_nick?", u.username as "creator_user?"
+           FROM sticker_packs p
+             LEFT JOIN media_files m ON m.id = p.cover_media_id
+             LEFT JOIN users u ON u.id = p.creator_id
            WHERE p.is_public = TRUE
            ORDER BY p.install_count DESC, p.created_at DESC LIMIT $1"#, limit)
         .fetch_all(&s.db).await.map_err(internal)?;
@@ -312,6 +354,9 @@ pub async fn list_public_packs(
             };
             format!("/api/media/{}/file.{}", sha, ext)
         }),
+        creator_name: r.creator_nick.or(r.creator_user),
+        is_public: r.is_public,
+        is_owner: false,    // public list 不区分；客户端不需要这里展示按钮
     }).collect()))
 }
 
@@ -437,27 +482,55 @@ pub async fn share_pack(
 ) -> Result<Json<ShareResp>, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
     let pack = sqlx::query!(
-        "SELECT creator_id, short_name FROM sticker_packs WHERE id = $1", req.pack_id)
+        r#"SELECT creator_id, short_name, cover_media_id
+           FROM sticker_packs WHERE id = $1"#, req.pack_id)
         .fetch_optional(&s.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
-    if pack.creator_id != Some(me) {
-        return Err((StatusCode::FORBIDDEN, "not your pack".into()));
-    }
-
+    // 取消 owner check — 装了的别人 pack 也允许再分享（链接共用同一个 short_name），
+    // 但不允许通过这个端点把别人的 pack 改成 private。
     let want_public = req.is_public.unwrap_or(true);
-    // 已有 short_name 就复用；没有就生成（pack_id 取前 8 字 base32-friendly）
+    let is_owner = pack.creator_id == Some(me);
+    if !is_owner && !want_public {
+        return Err((StatusCode::FORBIDDEN,
+            "non-owner can only share, not unshare".into()));
+    }
+    // 已有 short_name 就复用；没有就生成（pack_id 取前 12 字 base32-friendly）
     let short = match pack.short_name {
         Some(s) if !s.is_empty() => s,
         _ => {
-            // 用 pack_id (uuid hex) 前 12 字符做 short_name — 简单稳定
             let raw = req.pack_id.simple().to_string();
             raw[..12].to_string()
         }
     };
-    sqlx::query!(
-        r#"UPDATE sticker_packs SET is_public = $1, short_name = $2 WHERE id = $3"#,
-        want_public, short, req.pack_id)
-        .execute(&s.db).await.map_err(internal)?;
+    // 自动给 pack 设 cover：如果 owner 没设过，挑第一个 sticker 当封面（按 sort_order）
+    if is_owner && pack.cover_media_id.is_none() {
+        if let Ok(Some(first)) = sqlx::query_scalar!(
+            r#"SELECT s.media_id FROM sticker_pack_items spi
+                 JOIN stickers s ON s.id = spi.sticker_id
+               WHERE spi.pack_id = $1
+               ORDER BY spi.sort_order, s.created_at LIMIT 1"#,
+            req.pack_id)
+            .fetch_optional(&s.db).await
+        {
+            sqlx::query!(
+                "UPDATE sticker_packs SET cover_media_id = $1 WHERE id = $2",
+                first, req.pack_id)
+                .execute(&s.db).await.ok();
+        }
+    }
+    // owner 才允许翻 is_public（非 owner 即使传 want_public=true 也只刷 short_name）
+    if is_owner {
+        sqlx::query!(
+            r#"UPDATE sticker_packs SET is_public = $1, short_name = $2 WHERE id = $3"#,
+            want_public, short, req.pack_id)
+            .execute(&s.db).await.map_err(internal)?;
+    } else {
+        // 非 owner 只补 short_name（如果还没有的话）
+        sqlx::query!(
+            r#"UPDATE sticker_packs SET short_name = COALESCE(short_name, $1)
+               WHERE id = $2"#, short, req.pack_id)
+            .execute(&s.db).await.map_err(internal)?;
+    }
     Ok(Json(ShareResp { short_name: short, is_public: want_public }))
 }
 
@@ -503,11 +576,14 @@ pub async fn my_packs(
 ) -> Result<Json<Vec<PackBrief>>, (StatusCode, String)> {
     let me = auth_user(&s, &q.session_token).await?;
     let rows = sqlx::query!(
-        r#"SELECT p.id, p.name, p.short_name, p.install_count,
-                  m.sha256 as "cover_sha?", m.mime as "cover_mime?"
+        r#"SELECT p.id, p.name, p.short_name, p.install_count, p.is_public,
+                  p.creator_id,
+                  m.sha256 as "cover_sha?", m.mime as "cover_mime?",
+                  u.nickname as "creator_nick?", u.username as "creator_user?"
            FROM user_sticker_packs usp
              JOIN sticker_packs p   ON p.id = usp.pack_id
              LEFT JOIN media_files m ON m.id = p.cover_media_id
+             LEFT JOIN users u ON u.id = p.creator_id
            WHERE usp.user_id = $1
            ORDER BY usp.sort_order, usp.installed_at DESC"#, me)
         .fetch_all(&s.db).await.map_err(internal)?;
@@ -522,5 +598,38 @@ pub async fn my_packs(
             };
             format!("/api/media/{}/file.{}", sha, ext)
         }),
+        creator_name: r.creator_nick.or(r.creator_user),
+        is_public:    r.is_public,
+        is_owner:     r.creator_id == Some(me),
     }).collect()))
+}
+
+// ---------- 拖拽排序 ----------
+// 客户端把 picker 里"我的"已安装 pack 的最新顺序发上来 — 服务器写入
+// user_sticker_packs.sort_order，下次 my_packs 按这个顺序返。系统 emoji
+// 那个本地伪 pack 没 UUID，不参与，由客户端本地 persist 单独保管。
+#[derive(Deserialize)]
+pub struct ReorderReq {
+    pub session_token: String,
+    pub pack_ids:      Vec<Uuid>,
+}
+
+pub async fn reorder_packs(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<ReorderReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    if req.pack_ids.len() > 200 {
+        return Err((StatusCode::BAD_REQUEST, "too many".into()));
+    }
+    let mut tx = s.db.begin().await.map_err(internal)?;
+    for (idx, pid) in req.pack_ids.iter().enumerate() {
+        sqlx::query!(
+            r#"UPDATE user_sticker_packs SET sort_order = $1
+               WHERE user_id = $2 AND pack_id = $3"#,
+            idx as i32, me, pid)
+            .execute(&mut *tx).await.map_err(internal)?;
+    }
+    tx.commit().await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }

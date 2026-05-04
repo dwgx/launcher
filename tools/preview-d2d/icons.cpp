@@ -345,12 +345,21 @@ void drawIcon(D2DApp& app, Name n, float x, float y, float size,
         break;
     }
     case Name::Edit: {
+        // 笔形：斜矩形笔身 + 笔尖三角 — 比单纯 4 段共线 path 容易看出"铅笔"
         PathBuilder ep(factory);
-        ep.addLine(sx(4), sy(20),  sx(20), sy(4));
-        ep.addLine(sx(20), sy(4),  sx(16), sy(8));
-        ep.addLine(sx(16), sy(8),  sx(8),  sy(16));
-        ep.addLine(sx(8), sy(16),  sx(4),  sy(20));
+        // 笔身上边 (16,4) → (4,16)
+        ep.addLine(sx(16), sy(4),  sx(4),  sy(16));
+        // 笔尖左边 (4,16) → (3,21)
+        ep.addLine(sx(4),  sy(16), sx(3),  sy(21));
+        // 笔尖底 (3,21) → (8,20)
+        ep.addLine(sx(3),  sy(21), sx(8),  sy(20));
+        // 笔身下边 (8,20) → (20,8)
+        ep.addLine(sx(8),  sy(20), sx(20), sy(8));
+        // 橡皮 (20,8) → (16,4)
+        ep.addLine(sx(20), sy(8),  sx(16), sy(4));
         drawPath(ep);
+        // 笔身分割线 — 让笔尖区域与笔身视觉区分
+        line(6, 14, 10, 18);
         break;
     }
     case Name::Plus:

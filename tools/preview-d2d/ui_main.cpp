@@ -4,6 +4,7 @@
 // 视觉骨架对齐 GDI+ Preview。Chat 和 Modals 在独立文件。
 
 #include "ui_main.h"
+#include "hwid.h"
 #include "icons.h"
 #include "palette.h"
 #include "user_state.h"
@@ -211,7 +212,8 @@ void paintAccountDropdown(D2DApp& app, float W) {
     float dw = 240.0f;
     float fold_extra = g_status_fold_t.value() * 124.0f;
     float dh = 240.0f + fold_extra;
-    float dx = W - 6.0f - dw;
+    // 对齐 topbar 右边距（pill_x + pill_w = W - 16），dropdown 右边贴齐 W - 16 不出
+    float dx = W - 16.0f - dw;
     float dy = kTopbarH + 4.0f - 6.0f * (1.0f - t);
 
     // 阴影 + 卡身
@@ -344,7 +346,7 @@ void paintAccountDropdown(D2DApp& app, float W) {
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, false },
         { "acc.signout", icons::Name::Logout, [](){
-            modal::openConfirm(L"退出登录", L"将清除本机会话，下次启动需重新登录。",
+            modal::openConfirm(trW("logout.title"), trW("logout.confirm"),
                 [](){
                     fetch::logout(g_session_token);
                     ws::stop();
@@ -356,18 +358,25 @@ void paintAccountDropdown(D2DApp& app, float W) {
                     auth::g_form.invite.text.clear();   auth::g_form.invite.cursor   = 0;
                     auth::g_form.focus = 0;
                     auth::g_form.error_msg.clear();
-                    stages::g_stage = stages::Stage::Auth;
-                    stages::g_auth_card_op.start(0.0f, 1.0f, 0.40f, 0.05f, curve::easeOutCubic);
-                    stages::g_auth_card_y.start(12.0f, 0.0f, 0.45f, 0.05f, curve::easeOutQuint);
-                    toast::show(L"已退出登录");
+                    // 缩窗 + 复位 tween — 关键修复 (之前直接切 Stage::Auth 但窗口还是 1100×720)
+                    stages::enterAuthFromLogout();
+                    toast::show(trW("logout.done"));
                 },
-                L"退出", L"取消", true);
+                trW("logout.yes"), trW("logout.cancel"), true);
             g_account_dropdown = false;
             g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         }, true },
     };
     auto* item_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    for (auto& it : items) {
+    bool last_was_danger = false;
+    for (size_t ii = 0; ii < sizeof(items) / sizeof(items[0]); ++ii) {
+        auto& it = items[ii];
+        // 在 danger 项之前补一条分割线，把"退出登录"跟其他普通项视觉上分开
+        if (it.danger && !last_was_danger) {
+            prim::drawLine(ctx, dx + 12, iy + 4, dx + dw - 12, iy + 4,
+                           br.solidA(pal.divider, t), 1.0f);
+            iy += 8;
+        }
         LayoutRect r{ dx + 6, iy, dw - 12, 30 };
         bool hover = r.contains(g_mouse);
         if (hover) {
@@ -384,6 +393,7 @@ void paintAccountDropdown(D2DApp& app, float W) {
                         br.solidA(tc, t));
         hit(r, it.click, true);
         iy += 32;
+        last_was_danger = it.danger;
     }
 }
 
@@ -487,11 +497,15 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         swprintf_s(tbuf, L"%02d:%02d:%02d  UTC%+d",
                    st.wHour, st.wMinute, st.wSecond, tz_min / 60);
     }
-    wchar_t pcname[64] = {0}; DWORD pcsz = 64;
-    GetComputerNameW(pcname, &pcsz);
+    // 设备公开 tag — 双重 SHA-256 + pepper salt 后衍生 24-hex 5-segment
+    // 跟服务端验证用同一个 hash 函数（不可反推真 HWID）
+    std::string dt = getDeviceTag();
+    int dtn = MultiByteToWideChar(CP_UTF8, 0, dt.c_str(), -1, nullptr, 0);
+    std::wstring dtw(dtn > 0 ? dtn - 1 : 0, 0);
+    if (dtn > 0) MultiByteToWideChar(CP_UTF8, 0, dt.c_str(), -1, dtw.data(), dtn);
     Stat stats[] = {
         { trW("home.time"),         tbuf, false },
-        { trW("home.host"),         pcname, false },
+        { trW("home.device_tag"),   dtw, false },
         { trW("home.subscription"), g_user.expires, true },
     };
     float spx = cx;
@@ -510,8 +524,10 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
             prim::drawText_(ctx, s.label.c_str(), meta_fmt,
                             spx + 16, sy_ + 14, sw_ - 32, 14,
                             br.solidA(pal.text_muted, op));
-            // 时间字段字号缩小一点（要装时区）
-            float val_size = (s.label == trW("home.time")) ? ptToDip(9.5f) : ptToDip(11.0f);
+            // 时间字段 + 机器码字段都用小字号（要装下时区或 5-段 hex）
+            float val_size = ptToDip(11.0f);
+            if (s.label == trW("home.time"))       val_size = ptToDip(9.5f);
+            else if (s.label == trW("home.device_tag")) val_size = ptToDip(8.0f);
             auto* val_fmt2 = app.texts().format(L"Microsoft YaHei UI", val_size,
                                                  DWRITE_FONT_WEIGHT_BOLD);
             prim::drawText_(ctx, s.val.c_str(), val_fmt2,
@@ -979,6 +995,11 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintEditBioModal(app, W, H);
     // WebView2 modal 在最顶（CS2 modal 已经直接 webview，这是通用浏览器/视频）
     modal::paintWebViewModal(app, W, H);
+
+    // pack 预览 modal
+    modal::paintPackPreviewModal(app, W, H);
+    // 消息右键菜单 — 在所有 modal 之上、toast 之下
+    modal::paintMsgContextMenu(app, W, H);
 
     // toast 在最最顶层
     toast::paint(app, W, H);

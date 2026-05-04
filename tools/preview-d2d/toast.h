@@ -17,6 +17,7 @@ struct Toast {
 extern Toast g_toast;
 
 void show(const wchar_t* s);
+inline void show(const std::wstring& s) { show(s.c_str()); }
 void tick(float dt);
 void paint(D2DApp& app, float W, float H);
 

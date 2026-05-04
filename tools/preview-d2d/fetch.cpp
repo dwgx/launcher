@@ -277,6 +277,40 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
     }, a, 0, nullptr);
 }
 
+void myProfile(HWND notify) {
+    if (g_session_token.empty()) return;
+    auto* a = new VoidArg{ notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<VoidArg> a((VoidArg*)lp);
+        std::string url = "/api/profile?session_token=" + g_session_token;
+        std::wstring wurl(url.begin(), url.end());
+        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        if (!r.ok()) {
+            PostMessageW(a->h, WM_APP + 54, 0, 0);
+            return 0;
+        }
+        // 解析关键字段并写回 g_user / g_status
+        std::wstring nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
+        std::wstring uid         = utf8ToW(net::jsonStr(r.body, "uid"));
+        std::wstring username    = utf8ToW(net::jsonStr(r.body, "username"));
+        std::wstring status      = utf8ToW(net::jsonStr(r.body, "status"));
+        std::wstring status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
+        std::wstring bio         = utf8ToW(net::jsonStr(r.body, "bio"));
+        if (!nickname.empty()) g_user.nickname    = nickname;
+        if (!uid.empty())      g_user.uid         = uid;
+        if (!username.empty()) g_user.username    = username;
+        g_user.status_text = status_text;
+        g_user.bio         = bio;
+        if      (status == L"online")  g_status = UserStatus::Online;
+        else if (status == L"busy")    g_status = UserStatus::Busy;
+        else if (status == L"away")    g_status = UserStatus::Away;
+        else if (status == L"sleep")   g_status = UserStatus::Sleep;
+        else if (status == L"offline") g_status = UserStatus::Offline;
+        PostMessageW(a->h, WM_APP + 54, 1, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
 void geoIP(HWND notify) {
     auto* a = new VoidArg{ notify };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {

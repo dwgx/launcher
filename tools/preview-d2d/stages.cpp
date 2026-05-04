@@ -110,6 +110,26 @@ void simulateAuthSubmit() {
     enterShrinkSuccessStage();
 }
 
+void enterAuthFromLogout() {
+    // 从 Main 缩到 Auth — 不走 ShrinkSuccess + CheckSuccess 那条线（那是登录成功的路径）
+    g_stage = Stage::ExpandAuth;
+    g_time_in_stage = 0.0f;
+    g_auth_succeeded = false;
+    g_skip_auth_after_loading = false;
+    // 主窗 / topbar / sidebar 全归零（避免下次再进 Main 残留）
+    g_sidebar_x.start(g_sidebar_x.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
+    g_topbar_y.start(g_topbar_y.value(),  0.0f, 0.20f, 0, curve::easeOutCubic);
+    g_main_opacity.start(g_main_opacity.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
+    g_check_anim.start(0.0f, 0.0f, 0.001f, 0, curve::easeOutCubic);
+    g_card_fade_out.start(0.0f, 0.0f, 0.001f, 0, curve::easeOutCubic);
+    g_card_opacity.start(0.0f, 0.0f, 0.001f, 0, curve::easeOutCubic);
+    g_auth_card_op.start(0.0f, 0.0f, 0.001f, 0, curve::easeOutCubic);
+    g_auth_card_y.start(0.0f, 0.0f, 0.001f, 0, curve::easeOutCubic);
+    // 缩窗 1100→480, 720→540（driveTransitions 会 SetWindowPos 跟到位 + 完成后 enterAuthStage）
+    g_window_w.start(1100.0f, 480.0f, 0.45f, 0.0f, curve::easeOutQuint);
+    g_window_h.start(720.0f,  540.0f, 0.45f, 0.0f, curve::easeOutQuint);
+}
+
 // ============================== tick / drive ==============================
 void tick(float dt) {
     g_time_in_stage += dt;
@@ -129,6 +149,11 @@ void tick(float dt) {
     g_auth_card_y.tick(dt);
     g_auth_card_op.tick(dt);
     g_check_anim.tick(dt);
+    // Auth fields 的 floating label tween — 之前没 tick 过，结果 label 永远卡在初始值
+    // 跟 caret 在中间重叠（用户图4 报的 BUG）
+    auth::g_form.username.float_t.tick(dt);
+    auth::g_form.password.float_t.tick(dt);
+    auth::g_form.invite.float_t.tick(dt);
 }
 
 bool driveTransitions(D2DApp& app, int sw, int sh) {
@@ -226,6 +251,8 @@ static void drawSpinnerArc(D2DApp& app, float cx, float cy, float r, float thick
 
 // ============================== Paint 函数 ==============================
 // 接收 W/H 都是 DIP（D2D RT SetDpi 后逻辑像素 = client px / dpi_scale）
+// 圆角窗口由 paint() dispatch 顶部 PushLayerRR 整体处理 — paintBg 直接 Clear 即可
+// （Clear 在 layer 内 → 仅 layer 圆角内的像素 blit 回主 RT）
 static void paintBg(D2DApp& app) {
     app.ctx()->Clear(argbToColorF(palette().bg));
 }
@@ -310,6 +337,12 @@ void paint(D2DApp& app) {
     float W = app.widthDip();
     float H = app.heightDip();
 
+    // 整窗圆角 mask — Clear 透明 + PushLayer 圆角 → 所有后续 draw 都被裁到圆角内
+    auto* ctx = app.ctx();
+    ctx->Clear(D2D1::ColorF(0, 0, 0, 0));
+    float r = (W < 80 || H < 80) ? (std::min)(W, H) * 0.5f : 12.0f;
+    prim::pushLayerRR(ctx, app.factory(), 0, 0, W, H, r);
+
     switch (g_stage) {
         case Stage::Dot:
             paintDot(app, W, H); break;
@@ -332,6 +365,8 @@ void paint(D2DApp& app) {
         default:
             ui::paintMain(app, W, H); break;
     }
+
+    prim::popLayer(ctx);
 }
 
 }  // namespace launcher::d2d::stages

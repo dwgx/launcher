@@ -29,7 +29,31 @@ extern bool         g_focus_composer;
 // Emoji / sticker picker
 extern bool  g_picker_open;
 extern Tween g_picker_t;
-extern int   g_picker_tab;     // 0 = emoji, 1+ = sticker pack idx
+extern int   g_picker_tab;     // 0 = emoji, 1+ = sticker pack idx (1+ = 索引到 sticker::g_packs[idx-1])
+
+// 顶部 tab 滑块动画（[表情] [表情包] pill）
+extern Tween g_top_seg_x, g_top_seg_w;
+// pack tab 滑块动画（pack list 里 active pill）
+extern Tween g_pack_tab_x, g_pack_tab_w;
+
+// pack tab 拖拽排序状态 — paintPicker 写、 onMouse* 读
+struct PackDrag {
+    int   from      = -1;     // 在 g_packs 里的索引（拖动源）
+    int   over      = -1;     // 当前鼠标悬停的目标索引
+    float anchor_dx = 0;      // 抓取时鼠标距 tab 左边距 — 让拖动跟手
+    float start_x   = 0;      // 鼠标按下时的 x — 用来判断是否真拖动了
+    bool  moved     = false;  // 鼠标已经离开起点（区分 click vs drag）
+};
+extern PackDrag g_pack_drag;
+
+// per-channel 滚动偏移（从底部往上的像素数；0 = 锁底，新消息自动跟）
+struct ChatScroll {
+    float offset_from_bottom = 0;     // [0, total_height - viewport]
+    float total_height       = 0;     // 上一帧测量
+    float viewport_h         = 0;
+    bool  initialized        = false; // false = 首次进入这个频道，会自动 stick to bottom
+};
+extern std::unordered_map<std::wstring, ChatScroll> g_scroll;
 
 enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
 
@@ -40,6 +64,7 @@ struct Msg {
     std::wstring status;
     std::wstring body;
     std::wstring time;
+    int64_t      server_id = 0;     // 后端 messages.id (软删除时 POST /chat/delete 用)
 };
 
 std::vector<Msg>& streamFor(const std::wstring& slug);
@@ -51,10 +76,18 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah);
 void tick(float dt);
 
 bool onMouseLDown(HWND hwnd, POINT dip);
-// 右键命中头像 → 弹"看主页"菜单（PostMessage WM_APP+37 with std::wstring* from）
+bool onMouseLUp(HWND hwnd, POINT dip);
+// 右键命中消息 → 弹消息菜单；命中头像 → 看主页
 bool onMouseRDown(HWND hwnd, POINT dip);
+// 滚轮：delta = WHEEL_DELTA 的倍数（120 = 一格）
+void onWheel(int delta);
 void onChar(HWND hwnd, wchar_t c, bool ctrl);
 void onKey(HWND hwnd, int vk, bool shift, bool ctrl);
+
+// 把 pack tab 动画 reset 到当前 active idx —— 切 picker tab、重排序后调
+void retargetPackTab();
+// 把顶部 [表情]/[表情包] 滑块 retarget 到当前 g_picker_tab
+void retargetTopSeg();
 
 // 启动后异步拉 GET /api/chat/official 把 slug → id 填入 g_channels
 void fetchOfficialChannels(HWND notify);
@@ -65,10 +98,22 @@ void applyOfficialResult();
 // 拖拽文件进 chat → 添加 image bubble + 上传后端
 void appendMedia(const std::wstring& path);
 
+// 公共：把消息追加到当前频道，并且如果此频道用户在底部就自动跟随到底
+void appendLocalMessage(Msg msg);
+
 // 拉某频道历史消息 (GET /api/chat/history?session_token=&chat_id=) → WM_APP+45
 void fetchHistory(HWND notify, const std::wstring& slug);
 
 // 主线程 WM_APP+45 调 — 把后台拉到的历史 merge 到 streamFor(slug)
 void applyHistoryResult(const std::wstring& slug);
+
+// 主线程 WM_APP+52 调 — 把刚发的 me 消息绑定上后端 server_id
+void applySendResult();
+
+// 删除消息 — 本地立即移 + 后端软删除（仅自己消息有效）
+void deleteMessage(HWND hwnd, const std::wstring& slug, int64_t server_id);
+
+// WS 收到 type=delete 事件 — 在所有 stream 里找匹配 server_id 摘掉
+void onWsMessageDeleted(int64_t server_id);
 
 }  // namespace launcher::d2d::chat

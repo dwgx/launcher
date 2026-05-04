@@ -144,6 +144,33 @@ void openEditBio();
 void paintEditBioModal(D2DApp& app, float W, float H);
 void onEditBioResult(bool success);
 
+// 消息右键上下文菜单 — chat::onMouseRDown 命中消息时打开
+struct MsgContextMenuState {
+    bool open = false;
+    Tween t;
+    POINT anchor{};
+    int   src_idx = -1;        // 在 streamFor(slug) 里的索引
+    std::wstring slug;         // 频道 slug
+    // 拷贝快照（避免 streamFor 容器变动后悬空）
+    int  kind_int = 0;         // chat::MsgKind cast int
+    std::wstring body;
+    std::wstring author;
+    std::wstring from;
+};
+extern MsgContextMenuState g_msg_menu;
+void openMsgContextMenu(POINT anchor_dip, int src_idx);
+void paintMsgContextMenu(D2DApp& app, float W, float H);
+
+// launcher://pack/<short> 点击 → 这个 modal 显示分享的 pack（缩略图 + 名字 + 创建人 + 添加按钮）
+struct PackPreviewState {
+    bool open = false;
+    Tween t;
+    std::string short_name;
+};
+extern PackPreviewState g_pack_preview_modal;
+void openPackPreviewModal(const std::string& short_name);
+void paintPackPreviewModal(D2DApp& app, float W, float H);
+
 // 通用 WebView 弹窗 — 视频 / 网页都用这个，全屏铺开 WebView2 子窗口
 struct WebViewModalState {
     bool open = false;

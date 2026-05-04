@@ -90,6 +90,8 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/profile/avatar",        post(profile::upload_avatar))
         .route("/profile/login-history", get(profile::login_history))
         .route("/profile/status",        post(profile::set_status))
+        .route("/profile/update",        post(profile::update_profile))
+        .route("/profile/peer/:key",     get(profile::get_peer_profile))
         .route("/avatar/:id",            get(profile::get_avatar))
         // user_tags chips
         .route("/profile/tags",          get(profile::list_tags))
@@ -120,6 +122,8 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/sticker/pack/delete",   post(sticker::delete_pack))
         .route("/sticker/pack/share",    post(sticker::share_pack))
         .route("/sticker/pack/cover",    post(sticker::set_pack_cover))
+        .route("/sticker/pack/reorder",  post(sticker::reorder_packs))
+        .route("/sticker/pack/by-short/:short", get(sticker::get_pack_by_short))
         .route("/sticker/packs/public",  get(sticker::list_public_packs))
         .route("/sticker/packs/mine",    get(sticker::my_packs))
         .route("/sticker/mine",          get(sticker::my_stickers))

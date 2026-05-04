@@ -30,6 +30,8 @@
 #include "steam.h"
 #include "hwid.h"
 #include "sticker.h"
+#include "net.h"
+#include <memory>
 #include <utility>
 
 #pragma comment(lib, "user32.lib")
@@ -49,11 +51,12 @@ static bool inAuthOrMain() {
         || stages::g_stage == stages::Stage::Main;
 }
 
-// 启动后异步：tags + 头像云同步 + sticker packs/stickers + market
+// 启动后异步：tags + 头像云同步 + sticker packs/stickers + market + 个人 profile
 static void afterLogin(HWND hwnd) {
     persist::saveSession(g_session_token, g_user_id);
     ws::start(hwnd);
     chat::fetchOfficialChannels(hwnd);
+    fetch::myProfile(hwnd);          // ← status / status_text / bio 持久化拉回
     fetch::userTags(hwnd);
     fetch::remoteAvatar(hwnd);
     sticker::fetchMyPacks(hwnd);
@@ -87,11 +90,36 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_mouse = physToDip(pt);
             g_mouse_pressed = true;
             if (modal::onMouseLDown(hwnd, g_mouse)) return 0;
-            if (inAuthOrMain()) dispatchClick(g_mouse);
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat) {
+                // chat 自己的 onMouseLDown 处理 picker dismiss / pack drag /
+                // composer 焦点 — 别只走 dispatchClick 否则这些都不生效
+                chat::onMouseLDown(hwnd, g_mouse);
+            } else if (inAuthOrMain()) {
+                dispatchClick(g_mouse);
+                // 不在 chat 但仍想要"点其他地方取消聚焦"行为 — 这里通用清空
+                // (auth view 自己的 input box 通过 hit cb 重设 focus，所以无须额外)
+            }
             return 0;
         }
         case WM_LBUTTONUP: {
             g_mouse_pressed = false;
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            POINT dip = physToDip(pt);
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat) {
+                chat::onMouseLUp(hwnd, dip);
+            }
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && !modal::anyOpen()) {
+                // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
+                int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                chat::onWheel(delta);
+            }
             return 0;
         }
         case WM_KEYDOWN: {
@@ -373,6 +401,79 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 47: {                    // chat text 链接点击 (wp = std::wstring* url)
             auto* p = (std::wstring*)wp;
             if (p && !p->empty()) modal::openWebPage(*p);
+            return 0;
+        }
+        case WM_APP + 43: {                    // sticker 导出完成 (wp = success count)
+            wchar_t buf[64];
+            if (wp > 0) {
+                swprintf_s(buf, L"已导出 %d 张到目标文件夹 ✓", (int)wp);
+                toast::show(buf);
+            } else {
+                toast::show(L"导出失败（文件夹无法访问）");
+            }
+            return 0;
+        }
+        case WM_APP + 44: {                    // pack preview 加载完
+            return 0;
+        }
+        case WM_APP + 48: {                    // 拖拽排序云端写入完成
+            if (wp == 0) toast::show(L"排序保存失败（仅本地）");
+            return 0;
+        }
+        case WM_APP + 49: {                    // chat 链接卡片点击 → 弹 PackPreview (wp = std::string* short)
+            auto* p = (std::string*)wp;
+            if (p && !p->empty()) modal::openPackPreviewModal(*p);
+            return 0;
+        }
+        case WM_APP + 50: {                    // 消息右键菜单 (wp = struct{POINT, idx}*)
+            struct Pl { POINT pt; int idx; };
+            auto* p = (Pl*)wp;
+            if (p) modal::openMsgContextMenu(p->pt, p->idx);
+            return 0;
+        }
+        case WM_APP + 52: {                    // 发消息后，把 server message_id 绑到本地 me 消息
+            chat::applySendResult();
+            return 0;
+        }
+        case WM_APP + 53: {                    // 删消息结果（仅自己消息）
+            if (wp == 0) toast::show(launcher::d2d::trW("toast.delete_fail"));
+            return 0;
+        }
+        case WM_APP + 54: {                    // myProfile 拉回
+            // g_user / g_status 已经在 fetch::myProfile worker 线程里写好；这里仅触发重画
+            return 0;
+        }
+        case WM_APP + 51: {                    // chat picker → 卸载非 owner pack (wp/lp 同 +32)
+            auto* pid = (std::string*)wp;
+            auto* nm = (std::wstring*)lp;
+            if (pid && nm) {
+                std::string id_copy = *pid;
+                std::wstring nm_copy = *nm;
+                modal::openConfirm(L"卸载表情包",
+                    L"确认卸载「" + nm_copy + L"」？只是从你的列表移除，不影响别人。",
+                    [id_copy](){
+                        // 卸载（uninstall）
+                        struct A { std::string id; HWND h; };
+                        auto* a = new A{ id_copy, GetActiveWindow() };
+                        CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+                            std::unique_ptr<A> a((A*)lp);
+                            std::string body = "{\"session_token\":\"" + g_session_token
+                                             + "\",\"pack_id\":\"" + a->id + "\"}";
+                            net::postJson(L"/api/sticker/pack/uninstall", body);
+                            // 本地从 g_packs 摘掉
+                            {
+                                std::lock_guard<std::mutex> lk(sticker::g_packs_mtx);
+                                auto& v = sticker::g_packs;
+                                for (auto it = v.begin(); it != v.end(); ++it) {
+                                    if (it->id == a->id) { v.erase(it); break; }
+                                }
+                            }
+                            PostMessageW(a->h, WM_APP + 27, 1, 0);
+                            return 0;
+                        }, a, 0, nullptr);
+                    },
+                    L"卸载", L"取消", true);
+            }
             return 0;
         }
         case WM_APP + 35: {                    // profile update result

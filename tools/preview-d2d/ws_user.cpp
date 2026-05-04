@@ -57,45 +57,77 @@ void drain() {
     }
     for (auto& m : local) {
         std::string type = net::jsonStr(m, "type");
-        if (type == "chat") {
+        // 后端发送 { "type": "message", "data": <MessageOut> }
+        // MessageOut 字段：id / chat_id / sender_id / msg_type / payload / created_at / deleted
+        if (type == "message") {
+            // data 是 nested object — 在外层 m 里直接搜字段也行，因为 net::jsonStr 找到第一个匹配
             std::string chat_id = net::jsonStr(m, "chat_id");
-            std::string kind = net::jsonStr(m, "kind");
-            std::string body = net::jsonStr(m, "body");
-            std::string from = net::jsonStr(m, "from");
-            std::string author = net::jsonStr(m, "author");
+            std::string kind    = net::jsonStr(m, "msg_type");
+            std::string sender  = net::jsonStr(m, "sender_id");
+            int64_t mid         = net::jsonInt(m, "id");
+            // 自己发出的消息已经本地 push 过 — 跳过 echo
+            if (!g_user_id.empty() && sender == g_user_id) {
+                // 但要把 server_id 绑回去 — 简单做法：依赖 chat::applySendResult 已绑（POST/send 响应也含 id）
+                continue;
+            }
+            // payload 解析 — 可能是字符串或对象
+            std::string body;
+            {
+                auto pp = m.find("\"payload\":");
+                if (pp != std::string::npos) {
+                    pp += 10;
+                    while (pp < m.size() && (m[pp] == ' ' || m[pp] == '\t')) ++pp;
+                    if (pp < m.size() && m[pp] == '"') {
+                        ++pp;
+                        while (pp < m.size() && m[pp] != '"') {
+                            if (m[pp] == '\\' && pp + 1 < m.size()) {
+                                char nc = m[pp + 1];
+                                if (nc == 'n') body.push_back('\n');
+                                else body.push_back(nc);
+                                pp += 2;
+                            } else {
+                                body.push_back(m[pp]); ++pp;
+                            }
+                        }
+                    } else if (pp < m.size() && m[pp] == '{') {
+                        body = net::jsonStr(m.substr(pp), "url");
+                        if (body.empty()) body = net::jsonStr(m.substr(pp), "media_url");
+                    }
+                }
+            }
             for (auto& c : chat::g_channels) {
                 if (c.id == chat_id) {
                     chat::Msg msg;
-                    msg.from = utf8ToW(from);
-                    msg.author = utf8ToW(author);
+                    std::string sender_short = sender.size() > 8 ? sender.substr(0, 8) : sender;
+                    msg.from = utf8ToW(sender_short);
+                    msg.author = msg.from;
                     msg.body = utf8ToW(body);
                     msg.time = L"now";
                     msg.status = L"online";
-                    if (kind == "text" || kind.empty()) {
+                    msg.server_id = mid;
+                    if      (kind == "sticker")    msg.kind = chat::MsgKind::Sticker;
+                    else if (kind == "image")      msg.kind = chat::MsgKind::Image;
+                    else if (kind == "gif")        msg.kind = chat::MsgKind::Gif;
+                    else if (kind == "video")      msg.kind = chat::MsgKind::Video;
+                    else if (kind == "system")     msg.kind = chat::MsgKind::System;
+                    else if (kind == "pack_share") {
                         msg.kind = chat::MsgKind::Text;
-                    } else if (kind == "sticker") {
-                        msg.kind = chat::MsgKind::Sticker;
-                    } else if (kind == "image") {
-                        msg.kind = chat::MsgKind::Image;
-                    } else if (kind == "gif") {
-                        msg.kind = chat::MsgKind::Gif;
-                    } else if (kind == "video") {
-                        msg.kind = chat::MsgKind::Video;
-                    } else if (kind == "system") {
-                        msg.kind = chat::MsgKind::System;
-                    } else if (kind == "pack_share") {
-                        // 暂作 system 显示
-                        msg.kind = chat::MsgKind::System;
-                        msg.body = L"分享了表情包：" + msg.body;
-                    } else {
-                        msg.kind = chat::MsgKind::Text;
+                        // pack_share payload 通常含 short_name；展示成 launcher://pack/<short>
+                        // 让 chat 的 link 检测渲染成预览卡片
+                        if (!msg.body.empty() && msg.body.find(L"launcher://") == std::wstring::npos) {
+                            msg.body = L"launcher://pack/" + msg.body;
+                        }
                     }
+                    else                           msg.kind = chat::MsgKind::Text;
                     chat::streamFor(c.slug).push_back(std::move(msg));
                     break;
                 }
             }
+        } else if (type == "delete") {
+            int64_t mid = net::jsonInt(m, "message_id");
+            if (mid > 0) chat::onWsMessageDeleted(mid);
         }
-        // type == "status"  — 留扩展（更新对应 user 的 status dot）
+        // type == "status" 留扩展
     }
 }
 

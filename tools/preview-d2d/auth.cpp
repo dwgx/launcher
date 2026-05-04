@@ -138,12 +138,17 @@ static void drawField(D2DApp& app, InputBox& box,
     }
 
     // 0.5Hz 闪烁 caret — 用 g_time_in_stage 周期相位
+    // caret 紧贴 baseline（不要从 iy+22 开始顶到 iy+ih-8 那么长 — 会和文字字符的左缘"重叠"
+    // 看起来像光标穿过字。压缩到 18px 高 + 文字基线对齐）
     if (focused && !box.hasSelection()) {
         float pre_w = measureW(app, box.displaySlice(0, box.cursor), tx_fmt);
         float cur_x = ix + 14.0f + pre_w;
         int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
-            prim::drawLine(ctx, cur_x, iy + 22.0f, cur_x, iy + ih - 8.0f,
+            float cy_top = iy + 24.0f;
+            float cy_bot = cy_top + 18.0f;
+            if (cy_bot > iy + ih - 4.0f) cy_bot = iy + ih - 4.0f;
+            prim::drawLine(ctx, cur_x, cy_top, cur_x, cy_bot,
                            br.solidA(pal.primary, op), 1.5f);
         }
     }

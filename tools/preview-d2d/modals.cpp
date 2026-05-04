@@ -11,6 +11,10 @@
 #include "steam.h"
 #include "webview.h"
 #include "game_assets.h"
+#include "chat.h"
+#include "sticker.h"
+#include "toast.h"
+#include "i18n.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -32,6 +36,8 @@ UserProfileState  g_user_profile;
 EditStatusTextState g_edit_status;
 EditBioState      g_edit_bio;
 WebViewModalState g_webview_modal;
+MsgContextMenuState g_msg_menu;
+PackPreviewState  g_pack_preview_modal;
 
 namespace {
 
@@ -178,13 +184,15 @@ void tickAll(float dt) {
     g_edit_bio.t.tick(dt);
     g_edit_bio.input.float_t.tick(dt);
     g_webview_modal.t.tick(dt);
+    g_msg_menu.t.tick(dt);
+    g_pack_preview_modal.t.tick(dt);
 }
 
 bool anyOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
         || g_addtag.open || g_createpack.open || g_renamepack.open
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
-        || g_webview_modal.open;
+        || g_webview_modal.open || g_msg_menu.open || g_pack_preview_modal.open;
 }
 
 // ============== ChangePw ==============
@@ -1246,19 +1254,320 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
                    [hwnd = GetActiveWindow()](){ submitRenamePack(hwnd); });
 }
 
+// ============== 消息右键上下文菜单 ==============
+void openMsgContextMenu(POINT anchor_dip, int src_idx) {
+    auto& msgs = chat::streamFor(chat::g_active);
+    if (src_idx < 0 || src_idx >= (int)msgs.size()) return;
+    const chat::Msg& m = msgs[src_idx];
+    g_msg_menu.open = true;
+    g_msg_menu.anchor = anchor_dip;
+    g_msg_menu.src_idx = src_idx;
+    g_msg_menu.slug = chat::g_active;
+    g_msg_menu.kind_int = (int)m.kind;
+    g_msg_menu.body = m.body;
+    g_msg_menu.author = m.author.empty() ? m.from : m.author;
+    g_msg_menu.from = m.from;
+    g_msg_menu.t.start(0, 1, 0.18f, 0, curve::easeOutCubic);
+}
+static void closeMsgMenu() {
+    g_msg_menu.t.start(g_msg_menu.t.value(), 0, 0.14f, 0, curve::easeOutCubic);
+    g_msg_menu.open = false;
+}
+
+namespace {
+void copyTextToClipboard(HWND hwnd, const std::wstring& s) {
+    if (!OpenClipboard(hwnd)) return;
+    EmptyClipboard();
+    size_t bytes = (s.size() + 1) * sizeof(wchar_t);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (h) {
+        memcpy(GlobalLock(h), s.c_str(), bytes);
+        GlobalUnlock(h);
+        SetClipboardData(CF_UNICODETEXT, h);
+    }
+    CloseClipboard();
+}
+}
+
+void paintMsgContextMenu(D2DApp& app, float W, float H) {
+    if (!g_msg_menu.open && g_msg_menu.t.value() < 0.001f) return;
+    float t = g_msg_menu.t.value();
+    if (t < 0.001f) return;
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    chat::MsgKind kind = (chat::MsgKind)g_msg_menu.kind_int;
+    bool is_text = (kind == chat::MsgKind::Text);
+    bool is_media = (kind == chat::MsgKind::Image || kind == chat::MsgKind::Gif
+                  || kind == chat::MsgKind::Sticker);
+
+    struct Item { std::wstring label; std::function<void()> click; bool danger; };
+    std::vector<Item> items;
+    items.push_back({ trW("msg.reply"), [](){
+        // composer 文本预填 "> @author 原文..."
+        std::wstring prefix = L"> @" + g_msg_menu.author + L" ";
+        std::wstring body = g_msg_menu.body;
+        if (body.size() > 60) body = body.substr(0, 60) + L"…";
+        chat::g_composer.text = prefix + body + L"\n";
+        chat::g_composer.cursor = (int)chat::g_composer.text.size();
+        chat::g_composer.clearSel();
+        chat::g_focus_composer = true;
+        closeMsgMenu();
+    }, false });
+    items.push_back({ trW("msg.copy"), [](){
+        copyTextToClipboard(GetActiveWindow(),
+            g_msg_menu.body.empty() ? L"" : g_msg_menu.body);
+        toast::show(trW("toast.copied"));
+        closeMsgMenu();
+    }, false });
+    if (is_media) {
+        items.push_back({ trW("msg.add_emoji"), [](){
+            // 把当前媒体路径当作文件，复制到「我的表情」分组（直接 importFromFolder 但只导入一个文件）
+            // 简化：直接发到主线程让它走文件夹导入流（改为单文件添加）。
+            std::wstring path = g_msg_menu.body;
+            // 把文件拷到一个临时目录然后 importFromFolder
+            wchar_t tmp[MAX_PATH] = {0};
+            GetTempPathW(MAX_PATH, tmp);
+            std::wstring tmpdir = std::wstring(tmp) + L"launcher_add_emoji\\";
+            CreateDirectoryW(tmpdir.c_str(), nullptr);
+            // 清空目录里的旧文件
+            std::wstring pat = tmpdir + L"*";
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW(pat.c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    DeleteFileW((tmpdir + fd.cFileName).c_str());
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            // 拷新文件
+            auto sl = path.find_last_of(L"\\/");
+            std::wstring fname = (sl != std::wstring::npos) ? path.substr(sl + 1) : path;
+            CopyFileW(path.c_str(), (tmpdir + fname).c_str(), FALSE);
+            // 找「我的表情」pack id
+            std::string my_pid;
+            {
+                std::lock_guard<std::mutex> lk(sticker::g_packs_mtx);
+                for (auto& p : sticker::g_packs) {
+                    if (!p.is_system && p.is_owner && p.name == L"我的表情") {
+                        my_pid = p.id; break;
+                    }
+                }
+            }
+            if (my_pid.empty()) {
+                sticker::ensureMyStickersPack(GetActiveWindow());
+            } else {
+                sticker::importFromFolder(GetActiveWindow(), tmpdir, my_pid);
+                toast::show(trW("toast.added_to_emoji"));
+            }
+            closeMsgMenu();
+        }, false });
+    }
+    if (g_msg_menu.from == L"me") {
+        items.push_back({ trW("msg.delete"), [](){
+            auto& msgs = chat::streamFor(g_msg_menu.slug);
+            int idx = g_msg_menu.src_idx;
+            int64_t server_id = 0;
+            if (idx >= 0 && idx < (int)msgs.size()) {
+                server_id = msgs[idx].server_id;
+            }
+            if (server_id > 0) {
+                chat::deleteMessage(GetActiveWindow(), g_msg_menu.slug, server_id);
+                toast::show(trW("toast.deleted_all"));
+            } else {
+                // 没 server_id（刚发还没回 message_id）— 暂时只删本地
+                if (idx >= 0 && idx < (int)msgs.size()) {
+                    msgs.erase(msgs.begin() + idx);
+                }
+                toast::show(trW("toast.deleted_local"));
+            }
+            closeMsgMenu();
+        }, true });
+    }
+    (void)is_text;
+
+    // 菜单尺寸
+    float mw = 180;
+    float row_h = 32;
+    float mh = (float)items.size() * row_h + 12;
+    float mx = (float)g_msg_menu.anchor.x;
+    float my = (float)g_msg_menu.anchor.y;
+    if (mx + mw > W - 8) mx = W - 8 - mw;
+    if (my + mh > H - 8) my = H - 8 - mh;
+    if (mx < 8) mx = 8;
+    if (my < 8) my = 8;
+
+    // 关键：注册全屏 catchall hit — 所有点击在反向 dispatch 时被 menu items 优先吃掉，
+    // 落到 catchall 就关闭菜单（避免还跑到 sidebar / chat list / 等下层 hit）
+    hit({ 0, 0, W, H }, [](){ closeMsgMenu(); }, false);
+
+    prim::drawShadow(ctx, br, mx, my, mw, mh, 10.0f, pal.shadow_card_hover, t, 4.0f, 3);
+    prim::fillRR(ctx, mx, my, mw, mh, 10.0f, br.solidA(pal.card, t));
+    prim::strokeRR(ctx, mx, my, mw, mh, 10.0f, br.solidA(pal.divider, t));
+    auto* row_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    float ry = my + 6;
+    for (auto& it : items) {
+        LayoutRect r{ mx + 6, ry, mw - 12, row_h - 4 };
+        bool hov = r.contains(g_mouse);
+        if (hov) {
+            prim::fillRR(ctx, r.x, r.y, r.w, r.h, 6.0f,
+                         br.solidA(it.danger ? 0xE34B4B : pal.text,
+                                    t * (it.danger ? 0.10f : 0.06f)));
+        }
+        prim::drawText_(ctx, it.label, row_fmt,
+                        r.x + 12, r.y + 6, r.w - 16, 18,
+                        br.solidA(it.danger ? 0xE34B4B : pal.text, t));
+        auto cb = it.click;
+        hit(r, cb, true);
+        ry += row_h;
+    }
+}
+
+// ============== PackPreview modal ==============
+void openPackPreviewModal(const std::string& short_name) {
+    g_pack_preview_modal.open = true;
+    g_pack_preview_modal.short_name = short_name;
+    g_pack_preview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
+    sticker::previewPackByShort(GetActiveWindow(), short_name);
+}
+static void closePackPreview() {
+    g_pack_preview_modal.t.start(g_pack_preview_modal.t.value(),
+                                 0, 0.18f, 0, curve::easeOutCubic);
+    g_pack_preview_modal.open = false;
+}
+
+void paintPackPreviewModal(D2DApp& app, float W, float H) {
+    if (!g_pack_preview_modal.open && g_pack_preview_modal.t.value() < 0.001f) return;
+    float t = g_pack_preview_modal.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 460, ch = 480;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    auto* mt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+
+    sticker::PackPreview pv;
+    {
+        std::lock_guard<std::mutex> lk(sticker::g_pack_preview_mtx);
+        pv = sticker::g_pack_preview;
+    }
+    if (!pv.loaded) {
+        prim::drawText_(ctx, L"加载中…", sub,
+                        cx, cy + ch * 0.5f - 12, cw, 24,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else if (!pv.err.empty()) {
+        prim::drawText_(ctx, L"无法加载", h1,
+                        cx, cy + 30, cw, 24,
+                        br.solidA(pal.text, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+        std::wstring werr;
+        for (char c : pv.err) werr.push_back((wchar_t)c);
+        prim::drawText_(ctx, werr, sub,
+                        cx + 30, cy + 60, cw - 60, 80,
+                        br.solidA(pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else {
+        // 标题 + 创建人
+        prim::drawText_(ctx, pv.name.empty() ? L"分享的表情包" : pv.name, h1,
+                        cx + 30, cy + 22, cw - 60, 30,
+                        br.solidA(pal.text, t));
+        std::wstring meta;
+        if (!pv.creator_name.empty()) meta = L"by " + pv.creator_name;
+        else meta = L"分享的表情包";
+        wchar_t buf[64];
+        swprintf_s(buf, L"%ls · 已被 %d 人安装", meta.c_str(), pv.install_count);
+        prim::drawText_(ctx, buf, mt,
+                        cx + 30, cy + 54, cw - 60, 18,
+                        br.solidA(pal.text_muted, t));
+
+        // 缩略图栅格
+        if (!pv.sticker_paths.empty()) {
+            int cols = 5;
+            float cell = 72.0f;
+            float gx = cx + 30, gy = cy + 88;
+            int max_show = 15;
+            int n = (std::min)((int)pv.sticker_paths.size(), max_show);
+            for (int i = 0; i < n; ++i) {
+                int row = i / cols, col = i % cols;
+                float ex = gx + col * (cell + 6), ey = gy + row * (cell + 6);
+                prim::fillRR(ctx, ex, ey, cell, cell, 8.0f, br.solidA(pal.surface, t));
+                ID2D1Bitmap* bmp = app.images().fromFile(pv.sticker_paths[i]);
+                if (bmp) {
+                    prim::pushLayerRR(ctx, app.factory(), ex, ey, cell, cell, 8.0f);
+                    ctx->DrawBitmap(bmp,
+                        D2D1::RectF(ex, ey, ex + cell, ey + cell),
+                        t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    prim::popLayer(ctx);
+                }
+            }
+            if ((int)pv.sticker_paths.size() > max_show) {
+                wchar_t mw[32];
+                swprintf_s(mw, L"+ %d 张更多", (int)pv.sticker_paths.size() - max_show);
+                prim::drawText_(ctx, mw, mt,
+                                cx + 30, cy + 88 + 3 * (cell + 6) + 4, cw - 60, 18,
+                                br.solidA(pal.text_muted, t),
+                                DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
+
+        float by = cy + ch - 56;
+        drawGhostBtn(app, cx + 30, by, 130, 38, L"取消", t,
+                     [](){ closePackPreview(); });
+        if (pv.already_installed) {
+            drawGhostBtn(app, cx + cw - 30 - 200, by, 200, 38,
+                         L"已添加 ✓", t, [](){
+                            closePackPreview();
+                            toast::show(L"已经在你的表情包列表里");
+                         });
+        } else {
+            std::string sn = pv.short_name;
+            drawPrimaryBtn(app, cx + cw - 30 - 200, by, 200, 38,
+                           L"添加分组", t, [sn](){
+                                sticker::installPackByShort(GetActiveWindow(), sn);
+                                closePackPreview();
+                           });
+        }
+    }
+    // ✕
+    LayoutRect close_btn{ cx + cw - 36, cy + 12, 24, 24 };
+    bool ch_h = close_btn.contains(g_mouse);
+    if (ch_h) {
+        prim::fillRR(ctx, close_btn.x, close_btn.y, 24, 24, 6,
+                     br.solidA(pal.text, t * 0.10f));
+    }
+    icons::drawIcon(app, icons::Name::X, close_btn.x + 4, close_btn.y + 4, 16,
+                    fadeArgb(pal.text, t));
+    hit(close_btn, [](){ closePackPreview(); }, true);
+}
+
 // ============== 事件路由 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
-    // WebView2 modal 打开时：WebView2 自己接管 input，不要让 dispatchClick
-    // 误吃成 \"外部点击关闭\" — 用户点 WebView 内部本来该传给 webview，
-    // 不命中 close 按钮就保持开。
+    // 上下文菜单：点外面就关；点里面 dispatchClick 即可
+    if (g_msg_menu.open) {
+        bool consumed = dispatchClick(dip);
+        if (!consumed) closeMsgMenu();
+        return true;
+    }
     if (g_webview_modal.open) {
-        dispatchClick(dip);   // 仅响应 close 按钮 hit
+        dispatchClick(dip);
         return true;
     }
     bool consumed = dispatchClick(dip);
     if (!consumed) {
-        if (g_edit_bio.open) closeEditBio();
+        if (g_pack_preview_modal.open) closePackPreview();
+        else if (g_edit_bio.open) closeEditBio();
         else if (g_edit_status.open) closeEditStatusText();
         else if (g_user_profile.open) closeUserProfile();
         else if (g_renamepack.open) closeRenamePack();
@@ -1289,6 +1598,8 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!anyOpen()) return false;
     if (vk == VK_ESCAPE) {
+        if (g_msg_menu.open) { closeMsgMenu(); return true; }
+        if (g_pack_preview_modal.open) { closePackPreview(); return true; }
         if (g_webview_modal.open) { closeWebViewModal(); return true; }
         if (g_edit_bio.open) { closeEditBio(); return true; }
         if (g_edit_status.open) { closeEditStatusText(); return true; }
