@@ -3,6 +3,7 @@ use axum::{extract::State, Json, http::StatusCode};
 use launcher_shared::{error::AppError, hashing, tier::Tier, uid as shared_uid};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time;
 use chrono::{Utc, Duration};
 use uuid::Uuid;
 
@@ -194,6 +195,27 @@ pub async fn login(
     State(s): State<Arc<AppState>>,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, (StatusCode, String)> {
+    // Brute-force lockout: 5 failures within 15 min triggers 15 min cooldown
+    {
+        let mut map = s.login_attempts.lock().unwrap();
+        let entry = map.entry(req.username.clone()).or_insert_with(||
+            crate::state::LoginAttemptEntry { count: 0, first_at: time::Instant::now() }
+        );
+        let window = time::Duration::from_secs(15 * 60);
+        let cooldown = time::Duration::from_secs(15 * 60);
+        if entry.first_at.elapsed() > window {
+            entry.count = 0;
+            entry.first_at = time::Instant::now();
+        }
+        if entry.count >= 5 {
+            let remaining = cooldown.saturating_sub(entry.first_at.elapsed());
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("login locked, retry in {}s", remaining.as_secs()),
+            ));
+        }
+    }
+
     let row = sqlx::query!(
         r#"SELECT id, password_hash, hwid_bound, subscription_tier, subscription_expires_at
            FROM users WHERE username_hash = $1"#,
@@ -201,10 +223,30 @@ pub async fn login(
     )
     .fetch_optional(&s.db).await
     .map_err(internal)?
-    .ok_or((StatusCode::UNAUTHORIZED, "invalid credentials".into()))?;
+    .ok_or_else(|| {
+        // Count failed attempts even for unknown users (prevents user enumeration via timing)
+        if let Ok(mut map) = s.login_attempts.lock() {
+            if let Some(entry) = map.get_mut(&req.username) {
+                entry.count += 1;
+            }
+        }
+        (StatusCode::UNAUTHORIZED, "invalid credentials".into())
+    })?;
 
     if !hashing::verify_password(&req.password, &row.password_hash).map_err(internal)? {
+        if let Ok(mut map) = s.login_attempts.lock() {
+            if let Some(entry) = map.get_mut(&req.username) {
+                entry.count += 1;
+            }
+        }
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
+    }
+
+    // Successful login clears the rate limiter
+    {
+        if let Ok(mut map) = s.login_attempts.lock() {
+            map.remove(&req.username);
+        }
     }
 
     let hwid_salted = hashing::salt_hwid(&req.hwid_hex, b"launcher.hwid.salt.v1");

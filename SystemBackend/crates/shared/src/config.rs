@@ -48,8 +48,8 @@ pub struct AppConfig {
     pub sticker_per_user_limit: i64,
 }
 
-fn default_argon_mem() -> u32 { 64 * 1024 }
-fn default_argon_iters() -> u32 { 3 }
+fn default_argon_mem() -> u32 { 128 * 1024 }
+fn default_argon_iters() -> u32 { 10 }
 fn default_require_invite() -> bool { true }
 fn default_image_max() -> u64 { 8 * 1024 * 1024 }
 fn default_video_max() -> u64 { 32 * 1024 * 1024 }

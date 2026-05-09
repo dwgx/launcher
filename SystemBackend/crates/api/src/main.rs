@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = sqlx::PgPool::connect(&cfg.database_url).await?;
     sqlx::migrate!("../../migrations").run(&pool).await?;
 
-    let state = Arc::new(AppState { cfg: cfg.clone(), db: pool });
+    let state = Arc::new(AppState::new(cfg.clone(), pool));
 
     let app = axum::Router::new()
         .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/admin") }))
