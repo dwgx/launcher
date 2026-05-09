@@ -55,6 +55,7 @@ assets/fonts/*.ttc
 !assets/fonts/.gitkeep
 
 # Secrets / local config — NEVER commit
+CLAUDE.md
 .deploy.local
 .env
 .env.local
