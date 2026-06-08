@@ -1,9 +1,14 @@
 # Build
 build/
 out/
+dist/
 cmake-build-*/
-third_party/skia/      # ~250MB 预编译，scripts/fetch-skia.ps1 自动拉
-third_party/webview2/  # NuGet 解压；重下：iwr https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2 -O wv2.nupkg && Expand-Archive wv2.nupkg third_party/webview2
+third_party/*.nupkg
+third_party/*.zip
+# ~250MB 预编译，scripts/fetch-skia.ps1 自动拉
+third_party/skia/
+# NuGet 解压；重下见 README.md
+third_party/webview2/
 **/CMakeCache.txt
 **/CMakeFiles/
 **/cmake_install.cmake

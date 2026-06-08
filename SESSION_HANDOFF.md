@@ -1,11 +1,12 @@
 # Session Handoff — 跨会话状态接力
 
-> **新 Claude 会话进入仓库时**：读完 CLAUDE.md 后立即读这份，掌握当前最新状态再开干。
-> 用户每次交接前会让我更新这份，所以它**永远是最新的**。
-> （memory 里的 state_session_handoff.md 是这份的摘要，可能滞后一轮。）
+> 新会话进入仓库时先读 `AGENTS.md`、`docs/WORKFLOW.md`、`docs/PROJECT_OUTLINE.md`，再读本文件。旧的 `CLAUDE.md` 不在仓库里，不能再作为入口。
+> 用户要求：没有证据不下结论；review/audit 必须基于当前代码和验证结果；不要把凭据、构建产物或第三方下载包提交到 Git。
 
-最后更新：**2026-05-04 08:30**
-最后 commit：**`1b55979`** CS2 modal 加标题栏让 ✕ 不被 WebView2 覆盖 + peer profile path 对齐后端
+最后更新：**2026-06-09**
+最后 commit：待本轮 workflow/部署基线提交
+**当前本地状态**：`tools/preview-d2d/build_d2d.bat` 已在 Windows Build Tools 上构建通过，产物在 gitignored `dist/`。
+**当前部署状态**：`scripts/deploy.ps1` 已实测可上传当前 checkout、应用 migrations、带 `DATABASE_URL` 远端 release 构建、重启 `systembackend.service` 并验证公网 API。
 **已部署后端**：migration 0011 + /api/profile/update + /api/profile/peer/:key 全部 active
 GitHub：https://github.com/dwgx/launcher (private, master)
 

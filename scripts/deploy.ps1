@@ -1,85 +1,139 @@
-# 把本地 SystemBackend release 二进制 + migrations + config 同步到服务器并重启 systemd
+# Deploy SystemBackend to the VPS.
 #
-# 第一次运行：用密码（来自 .deploy.local），随后自动追加 SSH key 走 key 认证
-# 后续运行：纯 SSH key
+# The canonical path is server-side build:
+# 1. Pack the current checkout, excluding local artifacts and secrets.
+# 2. Upload to remote_dir/build_src.
+# 3. Apply migrations against the server PostgreSQL database.
+# 4. Build with DATABASE_URL so sqlx::query! can validate against the schema.
+# 5. Install the binary and restart systemd.
 
 param(
-    [switch]$NoBuild = $false,
-    [switch]$BootstrapServer = $false
+    [switch]$SkipBuild = $false,
+    [switch]$SkipMigrations = $false
 )
 
 $ErrorActionPreference = 'Stop'
-$root  = Split-Path -Parent $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 $local = Join-Path $root '.deploy.local'
 
 if (-not (Test-Path $local)) {
-    Write-Host '请先在仓库根创建 .deploy.local，内容如下（已 gitignored）:'
+    Write-Host 'Create .deploy.local in the repository root first:'
     Write-Host @'
-[server]
-host = "154.40.36.22"
-port = 22
-user = "root"
-password = "..."        # 仅首次部署用，bootstrap 后清掉
-key_path = "$HOME/.ssh/launcher_deploy"
+host       = "154.40.36.22"
+port       = "22"
+user       = "root"
+password   = ""
+key_path   = "$HOME\\.ssh\\launcher_deploy"
 remote_dir = "/opt/systembackend"
-service = "systembackend"
+service    = "systembackend"
 '@
     exit 1
 }
-$cfg = Get-Content $local | Out-String | ConvertFrom-StringData -ErrorAction SilentlyContinue
-# 简单 toml 用 powershell-yaml 包不够便，自己写两行解析
+
 $conf = @{}
 Get-Content $local | ForEach-Object {
-    if ($_ -match '^\s*([\w_]+)\s*=\s*"?([^"]+)"?\s*$') {
+    if ($_ -match '^\s*([\w_]+)\s*=\s*"?([^"]*)"?\s*$') {
         $conf[$matches[1]] = $matches[2]
     }
 }
-$h = $conf['host']; $port = $conf['port']; $user = $conf['user']
-$keyPath = [Environment]::ExpandEnvironmentVariables($conf['key_path'].Replace('$HOME', $env:USERPROFILE))
-$remoteDir = $conf['remote_dir']; $svc = $conf['service']
 
-if (-not $NoBuild) {
-    Write-Host '== cargo build --release ==' -ForegroundColor Cyan
-    Push-Location (Join-Path $root 'SystemBackend')
-    cargo build --release -p launcher-api
-    if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
-    Pop-Location
+$h = $conf['host']
+$port = $conf['port']
+$user = $conf['user']
+$keyPath = [Environment]::ExpandEnvironmentVariables(
+    $conf['key_path'].Replace('$HOME', $env:USERPROFILE).Replace('/', '\')
+)
+$remoteDir = $conf['remote_dir']
+$svc = $conf['service']
+$remoteSrc = "$remoteDir/build_src"
+
+if (-not (Test-Path $keyPath)) {
+    Write-Error "SSH key not found: $keyPath. Run scripts/setup-ssh-key.ps1 first."
+    exit 1
 }
 
-$bin = Join-Path $root 'SystemBackend\target\release\systembackend.exe'
-if (-not (Test-Path $bin)) {
-    # Windows 上交叉编译 Linux 复杂，建议直接服务器 cargo build
-    Write-Warning '本地未发现 systembackend Linux 二进制；切换到服务器侧 cargo build'
-    Write-Host '请用 -BootstrapServer 让脚本远端 git pull + cargo build'
-    if (-not $BootstrapServer) { exit 1 }
+$knownHosts = Join-Path (Split-Path -Parent $keyPath) 'launcher_deploy_known_hosts'
+$sshBaseArgs = @(
+    '-p', $port,
+    '-i', $keyPath,
+    '-o', "UserKnownHostsFile=$knownHosts",
+    '-o', 'StrictHostKeyChecking=accept-new'
+)
+$scpBaseArgs = @(
+    '-P', $port,
+    '-i', $keyPath,
+    '-o', "UserKnownHostsFile=$knownHosts",
+    '-o', 'StrictHostKeyChecking=accept-new'
+)
+
+function Invoke-Remote {
+    param([Parameter(Mandatory=$true)][string]$Command)
+    & ssh @sshBaseArgs "$user@$h" $Command
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-if ($BootstrapServer) {
-    Write-Host '== bootstrap: server-side cargo build ==' -ForegroundColor Cyan
-    & ssh -p $port -i $keyPath "$user@$h" @"
+function Invoke-RemoteScript {
+    param([Parameter(Mandatory=$true)][string]$Script)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+    & ssh @sshBaseArgs "$user@$h" "printf '%s' '$b64' | base64 -d | bash"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+Write-Host '== create source archive ==' -ForegroundColor Cyan
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("launcher-src-{0}.tar.gz" -f ([guid]::NewGuid().ToString('N')))
+& tar -C $root `
+    --exclude=.git `
+    --exclude=dist `
+    --exclude=third_party `
+    --exclude=build `
+    --exclude=out `
+    --exclude=SystemBackend/target `
+    --exclude=.deploy.local `
+    -czf $tmp .
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+try {
+    Write-Host '== upload source ==' -ForegroundColor Cyan
+    Invoke-Remote "mkdir -p /tmp/launcher-upload $remoteSrc"
+    & scp @scpBaseArgs $tmp "$user@${h}:/tmp/launcher-upload/launcher-src.tar.gz"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+finally {
+    if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Force }
+}
+
+Write-Host '== extract source ==' -ForegroundColor Cyan
+Invoke-Remote "rm -rf $remoteSrc && mkdir -p $remoteSrc && tar -xzf /tmp/launcher-upload/launcher-src.tar.gz -C $remoteSrc && rm -f /tmp/launcher-upload/launcher-src.tar.gz"
+
+if (-not $SkipMigrations) {
+    Write-Host '== apply migrations ==' -ForegroundColor Cyan
+    $migrateScript = @'
 set -e
-mkdir -p $remoteDir
-cd $remoteDir
-if [ ! -d .git ]; then git clone https://github.com/dwgx1337/launcher.git .; else git pull; fi
-cd SystemBackend
-cargo build --release -p launcher-api
-install -m 755 target/release/systembackend $remoteDir/systembackend
-install -m 644 -D crates/api/Cargo.toml $remoteDir/.bin-info
-install -d $remoteDir/migrations
-cp -r migrations/. $remoteDir/migrations/
-[ -f $remoteDir/config.toml ] || cp SystemBackend/config/config.example.toml $remoteDir/config.toml
-chown -R systembackend:systembackend $remoteDir || true
-systemctl daemon-reload
-systemctl enable systembackend
-systemctl restart $svc
-systemctl status $svc --no-pager
-"@
-    exit $LASTEXITCODE
+DBURL=$(sed -n 's/^database_url *= *"\(.*\)"/\1/p' __REMOTE_DIR__/config.toml)
+cd __REMOTE_SRC__/SystemBackend
+for f in migrations/*.sql; do
+  echo "applying $f"
+  psql "$DBURL" -v ON_ERROR_STOP=1 -f "$f" >/tmp/launcher-migrate.log 2>&1 || { cat /tmp/launcher-migrate.log; exit 1; }
+done
+'@.Replace('__REMOTE_DIR__', $remoteDir).Replace('__REMOTE_SRC__', $remoteSrc)
+    Invoke-RemoteScript $migrateScript
 }
 
-Write-Host '== rsync binary + migrations ==' -ForegroundColor Cyan
-& scp -P $port -i $keyPath $bin "$user@${h}:${remoteDir}/systembackend"
-& scp -P $port -i $keyPath -r (Join-Path $root 'SystemBackend\migrations') "$user@${h}:${remoteDir}/"
+if (-not $SkipBuild) {
+    Write-Host '== cargo build --release on server ==' -ForegroundColor Cyan
+    $buildScript = @'
+set -e
+. "$HOME/.cargo/env"
+DBURL=$(sed -n 's/^database_url *= *"\(.*\)"/\1/p' __REMOTE_DIR__/config.toml)
+cd __REMOTE_SRC__/SystemBackend
+DATABASE_URL="$DBURL" cargo build --release -p launcher-api -p launcher-signer
+install -m 755 target/release/systembackend __REMOTE_DIR__/systembackend
+install -d __REMOTE_DIR__/migrations
+rsync -a --delete migrations/ __REMOTE_DIR__/migrations/
+chown -R systembackend:systembackend __REMOTE_DIR__
+'@.Replace('__REMOTE_DIR__', $remoteDir).Replace('__REMOTE_SRC__', $remoteSrc)
+    Invoke-RemoteScript $buildScript
+}
 
 Write-Host '== restart service ==' -ForegroundColor Cyan
-& ssh -p $port -i $keyPath "$user@$h" "systemctl restart $svc && systemctl status $svc --no-pager"
+Invoke-Remote "systemctl restart $svc && sleep 3 && systemctl status $svc --no-pager -l && curl -k --max-time 10 https://154.40.36.22:1337/api/market/categories >/dev/null"
