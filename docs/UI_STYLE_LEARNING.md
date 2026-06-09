@@ -1,13 +1,22 @@
 # Launcher UI Style Learning Record
 
-本记录用于约束后续所有 UI 修复。用户已明确要求：不允许乱改、不允许重写 UI、不允许换风格。任何 UI 工作只能先学习现有写法，再在原体系内修具体问题。
+本记录用于约束后续所有 UI 修复和功能实现。用户已明确要求：可以改 UI 相关代码，但不允许乱改、不允许重写 UI、不允许换风格。任何 UI 工作只能先学习现有写法，再在原体系内修具体问题或补齐功能。
 
 ## 结论
 
 - Desktop 主线是 `tools/preview-d2d/`，使用 Win32 + Direct2D + DirectComposition 即时绘制。
 - Backend Admin 是 `SystemBackend/crates/api/templates/`，使用 Askama 模板 + Tailwind CDN + DaisyUI CDN + `base.html` 内的自定义 `launcher` theme。
 - 两边不是同一种技术栈，不能互相移植实现方式，但必须保持同一产品气质：暖色深色、低噪声、克制、偏工具型。
-- UI 修复只能改局部 bug：布局错位、遮挡、层级、溢出、可读性、状态反馈、表单行为。不能重做页面结构、换配色、换组件库、加营销式视觉。
+- UI 代码可以改，包括模板、CSS class、D2D 绘制、事件处理、状态反馈和功能控件；但改动必须继承原来的视觉语言、组件写法、间距密度、颜色、圆角、字体和交互节奏。
+- UI 工作可以修 bug，也可以补功能；不能重做页面结构、换配色、换组件库、加营销式视觉，不能把“功能实现”伪装成风格替换。
+
+## 可改代码边界
+
+- 允许改 backend admin 的 Askama 模板、少量 scoped CSS、Rust view model 和表单处理，只要输出仍然像现有后台。
+- 允许改 desktop D2D 的 paint 函数、hit area、modal、chat/sticker/upload 交互和状态机，只要画出来仍然像现有 desktop。
+- 允许新增控件和状态，但必须复用现有 button/input/table/badge/modal/dropdown/card 的形态和尺寸逻辑。
+- 允许修正颜色透明度、层级、padding、line-height、z-index、overflow、裁剪和响应式约束，但只能为了解决已证实的问题。
+- 不允许用“重构”“统一设计”“现代化”为理由改变用户已经接受的视觉风格。
 
 ## 禁止事项
 
@@ -16,6 +25,8 @@
 - 不要替换现有暖色深色主题，不要引入大面积紫蓝渐变、玻璃球、装饰光斑、营销 landing page 风格。
 - 不要改动 UI 文案、结构和交互含义来“看起来更现代”，除非该改动直接修复已证实的问题。
 - 不要新增与现有风格冲突的卡片套卡片、超大圆角、夸张阴影、巨大标题、宽松营销布局。
+- 不要把现有组件替换成另一套看起来相似但行为/间距/密度不同的组件。
+- 不要为了省事删除现有动画、阴影、hover、active、toast、modal 或 dropdown 行为。
 - 不要在没有截图、代码位置或可复现步骤时断言 UI 问题已修复。
 
 ## Backend Admin 风格
@@ -47,7 +58,7 @@
 
 Backend Admin 修复规则：
 
-- 优先修 HTML 结构、Tailwind class、少量 `base.html` scoped CSS。
+- 可以改 HTML 结构、Tailwind class、少量 `base.html` scoped CSS 和后端 view model；但输出必须保持当前 Admin 风格。
 - 如果 table 内 dropdown 被遮挡或压住其他单元格，只修层级、overflow、定位和点击目标，不改整体表格风格。
 - 如果文字过暗或重叠，先确认是浏览器插件/截图覆盖层还是页面 CSS，再局部调 opacity、line-height、cell alignment。
 - 任何后台 UI 改动后至少验证 `/admin`, `/admin/invites`, `/admin/channels` 三个页面。
@@ -92,7 +103,7 @@ Desktop 组件写法：
 
 Desktop 修复规则：
 
-- 先找对应 view 的 paint + event handler，不跨文件大搬运。
+- 可以改对应 view 的 paint + event handler；不要跨文件大搬运，不要另起视觉体系。
 - 文字溢出先用现有测量逻辑和裁剪/省略策略解决，不扩大整体布局。
 - 修聊天、表情、上传时必须保持 Telegram/QQ 类操作习惯，但视觉仍按现有 D2D 风格。
 - 每次 desktop UI 改动后运行 `cmd /c tools\preview-d2d\build_d2d.bat`，并用本地窗口实际点击验证关键路径。
@@ -101,7 +112,7 @@ Desktop 修复规则：
 
 1. 先复现问题，记录页面/视图、路径、点击步骤、截图或命令证据。
 2. 读对应现有实现，确认该页面的本地组件写法。
-3. 写最小修复，不改设计系统，不迁移技术栈。
+3. 写最小必要代码改动，可以补功能，但不改设计系统、不迁移技术栈、不改变既有风格。
 4. 验证相关页面和相邻页面，避免修一处破一处。
 5. `git diff --check`，检查没有构建产物、秘密、无关 UI 重写。
 6. 如果改了生产后台，部署后验证公网页面和服务状态。
