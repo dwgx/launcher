@@ -1,5 +1,4 @@
-// WinHTTP 客户端 — 直接复制自 tools/preview/net.inl，不变。
-// 后端 https://154.40.36.22:1337，LE IP cert，TLS skip-verify (prod 改 pinning)。
+// WinHTTP 客户端。
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -7,6 +6,8 @@
 #include <Windows.h>
 #include <winhttp.h>
 #include <atomic>
+#include <cstdlib>
+#include <cwchar>
 #include <functional>
 #include <string>
 #include <vector>
@@ -17,8 +18,8 @@
 
 namespace launcher::d2d::net {
 
-constexpr const wchar_t* kHost = L"154.40.36.22";
-constexpr INTERNET_PORT kPort = 1337;
+constexpr const wchar_t* kDefaultHost = L"154.40.36.22";
+constexpr INTERNET_PORT kDefaultPort = 1337;
 constexpr const wchar_t* kUserAgent = L"Launcher-D2D/0.1";
 
 struct Resp {
@@ -26,6 +27,45 @@ struct Resp {
     std::string body;
     bool ok() const { return status >= 200 && status < 300; }
 };
+
+struct Endpoint {
+    std::wstring host = kDefaultHost;
+    INTERNET_PORT port = kDefaultPort;
+    bool secure = true;
+    bool allow_insecure_tls = false;
+};
+
+inline Endpoint endpoint() {
+    static Endpoint ep = []() {
+        Endpoint out;
+        wchar_t host[256]{};
+        DWORD hn = GetEnvironmentVariableW(L"LAUNCHER_API_HOST", host, (DWORD)(sizeof(host) / sizeof(host[0])));
+        if (hn > 0 && hn < (sizeof(host) / sizeof(host[0]))) out.host = host;
+        wchar_t port_s[16]{};
+        DWORD pn = GetEnvironmentVariableW(L"LAUNCHER_API_PORT", port_s, (DWORD)(sizeof(port_s) / sizeof(port_s[0])));
+        if (pn > 0 && pn < (sizeof(port_s) / sizeof(port_s[0]))) {
+            int p = _wtoi(port_s);
+            if (p > 0 && p <= 65535) out.port = (INTERNET_PORT)p;
+        }
+        wchar_t scheme[16]{};
+        DWORD sn = GetEnvironmentVariableW(L"LAUNCHER_API_SCHEME", scheme, (DWORD)(sizeof(scheme) / sizeof(scheme[0])));
+        if (sn > 0 && _wcsicmp(scheme, L"http") == 0) out.secure = false;
+        wchar_t insecure[8]{};
+        DWORD in = GetEnvironmentVariableW(L"LAUNCHER_ALLOW_INSECURE_TLS", insecure, (DWORD)(sizeof(insecure) / sizeof(insecure[0])));
+        out.allow_insecure_tls = in > 0 && wcscmp(insecure, L"1") == 0;
+        return out;
+    }();
+    return ep;
+}
+
+inline void maybeAllowInsecureTls(HINTERNET req) {
+    if (!endpoint().allow_insecure_tls) return;
+    DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+               | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+               | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+               | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+}
 
 inline std::string jsonStr(const std::string& body, const char* field) {
     std::string key = "\""; key += field; key += "\":\"";
@@ -66,17 +106,14 @@ inline Resp request(const wchar_t* verb, const wchar_t* path,
     Resp r;
     HINTERNET ses = sharedSession();
     if (!ses) return r;
-    HINTERNET con = WinHttpConnect(ses, kHost, kPort, 0);
+    Endpoint ep = endpoint();
+    HINTERNET con = WinHttpConnect(ses, ep.host.c_str(), ep.port, 0);
     if (!con) return r;
     HINTERNET req = WinHttpOpenRequest(con, verb, path, nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, ep.secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) { WinHttpCloseHandle(con); return r; }
 
-    DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
-               | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
-               | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-               | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+    maybeAllowInsecureTls(req);
 
     std::wstring headers;
     if (!content_type.empty()) headers += L"Content-Type: " + content_type + L"\r\n";
@@ -126,11 +163,7 @@ inline Resp requestAny(const wchar_t* host, INTERNET_PORT port,
         secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) { WinHttpCloseHandle(con); return r; }
     if (secure) {
-        DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
-                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
-                   | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-                   | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+        maybeAllowInsecureTls(req);
     }
     if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                              WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
@@ -236,17 +269,14 @@ struct WsClient {
     bool connect(const std::wstring& path, OnMessage on_msg) {
         HINTERNET ses = sharedSession();
         if (!ses) return false;
-        h_con = WinHttpConnect(ses, kHost, kPort, 0);
+        Endpoint ep = endpoint();
+        h_con = WinHttpConnect(ses, ep.host.c_str(), ep.port, 0);
         if (!h_con) return false;
         h_req = WinHttpOpenRequest(h_con, L"GET", path.c_str(), nullptr,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, ep.secure ? WINHTTP_FLAG_SECURE : 0);
         if (!h_req) { WinHttpCloseHandle(h_con); h_con = nullptr; return false; }
 
-        DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
-                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
-                   | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-                   | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(h_req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+        maybeAllowInsecureTls(h_req);
         if (!WinHttpSetOption(h_req, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
             cleanup(); return false;
         }

@@ -1,6 +1,7 @@
 // 用户自服务：改昵称（限频）/ 改密码 / 上传头像 / 看登录历史。
 // UID 和 Username 在这里**永远不能改**；admin 走 admin.rs 才能改。
 
+use crate::media_policy;
 use crate::state::AppState;
 use axum::{
     extract::{State, Json, Query, Multipart},
@@ -211,22 +212,20 @@ pub async fn upload_avatar(
     let token = token.ok_or((StatusCode::BAD_REQUEST, "session_token missing".into()))?;
     let uid = auth_user(&s, &token).await?;
     let bytes = bytes.ok_or((StatusCode::BAD_REQUEST, "file missing".into()))?;
-    let mime  = mime.unwrap_or_default();
+    let _declared_mime  = mime.unwrap_or_default();
 
     // 限制：5MB；只接受 image/png|jpeg|gif
+    if bytes.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "file empty".into()));
+    }
     if bytes.len() > 5 * 1024 * 1024 {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "max 5MB".into()));
     }
-    let ext = match mime.as_str() {
-        "image/png"  => "png",
-        "image/jpeg" => "jpg",
-        "image/gif"  => "gif",
-        _ => return Err((StatusCode::UNSUPPORTED_MEDIA_TYPE, "png/jpeg/gif only".into())),
-    };
+    let detected = media_policy::validate_avatar(&bytes)?;
 
     let dir = std::path::Path::new("/opt/systembackend/avatars");
     std::fs::create_dir_all(dir).map_err(internal)?;
-    let path = dir.join(format!("{}.{}", uid, ext));
+    let path = dir.join(format!("{}.{}", uid, detected.ext));
     std::fs::write(&path, &bytes).map_err(internal)?;
     let path_str = path.to_string_lossy().to_string();
 
@@ -234,7 +233,7 @@ pub async fn upload_avatar(
         r#"UPDATE users
               SET avatar_path=$1, avatar_mime=$2, avatar_updated_at=now()
               WHERE id=$3"#,
-        path_str, mime, uid)
+        path_str, detected.mime, uid)
         .execute(&s.db).await.map_err(internal)?;
 
     sqlx::query!(

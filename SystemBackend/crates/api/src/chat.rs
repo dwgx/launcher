@@ -16,6 +16,34 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+async fn can_access_chat(
+    state: &AppState,
+    user_id: Uuid,
+    chat_id: Uuid,
+) -> Result<bool, (StatusCode, String)> {
+    let chat_meta = sqlx::query!(
+        "SELECT kind, is_official FROM chats WHERE id = $1", chat_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
+    if chat_meta.kind == "channel" && chat_meta.is_official {
+        return Ok(true);
+    }
+    let member = sqlx::query_scalar!(
+        "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2",
+        chat_id, user_id)
+        .fetch_optional(&state.db).await.map_err(internal)?;
+    Ok(member.is_some())
+}
+
+async fn message_chat(
+    state: &AppState,
+    message_id: i64,
+) -> Result<Uuid, (StatusCode, String)> {
+    sqlx::query_scalar!("SELECT chat_id FROM messages WHERE id = $1", message_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))
+}
+
 // ---------------- 创建 / 打开 DM ----------------
 #[derive(Deserialize)]
 pub struct OpenDmReq { pub session_token: String, pub other_user_id: Uuid }
@@ -354,6 +382,9 @@ pub async fn mark_read(
     Json(req): Json<ReadReq>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
+    if !can_access_chat(&s, me, req.chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
     sqlx::query!(
         "UPDATE chat_members SET last_read_message_id = $1 WHERE chat_id = $2 AND user_id = $3",
         req.up_to_message_id, req.chat_id, me)
@@ -375,15 +406,23 @@ pub async fn react(
     Json(req): Json<ReactReq>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
+    let chat_id = message_chat(&s, req.message_id).await?;
+    if !can_access_chat(&s, me, chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+    let emoji = req.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 16 {
+        return Err((StatusCode::BAD_REQUEST, "bad emoji".into()));
+    }
     if req.remove {
         sqlx::query!(
             "DELETE FROM message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3",
-            req.message_id, me, req.emoji).execute(&s.db).await.map_err(internal)?;
+            req.message_id, me, emoji).execute(&s.db).await.map_err(internal)?;
     } else {
         sqlx::query!(
             r#"INSERT INTO message_reactions (message_id, user_id, emoji)
                VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
-            req.message_id, me, req.emoji).execute(&s.db).await.map_err(internal)?;
+            req.message_id, me, emoji).execute(&s.db).await.map_err(internal)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -401,11 +440,29 @@ pub async fn delete_msg(
         "SELECT sender_id, chat_id FROM messages WHERE id = $1", req.message_id)
         .fetch_optional(&s.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))?;
+    if !can_access_chat(&s, me, row.chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
     if row.sender_id != Some(me) {
         return Err((StatusCode::FORBIDDEN, "not your message".into()));
     }
     sqlx::query!("UPDATE messages SET deleted_at = now() WHERE id = $1", req.message_id)
         .execute(&s.db).await.map_err(internal)?;
+    let payload = serde_json::json!({
+        "type": "message_deleted",
+        "message_id": req.message_id,
+        "chat_id": row.chat_id.to_string()
+    });
+    let members = sqlx::query_scalar!(
+        "SELECT user_id FROM chat_members WHERE chat_id = $1", row.chat_id)
+        .fetch_all(&s.db).await.map_err(internal)?;
+    if members.is_empty() {
+        ws::broadcast_all(&s, &payload);
+    } else {
+        for uid in members {
+            ws::push_to(&s, uid, &payload);
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
