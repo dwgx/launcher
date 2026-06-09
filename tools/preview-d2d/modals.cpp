@@ -874,17 +874,42 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     float ar = 36.0f;
     float ax = cx + (cw - ar * 2) * 0.5f, ay = cy + 60;
     prim::fillCircle(ctx, ax + ar, ay + ar, ar + 4, br.solidA(pal.card, t));
-    prim::fillCircle(ctx, ax + ar, ay + ar, ar, br.solidA(pal.primary_hover, t));
-    auto* init_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(20.0f),
-                                         DWRITE_FONT_WEIGHT_BOLD);
-    wchar_t init[2] = { (wchar_t)towupper(peer.nickname.empty()
-                        ? (peer.uid.empty() ? L'?' : peer.uid[0])
-                        : peer.nickname[0]), 0 };
-    prim::drawText_(ctx, init, init_fmt,
-                    ax, ay, ar * 2, ar * 2,
-                    br.solidA(0xFFFFFF, t),
-                    DWRITE_TEXT_ALIGNMENT_CENTER,
-                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    bool drew_peer_avatar = false;
+    if (!peer.avatar_path.empty()) {
+        if (auto* bmp = app.images().fromFile(peer.avatar_path)) {
+            D2D1_BITMAP_BRUSH_PROPERTIES bp = D2D1::BitmapBrushProperties(
+                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            ComPtr<ID2D1BitmapBrush> bb;
+            if (SUCCEEDED(ctx->CreateBitmapBrush(bmp, bp, &bb))) {
+                D2D1_SIZE_F sz = bmp->GetSize();
+                if (sz.width > 0 && sz.height > 0) {
+                    float sx = (ar * 2) / sz.width;
+                    float sy = (ar * 2) / sz.height;
+                    auto mt = D2D1::Matrix3x2F::Scale({sx, sy}, {0, 0})
+                            * D2D1::Matrix3x2F::Translation(ax, ay);
+                    bb->SetTransform(mt);
+                    ctx->FillEllipse(D2D1::Ellipse({ax + ar, ay + ar}, ar, ar), bb.Get());
+                    drew_peer_avatar = true;
+                }
+            }
+        }
+    }
+    if (!drew_peer_avatar) {
+        prim::fillCircle(ctx, ax + ar, ay + ar, ar, br.solidA(pal.primary_hover, t));
+    }
+    if (!drew_peer_avatar) {
+        auto* init_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(20.0f),
+                                             DWRITE_FONT_WEIGHT_BOLD);
+        wchar_t init[2] = { (wchar_t)towupper(peer.nickname.empty()
+                            ? (peer.uid.empty() ? L'?' : peer.uid[0])
+                            : peer.nickname[0]), 0 };
+        prim::drawText_(ctx, init, init_fmt,
+                        ax, ay, ar * 2, ar * 2,
+                        br.solidA(0xFFFFFF, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER,
+                        DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);

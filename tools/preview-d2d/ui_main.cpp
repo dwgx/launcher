@@ -922,10 +922,23 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
             if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
                 std::wstring dir = std::wstring(base) + L"\\Launcher";
                 CreateDirectoryW(dir.c_str(), nullptr);
+                dir += L"\\avatars";
+                CreateDirectoryW(dir.c_str(), nullptr);
+                dir += L"\\self";
+                CreateDirectoryW(dir.c_str(), nullptr);
                 std::wstring src = fnbuf;
                 auto dot = src.find_last_of(L'.');
                 std::wstring ext = (dot != std::wstring::npos) ? src.substr(dot) : L".png";
-                std::wstring dst = dir + L"\\avatar" + ext;
+                std::wstring stem;
+                for (char c : g_user_id) {
+                    bool ok = (c >= '0' && c <= '9')
+                           || (c >= 'a' && c <= 'z')
+                           || (c >= 'A' && c <= 'Z')
+                           || c == '-' || c == '_';
+                    stem.push_back(ok ? (wchar_t)c : L'_');
+                }
+                if (stem.empty()) stem = L"unknown";
+                std::wstring dst = dir + L"\\" + stem + ext;
                 if (CopyFileW(fnbuf, dst.c_str(), FALSE)) {
                     g_avatar_path = dst;
                     toast::show(L"头像已更新，正在上传…");

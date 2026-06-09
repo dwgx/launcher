@@ -16,6 +16,9 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <objbase.h>
+
+#pragma comment(lib, "ole32.lib")
 
 namespace launcher::d2d::chat {
 
@@ -59,8 +62,10 @@ static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 static std::unordered_map<std::wstring, bool> g_group_collapsed;
 static std::mutex g_streams_mtx;
 
+static std::wstring localTimeText(time_t tt = time(nullptr));
+
 // 头像 hit 表 — paintChatPane 帧首清空，paintBubble 填充，WM_RBUTTONDOWN 命中
-struct AvatarHit { LayoutRect rect; std::wstring from; };
+struct AvatarHit { LayoutRect rect; std::wstring peer_key; };
 static std::vector<AvatarHit> g_avatar_hits;
 // emoji 滚动偏移（picker 内部）
 static float g_emoji_scroll_y = 0.0f;
@@ -238,9 +243,10 @@ void fetchHistory(HWND notify, const std::wstring& slug) {
                 m.from = L"me";
                 m.author = g_user.nickname;
             } else {
-                // 别人：暂时显示 sender_id 前 8 字 — 真昵称留 peer-cache 的 fetchUserNickname 拉
-                if (sender.size() > 8) sender = sender.substr(0, 8);
-                m.from = utf8wHist(sender);
+                // Keep the full sender id for profile lookup; only shorten the visible fallback.
+                m.peer_key = utf8wHist(sender);
+                std::string sender_short = sender.size() > 8 ? sender.substr(0, 8) : sender;
+                m.from = utf8wHist(sender_short);
                 m.author = m.from;
             }
             // payload 可能是 string 字面量 "abc" 或 JSON object {...}（image/sticker 含 url 等）
@@ -358,13 +364,13 @@ void appendMedia(const std::wstring& path) {
     } else {
         m.kind = MsgKind::Text;
         m.body = L"[文件] " + path;
-        m.from = L"me"; m.time = L"now";
+        m.from = L"me"; m.time = localTimeText();
         appendLocalMessage(std::move(m));
         return;
     }
     m.from = L"me";
     m.body = path;
-    m.time = L"now";
+    m.time = localTimeText();
     appendLocalMessage(std::move(m));
 }
 
@@ -594,14 +600,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
                             DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
         // 头像左键看主页（me 自己跳过）
-        if (!me && !m.from.empty()) {
-            g_avatar_hits.push_back({ { avatar_x, ay, ar * 2, ar * 2 }, m.from });
-            std::wstring fcopy = m.from;
-            hit({ avatar_x, ay, ar * 2, ar * 2 }, [fcopy](){
-                static std::wstring g_pending_peer;
-                g_pending_peer = fcopy;
-                PostMessageW(GetActiveWindow(), WM_APP + 37, 0,
-                             (LPARAM)&g_pending_peer);
+        std::wstring profile_key = !m.peer_key.empty() ? m.peer_key : m.from;
+        if (!me && !profile_key.empty()) {
+            g_avatar_hits.push_back({ { avatar_x, ay, ar * 2, ar * 2 }, profile_key });
+            hit({ avatar_x, ay, ar * 2, ar * 2 }, [profile_key](){
+                auto* p = new std::wstring(profile_key);
+                PostMessageW(GetActiveWindow(), WM_APP + 37, 0, (LPARAM)p);
             }, true);
         }
     }
@@ -904,13 +908,35 @@ struct SendArg {
     std::string session_token;
     std::string chat_id;
     std::string kind;          // text / sticker / image / gif
+    std::string client_msg_id;
     std::wstring slug;
     std::wstring body;
     HWND hwnd;
 };
-struct LinkArg { std::wstring slug; std::wstring body; int64_t mid; };
+struct LinkArg { std::wstring slug; std::string client_msg_id; std::wstring body; int64_t mid; };
 std::mutex g_link_mtx;
 std::vector<LinkArg> g_pending_links;
+
+std::string makeClientMsgId() {
+    GUID g{};
+    if (FAILED(CoCreateGuid(&g))) return {};
+    char buf[40]{};
+    sprintf_s(buf, "%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+        g.Data1, g.Data2, g.Data3,
+        g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+        g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+    for (char& c : buf) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return buf;
+}
+
+}
+
+static std::wstring localTimeText(time_t tt) {
+    tm local_tm{};
+    localtime_s(&local_tm, &tt);
+    wchar_t tb[16]{};
+    wcsftime(tb, 16, L"%H:%M", &local_tm);
+    return tb;
 }
 
 // 主线程 WM_APP+52 调 — 找最近一条 me message 没绑定 server_id 的，写入 mid
@@ -923,7 +949,9 @@ void applySendResult() {
     for (auto& la : arr) {
         auto& msgs = streamFor(la.slug);
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-            if (it->from == L"me" && it->server_id == 0 && it->body == la.body) {
+            if (it->from == L"me" && it->server_id == 0
+                && ((!la.client_msg_id.empty() && it->client_msg_id == la.client_msg_id)
+                    || (la.client_msg_id.empty() && it->body == la.body))) {
                 it->server_id = la.mid;
                 break;
             }
@@ -935,20 +963,32 @@ static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kin
     if (g_session_token.empty()) return;
     auto* ch = activeChannel();
     if (ch->id.empty()) return;     // 还没拿到 backend uuid
-    auto* a = new SendArg{ g_session_token, ch->id, kind, g_active, body, hwnd };
+    std::string client_msg_id = makeClientMsgId();
+    auto& msgs = streamFor(g_active);
+    for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
+        if (it->from == L"me" && it->server_id == 0 && it->body == body && it->client_msg_id.empty()) {
+            it->client_msg_id = client_msg_id;
+            break;
+        }
+    }
+    auto* a = new SendArg{ g_session_token, ch->id, kind, client_msg_id, g_active, body, hwnd };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<SendArg> a((SendArg*)lp);
         std::string b = "{\"session_token\":\"" + a->session_token
                       + "\",\"chat_id\":\"" + a->chat_id
                       + "\",\"msg_type\":\"" + a->kind
-                      + "\",\"payload\":\"" + net::jsonEscape(a->body) + "\"}";
+                      + "\",\"payload\":\"" + net::jsonEscape(a->body) + "\"";
+        if (!a->client_msg_id.empty()) {
+            b += ",\"client_msg_id\":\"" + a->client_msg_id + "\"";
+        }
+        b += "}";
         auto r = net::postJson(L"/api/chat/send", b);
         if (r.ok()) {
             int64_t mid = net::jsonInt(r.body, "id");
             if (mid > 0) {
                 {
                     std::lock_guard<std::mutex> lk(g_link_mtx);
-                    g_pending_links.push_back({ a->slug, a->body, mid });
+                    g_pending_links.push_back({ a->slug, a->client_msg_id, a->body, mid });
                 }
                 PostMessageW(a->hwnd, WM_APP + 52, 0, 0);
             }
@@ -1096,7 +1136,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
             m.author = L"";
             m.status = L"online";
             m.body = g_composer.text;
-            m.time = L"now";
+            m.time = localTimeText();
             appendLocalMessage(std::move(m));
             sendTextMessage(GetActiveWindow(), g_composer.text);
             g_composer.text.clear();
@@ -1673,7 +1713,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                         m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
                         m.body = path;
-                        m.time = L"now";
+                        m.time = localTimeText();
                         appendLocalMessage(std::move(m));
                         sendChatMessage(GetActiveWindow(), path,
                                         is_g ? "gif" : "sticker");
@@ -1696,7 +1736,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                         m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
                         m.body = path;
-                        m.time = L"now";
+                        m.time = localTimeText();
                         appendLocalMessage(std::move(m));
                         sendChatMessage(GetActiveWindow(), path,
                                         is_g ? "gif" : "sticker");
@@ -1829,7 +1869,7 @@ bool onMouseRDown(HWND hwnd, POINT dip) {
     // 其次：头像右键 → 看主页
     for (auto it = g_avatar_hits.rbegin(); it != g_avatar_hits.rend(); ++it) {
         if (it->rect.contains(dip)) {
-            auto* p = new std::wstring(it->from);
+            auto* p = new std::wstring(it->peer_key);
             PostMessageW(hwnd, WM_APP + 37, 0, (LPARAM)p);
             return true;
         }
@@ -1867,7 +1907,7 @@ void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
             m.kind = MsgKind::Text;
             m.from = L"me";
             m.body = g_composer.text;
-            m.time = L"now";
+            m.time = localTimeText();
             appendLocalMessage(std::move(m));
             sendTextMessage(hwnd, g_composer.text);
             g_composer.text.clear();

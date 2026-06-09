@@ -79,13 +79,36 @@ inline void maybeAllowInsecureTls(HINTERNET req) {
 }
 
 inline std::string jsonStr(const std::string& body, const char* field) {
-    std::string key = "\""; key += field; key += "\":\"";
+    std::string key = "\""; key += field; key += "\":";
     auto p = body.find(key);
     if (p == std::string::npos) return "";
     p += key.size();
-    auto e = body.find('"', p);
-    if (e == std::string::npos) return "";
-    return body.substr(p, e - p);
+    while (p < body.size() && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) ++p;
+    if (body.compare(p, 4, "null") == 0) return "";
+    if (p >= body.size() || body[p] != '"') return "";
+    ++p;
+    std::string out;
+    while (p < body.size()) {
+        char c = body[p++];
+        if (c == '"') break;
+        if (c == '\\' && p < body.size()) {
+            char e = body[p++];
+            switch (e) {
+                case 'n': out.push_back('\n'); break;
+                case 'r': out.push_back('\r'); break;
+                case 't': out.push_back('\t'); break;
+                case '"': out.push_back('"'); break;
+                case '\\': out.push_back('\\'); break;
+                case '/': out.push_back('/'); break;
+                case 'b': out.push_back('\b'); break;
+                case 'f': out.push_back('\f'); break;
+                default: out.push_back(e); break;
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
 }
 inline long long jsonInt(const std::string& body, const char* field) {
     std::string key = "\""; key += field; key += "\":";

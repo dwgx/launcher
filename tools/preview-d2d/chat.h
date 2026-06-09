@@ -73,10 +73,12 @@ enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
 struct Msg {
     MsgKind kind = MsgKind::Text;
     std::wstring from;        // "me" 表示自己
+    std::wstring peer_key;    // full sender id / profile lookup key for non-me messages
     std::wstring author;
     std::wstring status;
     std::wstring body;
     std::wstring time;
+    std::string  client_msg_id;
     int64_t      server_id = 0;     // 后端 messages.id (软删除时 POST /chat/delete 用)
 };
 

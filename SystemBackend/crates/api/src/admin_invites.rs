@@ -31,12 +31,33 @@ pub struct InviteVm {
 pub struct InvitesPage {
     pub title:    String,
     pub subtitle: Option<String>,
+    pub notice:   Option<ui::AdminNotice>,
     pub host:     &'static str,
     pub route:    &'static str,
     pub items:    Vec<InviteVm>,
 }
 
-async fn list_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+pub struct InvitesNoticeQuery {
+    pub ok: Option<String>,
+    pub err: Option<String>,
+}
+
+fn invites_notice(q: &InvitesNoticeQuery) -> Option<ui::AdminNotice> {
+    match (q.ok.as_deref(), q.err.as_deref()) {
+        (Some("create"), _) => Some(ui::AdminNotice::success("邀请码已生成")),
+        (Some("revoke"), _) => Some(ui::AdminNotice::success("邀请码已撤销")),
+        (_, Some("create_failed")) => Some(ui::AdminNotice::error("邀请码生成失败，请重试")),
+        (_, Some("revoke_failed")) => Some(ui::AdminNotice::error("邀请码撤销失败，请重试")),
+        _ => None,
+    }
+}
+
+async fn list_page(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<InvitesNoticeQuery>,
+) -> Response {
     if !crate::admin::has_admin_session(&headers, &s) {
         return crate::admin::admin_login_redirect();
     }
@@ -61,6 +82,7 @@ async fn list_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Respon
     ui::render(&InvitesPage {
         title: "邀请码".into(),
         subtitle: Some("注册必须带一个有效邀请码".into()),
+        notice: invites_notice(&q),
         host: ui::host(),
         route: ui::ROUTE_INVITES,
         items,
@@ -101,7 +123,7 @@ async fn create_submit(
             code, form.note, max_uses, expires_at)
             .execute(&s.db).await;
     }
-    Redirect::to("/admin/invites").into_response()
+    Redirect::to("/admin/invites?ok=create").into_response()
 }
 
 async fn revoke(
@@ -116,7 +138,7 @@ async fn revoke(
     let _ = sqlx::query!(
         "UPDATE invite_codes SET revoked_at = now(), revoked_by = 'admin' WHERE code = $1",
         code).execute(&s.db).await;
-    Redirect::to("/admin/invites").into_response()
+    Redirect::to("/admin/invites?ok=revoke").into_response()
 }
 
 #[derive(Deserialize)]

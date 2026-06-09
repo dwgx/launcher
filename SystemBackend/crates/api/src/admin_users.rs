@@ -144,13 +144,38 @@ pub struct RoleVm {
 pub struct UsersPage {
     pub title:    String,
     pub subtitle: Option<String>,
+    pub notice:   Option<ui::AdminNotice>,
     pub host:     &'static str,
     pub route:    &'static str,
     pub users:    Vec<UserVm>,
     pub roles:    Vec<RoleVm>,
 }
 
-async fn users_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+pub struct UsersNoticeQuery {
+    pub reset: Option<String>,
+    pub delete: Option<String>,
+    pub err: Option<String>,
+}
+
+fn users_notice(q: &UsersNoticeQuery) -> Option<ui::AdminNotice> {
+    match (q.reset.as_deref(), q.delete.as_deref(), q.err.as_deref()) {
+        (Some("ok"), _, _) => Some(ui::AdminNotice::success("密码已重置，用户所有 session 已失效")),
+        (_, Some("ok"), _) => Some(ui::AdminNotice::success("用户已删除")),
+        (_, _, Some("pw_too_short")) => Some(ui::AdminNotice::error("新密码至少需要 8 个字符")),
+        (_, _, Some("hash_failed")) => Some(ui::AdminNotice::error("密码哈希失败，请重试")),
+        (_, _, Some("user_not_found")) => Some(ui::AdminNotice::error("用户不存在或已被删除")),
+        (_, _, Some("delete_confirm_mismatch")) => Some(ui::AdminNotice::warning("删除确认用户名不一致，操作已取消")),
+        (_, _, Some("delete_failed")) => Some(ui::AdminNotice::error("删除失败，请查看服务日志")),
+        _ => None,
+    }
+}
+
+async fn users_page(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<UsersNoticeQuery>,
+) -> Response {
     if !crate::admin::has_admin_session(&headers, &s) {
         return crate::admin::admin_login_redirect();
     }
@@ -179,6 +204,7 @@ async fn users_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     ui::render(&UsersPage {
         title: "用户".into(),
         subtitle: None,
+        notice: users_notice(&q),
         host: ui::host(),
         route: ui::ROUTE_USERS,
         users, roles,

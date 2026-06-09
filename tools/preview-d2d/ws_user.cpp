@@ -59,7 +59,13 @@ void drain() {
         std::string type = net::jsonStr(m, "type");
         // 后端发送 { "type": "message", "data": <MessageOut> }
         // MessageOut 字段：id / chat_id / sender_id / msg_type / payload / created_at / deleted
-        if (type == "message") {
+        std::string event_type = net::jsonStr(m, "event_type");
+        std::string legacy_type = net::jsonStr(m, "legacy_type");
+        bool is_message = type == "message"
+            || (type == "event" && (event_type == "message" || legacy_type == "message"));
+        bool is_deleted = type == "message_deleted" || type == "delete"
+            || (type == "event" && (event_type == "message_deleted" || legacy_type == "message_deleted"));
+        if (is_message) {
             // data 是 nested object — 在外层 m 里直接搜字段也行，因为 net::jsonStr 找到第一个匹配
             std::string chat_id = net::jsonStr(m, "chat_id");
             std::string kind    = net::jsonStr(m, "msg_type");
@@ -99,10 +105,22 @@ void drain() {
                 if (c.id == chat_id) {
                     chat::Msg msg;
                     std::string sender_short = sender.size() > 8 ? sender.substr(0, 8) : sender;
+                    msg.peer_key = utf8ToW(sender);
                     msg.from = utf8ToW(sender_short);
                     msg.author = msg.from;
                     msg.body = utf8ToW(body);
-                    msg.time = L"now";
+                    int64_t created_at = net::jsonInt(m, "created_at");
+                    if (created_at <= 0) created_at = net::jsonInt(m, "server_time");
+                    if (created_at > 0) {
+                        time_t tt = (time_t)created_at;
+                        tm local_tm{};
+                        localtime_s(&local_tm, &tt);
+                        wchar_t tb[16]{};
+                        wcsftime(tb, 16, L"%H:%M", &local_tm);
+                        msg.time = tb;
+                    } else {
+                        msg.time = L"now";
+                    }
                     msg.status = L"online";
                     msg.server_id = mid;
                     if      (kind == "sticker")    msg.kind = chat::MsgKind::Sticker;
@@ -123,7 +141,7 @@ void drain() {
                     break;
                 }
             }
-        } else if (type == "delete") {
+        } else if (is_deleted) {
             int64_t mid = net::jsonInt(m, "message_id");
             if (mid > 0) chat::onWsMessageDeleted(mid);
         }

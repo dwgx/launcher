@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <ShlObj.h>
+#include <cstring>
 
 #pragma comment(lib, "shell32.lib")
 
@@ -16,12 +17,18 @@ std::vector<Listing> g_market_listings;
 std::mutex g_market_mtx;
 PeerProfile g_peer;
 std::mutex g_peer_mtx;
+MyProfileSnapshot g_pending_my_profile;
+std::mutex g_my_profile_mtx;
 
 namespace {
 struct StrArg { std::wstring s; HWND h; };
 struct VoidArg { HWND h; };
 struct LogoutArg { std::string tok; };
 struct AvatarArg { std::wstring path; HWND h; };
+struct AvatarDownload {
+    bool ok = false;
+    std::wstring path;
+};
 
 std::wstring utf8ToW(const std::string& s) {
     if (s.empty()) return {};
@@ -38,6 +45,124 @@ std::string wToUtf8(const std::wstring& w) {
     std::string s(n - 1, 0);
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
     return s;
+}
+
+std::wstring asciiToW(const std::string& s) {
+    std::wstring w;
+    w.reserve(s.size());
+    for (char c : s) w.push_back((wchar_t)(unsigned char)c);
+    return w;
+}
+
+std::wstring sanitizeFilePart(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        bool ok = (c >= L'0' && c <= L'9')
+               || (c >= L'a' && c <= L'z')
+               || (c >= L'A' && c <= L'Z')
+               || c == L'-' || c == L'_';
+        out.push_back(ok ? c : L'_');
+    }
+    return out.empty() ? L"unknown" : out;
+}
+
+std::wstring launcherDataDir() {
+    wchar_t base[MAX_PATH] = {0};
+    if (!SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) return {};
+    std::wstring dir = std::wstring(base) + L"\\Launcher";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+std::wstring avatarDir(const wchar_t* scope) {
+    std::wstring dir = launcherDataDir();
+    if (dir.empty()) return {};
+    dir += L"\\avatars";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += L"\\";
+    dir += scope;
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+const char* avatarExtFromBody(const std::string& body) {
+    if (body.size() >= 3 && (BYTE)body[0] == 0xFF && (BYTE)body[1] == 0xD8) return "jpg";
+    if (body.size() >= 4 && body[0] == 'G' && body[1] == 'I' && body[2] == 'F') return "gif";
+    if (body.size() >= 12 && body[8] == 'W' && body[9] == 'E' && body[10] == 'B' && body[11] == 'P') return "webp";
+    if (body.size() >= 2 && body[0] == 'B' && body[1] == 'M') return "bmp";
+    return "png";
+}
+
+void clearAvatarFiles(const std::wstring& dir, const std::wstring& stem) {
+    if (dir.empty() || stem.empty()) return;
+    for (const wchar_t* e : { L"png", L"jpg", L"jpeg", L"gif", L"webp", L"bmp" }) {
+        std::wstring p = dir + L"\\" + stem + L"." + e;
+        DeleteFileW(p.c_str());
+    }
+}
+
+bool writeFileBytes(const std::wstring& path, const std::string& body) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD wn = 0;
+    BOOL ok = WriteFile(f, body.data(), (DWORD)body.size(), &wn, nullptr);
+    CloseHandle(f);
+    return ok && wn == body.size();
+}
+
+bool writeFileBytes(const std::wstring& path, const std::vector<BYTE>& body) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD wn = 0;
+    BOOL ok = WriteFile(f, body.data(), (DWORD)body.size(), &wn, nullptr);
+    CloseHandle(f);
+    return ok && wn == body.size();
+}
+
+AvatarDownload downloadAvatarTo(const std::string& api_path, const std::wstring& dir, const std::wstring& stem) {
+    AvatarDownload out;
+    if (api_path.empty() || dir.empty() || stem.empty()) return out;
+    std::wstring wurl = asciiToW(api_path);
+    auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+    if (!r.ok() || r.body.empty()) {
+        clearAvatarFiles(dir, stem);
+        return out;
+    }
+    const char* ext = avatarExtFromBody(r.body);
+    clearAvatarFiles(dir, stem);
+    std::wstring path = dir + L"\\" + stem + L"." + asciiToW(ext);
+    if (!writeFileBytes(path, r.body)) return out;
+    out.ok = true;
+    out.path = std::move(path);
+    return out;
+}
+
+std::string normalizeAvatarUrl(std::string url) {
+    if (url.empty()) return {};
+    if (url.rfind("/api/", 0) == 0) return url;
+    if (url.rfind("/avatar/", 0) == 0) return "/api" + url;
+    auto p = url.find("/api/");
+    if (p != std::string::npos) return url.substr(p);
+    return url;
+}
+
+std::wstring avatarStemFromUrlOrKey(const std::string& url, const std::wstring& key) {
+    std::string norm = normalizeAvatarUrl(url);
+    auto slash = norm.find_last_of('/');
+    if (slash != std::string::npos && slash + 1 < norm.size()) {
+        return sanitizeFilePart(asciiToW(norm.substr(slash + 1)));
+    }
+    return sanitizeFilePart(key);
+}
+
+UserStatus statusFromKey(const std::wstring& status) {
+    if      (status == L"online")  return UserStatus::Online;
+    else if (status == L"busy")    return UserStatus::Busy;
+    else if (status == L"away")    return UserStatus::Away;
+    else if (status == L"sleep")   return UserStatus::Sleep;
+    else if (status == L"offline") return UserStatus::Offline;
+    return g_status;
 }
 }
 
@@ -106,30 +231,11 @@ void remoteAvatar(HWND notify) {
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<A> a((A*)lp);
         std::string url = "/api/avatar/" + a->uid;
-        std::wstring wurl(url.begin(), url.end());
-        auto r = net::request(L"GET", wurl.c_str(), {}, L"");
-        if (!r.ok() || r.body.empty()) return 0;
-        const char* ext = "png";
-        if (r.body.size() >= 3 && (BYTE)r.body[0] == 0xFF && (BYTE)r.body[1] == 0xD8) ext = "jpg";
-        else if (r.body.size() >= 4 && r.body[0] == 'G' && r.body[1] == 'I' && r.body[2] == 'F') ext = "gif";
-
-        wchar_t base[MAX_PATH] = {0};
-        if (!SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) return 0;
-        std::wstring dir = std::wstring(base) + L"\\Launcher";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        std::wstring path = dir + L"\\avatar." + std::wstring(ext, ext + strlen(ext));
-        for (const wchar_t* e : { L"png", L"jpg", L"jpeg", L"gif", L"webp", L"bmp" }) {
-            std::wstring p = dir + L"\\avatar." + e;
-            DeleteFileW(p.c_str());
-        }
-        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
-                               nullptr, CREATE_ALWAYS, 0, nullptr);
-        if (f == INVALID_HANDLE_VALUE) return 0;
-        DWORD wn = 0;
-        WriteFile(f, r.body.data(), (DWORD)r.body.size(), &wn, nullptr);
-        CloseHandle(f);
-        auto* p_arg = new std::wstring(std::move(path));
-        PostMessageW(a->h, WM_APP + 23, 0, (LPARAM)p_arg);
+        std::wstring dir = avatarDir(L"self");
+        std::wstring stem = sanitizeFilePart(asciiToW(a->uid));
+        AvatarDownload got = downloadAvatarTo(url, dir, stem);
+        auto* p_arg = new std::wstring(std::move(got.path));
+        PostMessageW(a->h, WM_APP + 23, got.ok ? 1 : 0, (LPARAM)p_arg);
         return 0;
     }, a, 0, nullptr);
 }
@@ -241,36 +347,47 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
         if (!g_session_token.empty()) url += "?session_token=" + g_session_token;
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
+        PeerProfile next;
+        next.uid = a->k;
+        if (r.ok()) {
+            next.uid         = utf8ToW(net::jsonStr(r.body, "uid"));
+            if (next.uid.empty()) next.uid = a->k;
+            next.username    = utf8ToW(net::jsonStr(r.body, "username"));
+            next.nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
+            next.status      = utf8ToW(net::jsonStr(r.body, "status"));
+            next.status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
+            next.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
+            std::string avatar_url = normalizeAvatarUrl(net::jsonStr(r.body, "avatar_url"));
+            if (!avatar_url.empty()) {
+                AvatarDownload got = downloadAvatarTo(
+                    avatar_url,
+                    avatarDir(L"peers"),
+                    avatarStemFromUrlOrKey(avatar_url, a->k));
+                if (got.ok) next.avatar_path = std::move(got.path);
+            }
+            // 简单解析 "tags":["a","b",...]
+            auto p1 = r.body.find("\"tags\":[");
+            if (p1 != std::string::npos) {
+                size_t pos = p1 + 8;
+                while (true) {
+                    auto q1 = r.body.find('"', pos);
+                    if (q1 == std::string::npos) break;
+                    auto q2 = r.body.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    next.tags.push_back(utf8ToW(
+                        r.body.substr(q1 + 1, q2 - q1 - 1)));
+                    pos = q2 + 1;
+                    if (pos < r.body.size() && r.body[pos] == ']') break;
+                }
+            }
+            next.loaded = true;
+        } else {
+            next.err = utf8ToW(r.body.empty() ? "无法连接" : r.body.substr(0, 80));
+            next.loaded = true;
+        }
         {
             std::lock_guard<std::mutex> lk(g_peer_mtx);
-            if (r.ok()) {
-                g_peer.uid         = utf8ToW(net::jsonStr(r.body, "uid"));
-                g_peer.username    = utf8ToW(net::jsonStr(r.body, "username"));
-                g_peer.nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
-                g_peer.status      = utf8ToW(net::jsonStr(r.body, "status"));
-                g_peer.status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
-                g_peer.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
-                g_peer.tags.clear();
-                // 简单解析 "tags":["a","b",...]
-                auto p1 = r.body.find("\"tags\":[");
-                if (p1 != std::string::npos) {
-                    size_t pos = p1 + 8;
-                    while (true) {
-                        auto q1 = r.body.find('"', pos);
-                        if (q1 == std::string::npos) break;
-                        auto q2 = r.body.find('"', q1 + 1);
-                        if (q2 == std::string::npos) break;
-                        g_peer.tags.push_back(utf8ToW(
-                            r.body.substr(q1 + 1, q2 - q1 - 1)));
-                        pos = q2 + 1;
-                        if (pos < r.body.size() && r.body[pos] == ']') break;
-                    }
-                }
-                g_peer.loaded = true;
-            } else {
-                g_peer.err = utf8ToW(r.body.empty() ? "无法连接" : r.body.substr(0, 80));
-                g_peer.loaded = true;
-            }
+            g_peer = std::move(next);
         }
         PostMessageW(a->h, WM_APP + 36, r.ok() ? 1 : 0, 0);
         return 0;
@@ -290,25 +407,37 @@ void myProfile(HWND notify) {
             return 0;
         }
         // 解析关键字段并写回 g_user / g_status
-        std::wstring nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
-        std::wstring uid         = utf8ToW(net::jsonStr(r.body, "uid"));
-        std::wstring username    = utf8ToW(net::jsonStr(r.body, "username"));
-        std::wstring status      = utf8ToW(net::jsonStr(r.body, "status"));
-        std::wstring status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
-        std::wstring bio         = utf8ToW(net::jsonStr(r.body, "bio"));
-        if (!nickname.empty()) g_user.nickname    = nickname;
-        if (!uid.empty())      g_user.uid         = uid;
-        if (!username.empty()) g_user.username    = username;
-        g_user.status_text = status_text;
-        g_user.bio         = bio;
-        if      (status == L"online")  g_status = UserStatus::Online;
-        else if (status == L"busy")    g_status = UserStatus::Busy;
-        else if (status == L"away")    g_status = UserStatus::Away;
-        else if (status == L"sleep")   g_status = UserStatus::Sleep;
-        else if (status == L"offline") g_status = UserStatus::Offline;
+        MyProfileSnapshot next;
+        next.nickname    = utf8ToW(net::jsonStr(r.body, "nickname"));
+        next.uid         = utf8ToW(net::jsonStr(r.body, "uid"));
+        next.username    = utf8ToW(net::jsonStr(r.body, "username"));
+        next.status      = utf8ToW(net::jsonStr(r.body, "status"));
+        next.status_text = utf8ToW(net::jsonStr(r.body, "status_text"));
+        next.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
+        next.loaded      = true;
+        {
+            std::lock_guard<std::mutex> lk(g_my_profile_mtx);
+            g_pending_my_profile = std::move(next);
+        }
         PostMessageW(a->h, WM_APP + 54, 1, 0);
         return 0;
     }, a, 0, nullptr);
+}
+
+void applyMyProfileResult() {
+    MyProfileSnapshot next;
+    {
+        std::lock_guard<std::mutex> lk(g_my_profile_mtx);
+        next = std::move(g_pending_my_profile);
+        g_pending_my_profile = MyProfileSnapshot{};
+    }
+    if (!next.loaded) return;
+    if (!next.nickname.empty()) g_user.nickname = next.nickname;
+    if (!next.uid.empty())      g_user.uid      = next.uid;
+    if (!next.username.empty()) g_user.username = next.username;
+    g_user.status_text = next.status_text;
+    g_user.bio = next.bio;
+    g_status = statusFromKey(next.status);
 }
 
 void geoIP(HWND notify) {

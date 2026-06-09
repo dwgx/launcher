@@ -57,7 +57,14 @@ void geoIP(HWND notify);
 
 // GET /api/profile — 拿自己最新的 nickname / status / status_text / bio / uid
 // 异步线程，完成后 PostMessage WM_APP+54 让 main 把结果写回 g_user / g_status
+struct MyProfileSnapshot {
+    std::wstring nickname, uid, username, status, status_text, bio;
+    bool loaded = false;
+};
+extern MyProfileSnapshot g_pending_my_profile;
+extern std::mutex g_my_profile_mtx;
 void myProfile(HWND notify);
+void applyMyProfileResult();
 
 // GET /api/profile/:uid — 拿别人的资料 (nickname/status/bio/avatar)
 struct PeerProfile {

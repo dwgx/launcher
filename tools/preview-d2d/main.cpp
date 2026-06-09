@@ -263,10 +263,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 23: {                    // 远程头像下载完成；lp = std::wstring*
             std::unique_ptr<std::wstring> p((std::wstring*)lp);
-            if (p && !p->empty()) {
+            if (!wp) {
+                g_avatar_path.clear();
+                g_app.images().invalidate();
+                return 0;
+            }
+            if (wp && p && !p->empty()) {
                 g_avatar_path = *p;
                 g_app.images().invalidate();   // 强制下次重新解码
                 toast::show(L"头像已从云端同步 ✓");
+            } else {
+                g_avatar_path.clear();
+                g_app.images().invalidate();
             }
             return 0;
         }
@@ -454,7 +462,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 54: {                    // myProfile 拉回
-            // g_user / g_status 已经在 fetch::myProfile worker 线程里写好；这里仅触发重画
+            if (wp) fetch::applyMyProfileResult();
             return 0;
         }
         case WM_APP + 55: {                    // chat search 结果回来
@@ -594,9 +602,17 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             // 头像如果之前下载过，本地路径还在
             wchar_t base[MAX_PATH] = {0};
             if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
-                std::wstring dir = std::wstring(base) + L"\\Launcher";
+                std::wstring dir = std::wstring(base) + L"\\Launcher\\avatars\\self";
+                std::wstring stem;
+                for (char c : g_user_id) {
+                    bool ok = (c >= '0' && c <= '9')
+                           || (c >= 'a' && c <= 'z')
+                           || (c >= 'A' && c <= 'Z')
+                           || c == '-' || c == '_';
+                    stem.push_back(ok ? (wchar_t)c : L'_');
+                }
                 for (const wchar_t* e : { L"png", L"jpg", L"jpeg", L"gif", L"webp", L"bmp" }) {
-                    std::wstring p = dir + L"\\avatar." + e;
+                    std::wstring p = dir + L"\\" + stem + L"." + e;
                     if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
                         g_avatar_path = p;
                         break;

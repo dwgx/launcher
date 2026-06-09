@@ -9,8 +9,8 @@
       </div>
       <span class="badge badge-outline">{{ users.len() }}</span>
     </div>
-    <div class="admin-table-wrap">
-      <table class="table table-zebra table-sm admin-table">
+    <div class="overflow-x-auto">
+      <table class="table table-zebra table-sm">
         <thead>
           <tr>
             <th>UID</th>
@@ -54,7 +54,7 @@
             </td>
             <td class="text-xs opacity-70 font-mono">{{ u.created }}</td>
             <td class="font-mono text-xs opacity-60">{{ u.invite_code }}</td>
-            <td class="admin-actions space-x-1">
+            <td class="space-x-1 whitespace-nowrap">
               <button class="btn btn-xs btn-ghost"
                       onclick="document.getElementById('edit_{{ u.id }}').showModal()">编辑</button>
               <button class="btn btn-xs btn-ghost text-rose-400"

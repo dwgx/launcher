@@ -7,6 +7,7 @@ mod admin_channels;
 mod admin_invites;
 mod admin_users;
 mod chat;
+mod client_settings;
 mod heartbeat;
 mod market;
 mod media;
@@ -109,10 +110,13 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/chat/official",         get(chat::list_official))
         .route("/chat/send",             post(chat::send))
         .route("/chat/history",          get(chat::history))
+        .route("/chat/sync",             get(chat::sync_events))
         .route("/chat/search",           get(chat::search))
         .route("/chat/read",             post(chat::mark_read))
         .route("/chat/react",            post(chat::react))
         .route("/chat/delete",           post(chat::delete_msg))
+        // desktop settings sync
+        .route("/client/settings",       get(client_settings::get_settings).post(client_settings::upsert_settings))
         // sticker
         .route("/sticker",               post(sticker::create_sticker))
         .route("/sticker/delete",        post(sticker::delete_sticker))

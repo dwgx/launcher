@@ -4,11 +4,12 @@ use crate::state::AppState;
 use crate::media::auth_user;
 use crate::ws;
 use axum::{
-    extract::{State, Path, Json, Query},
+    extract::{Json, Query, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use sqlx::{postgres::PgRow, Row};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
@@ -42,6 +43,62 @@ async fn message_chat(
     sqlx::query_scalar!("SELECT chat_id FROM messages WHERE id = $1", message_id)
         .fetch_optional(&state.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))
+}
+
+async fn create_event(
+    state: &AppState,
+    chat_id: Option<Uuid>,
+    event_type: &str,
+    message_id: Option<i64>,
+    actor_id: Option<Uuid>,
+    payload: serde_json::Value,
+) -> Result<i64, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"INSERT INTO chat_events (chat_id, event_type, message_id, actor_id, payload)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id"#)
+        .bind(chat_id)
+        .bind(event_type)
+        .bind(message_id)
+        .bind(actor_id)
+        .bind(payload)
+        .fetch_one(&state.db).await.map_err(internal)?;
+    Ok(row.try_get("id").map_err(internal)?)
+}
+
+async fn message_event_id(
+    state: &AppState,
+    message_id: i64,
+) -> Result<Option<i64>, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"SELECT id FROM chat_events
+           WHERE message_id = $1 AND event_type = 'message'
+           ORDER BY id ASC LIMIT 1"#)
+        .bind(message_id)
+        .fetch_optional(&state.db).await.map_err(internal)?;
+    row.map(|r| r.try_get("id").map_err(internal)).transpose()
+}
+
+fn message_out_from_row(
+    row: &PgRow,
+    chat_id: Uuid,
+    sender_id: Option<Uuid>,
+    event_id: Option<i64>,
+) -> Result<MessageOut, (StatusCode, String)> {
+    Ok(MessageOut {
+        id: row.try_get("id").map_err(internal)?,
+        chat_id: chat_id.to_string(),
+        sender_id: sender_id.map(|u| u.to_string()),
+        msg_type: row.try_get("msg_type").map_err(internal)?,
+        payload: row.try_get("payload").map_err(internal)?,
+        reply_to_id: row.try_get("reply_to_id").map_err(internal)?,
+        created_at: row.try_get::<DateTime<Utc>, _>("created_at").map_err(internal)?.timestamp(),
+        edited_at: row.try_get::<Option<DateTime<Utc>>, _>("edited_at").map_err(internal)?.map(|t| t.timestamp()),
+        deleted: row.try_get::<Option<DateTime<Utc>>, _>("deleted_at").map_err(internal)?.is_some(),
+        client_msg_id: row.try_get::<Option<Uuid>, _>("client_msg_id").map_err(internal)?.map(|v| v.to_string()),
+        sender_device_id: row.try_get("sender_device_id").map_err(internal)?,
+        event_id,
+    })
 }
 
 // ---------------- 创建 / 打开 DM ----------------
@@ -212,6 +269,9 @@ pub async fn list_chats(
             reply_to_id: None,
             created_at: m.created_at.timestamp(),
             edited_at: None, deleted: false,
+            client_msg_id: None,
+            sender_device_id: None,
+            event_id: None,
         });
         // 未读数
         let unread = if let Some(lr) = r.last_read_message_id {
@@ -242,6 +302,8 @@ pub struct SendReq {
     pub msg_type:      String,                 // text/image/video/gif/sticker/pack_share
     pub payload:       serde_json::Value,
     pub reply_to_id:   Option<i64>,
+    pub client_msg_id: Option<Uuid>,
+    pub device_id:     Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -255,6 +317,20 @@ pub struct MessageOut {
     pub created_at:  i64,
     pub edited_at:   Option<i64>,
     pub deleted:     bool,
+    pub client_msg_id: Option<String>,
+    pub sender_device_id: Option<String>,
+    pub event_id:    Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct ChatEventOut {
+    pub id:         i64,
+    pub chat_id:    Option<String>,
+    pub event_type: String,
+    pub message_id: Option<i64>,
+    pub actor_id:   Option<String>,
+    pub payload:    serde_json::Value,
+    pub created_at: i64,
 }
 
 pub async fn send(
@@ -296,24 +372,88 @@ pub async fn send(
         }
     }
 
-    let row = sqlx::query!(
-        r#"INSERT INTO messages (chat_id, sender_id, msg_type, payload, reply_to_id)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, created_at"#,
-        req.chat_id, me, req.msg_type, req.payload, req.reply_to_id)
-        .fetch_one(&s.db).await.map_err(internal)?;
+    let device_id = req.device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(128).collect::<String>());
 
-    let out = MessageOut {
-        id: row.id, chat_id: req.chat_id.to_string(),
-        sender_id: Some(me.to_string()),
-        msg_type: req.msg_type, payload: req.payload,
-        reply_to_id: req.reply_to_id,
-        created_at: row.created_at.timestamp(),
-        edited_at: None, deleted: false,
+    let mut inserted = true;
+    let row = if let Some(client_msg_id) = req.client_msg_id {
+        if let Some(existing) = sqlx::query(
+            r#"SELECT id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
+                      client_msg_id, sender_device_id
+               FROM messages
+               WHERE chat_id = $1 AND sender_id = $2 AND client_msg_id = $3"#)
+            .bind(req.chat_id)
+            .bind(me)
+            .bind(client_msg_id)
+            .fetch_optional(&s.db).await.map_err(internal)?
+        {
+            inserted = false;
+            existing
+        } else {
+            sqlx::query(
+            r#"INSERT INTO messages
+                  (chat_id, sender_id, msg_type, payload, reply_to_id, client_msg_id, sender_device_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               RETURNING id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
+                         client_msg_id, sender_device_id"#)
+            .bind(req.chat_id)
+            .bind(me)
+            .bind(&req.msg_type)
+            .bind(&req.payload)
+            .bind(req.reply_to_id)
+            .bind(client_msg_id)
+            .bind(&device_id)
+            .fetch_one(&s.db).await.map_err(internal)?
+        }
+    } else {
+        sqlx::query(
+            r#"INSERT INTO messages
+                  (chat_id, sender_id, msg_type, payload, reply_to_id, sender_device_id)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               RETURNING id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
+                         client_msg_id, sender_device_id"#)
+            .bind(req.chat_id)
+            .bind(me)
+            .bind(&req.msg_type)
+            .bind(&req.payload)
+            .bind(req.reply_to_id)
+            .bind(&device_id)
+            .fetch_one(&s.db).await.map_err(internal)?
     };
 
+    let message_id: i64 = row.try_get("id").map_err(internal)?;
+    let existing_event_id = message_event_id(&s, message_id).await?;
+    let out_without_event = message_out_from_row(&row, req.chat_id, Some(me), existing_event_id)?;
+
+    if !inserted {
+        return Ok(Json(out_without_event));
+    }
+
+    let event_id = create_event(
+        &s,
+        Some(req.chat_id),
+        "message",
+        Some(message_id),
+        Some(me),
+        serde_json::json!({ "message": &out_without_event }),
+    ).await?;
+
+    let mut out = out_without_event;
+    out.event_id = Some(event_id);
+
     // 推送：官方频道无 chat_members 行，要广播给所有在线 WS；非官方走成员表
-    let payload = serde_json::json!({ "type": "message", "data": &out });
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "message",
+        "chat_id": req.chat_id.to_string(),
+        "server_time": out.created_at,
+        "data": &out,
+        "legacy_type": "message"
+    });
     if chat_meta.kind == "channel" && chat_meta.is_official {
         ws::broadcast_all(&s, &payload);
     } else {
@@ -356,21 +496,72 @@ pub async fn history(
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let before = q.before_id.unwrap_or(i64::MAX);
-    let rows = sqlx::query!(
-        r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at, edited_at, deleted_at
+    let rows = sqlx::query(
+        r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at, edited_at, deleted_at,
+                  client_msg_id, sender_device_id
            FROM messages WHERE chat_id = $1 AND id < $2
-           ORDER BY id DESC LIMIT $3"#, q.chat_id, before, limit)
+           ORDER BY id DESC LIMIT $3"#)
+        .bind(q.chat_id)
+        .bind(before)
+        .bind(limit)
         .fetch_all(&s.db).await.map_err(internal)?;
 
-    Ok(Json(rows.into_iter().map(|r| MessageOut {
-        id: r.id, chat_id: q.chat_id.to_string(),
-        sender_id: r.sender_id.map(|u| u.to_string()),
-        msg_type: r.msg_type, payload: r.payload,
-        reply_to_id: r.reply_to_id,
-        created_at: r.created_at.timestamp(),
-        edited_at: r.edited_at.map(|t| t.timestamp()),
-        deleted: r.deleted_at.is_some(),
-    }).collect()))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let sender_id = r.try_get::<Option<Uuid>, _>("sender_id").map_err(internal)?;
+        out.push(message_out_from_row(&r, q.chat_id, sender_id, None)?);
+    }
+    Ok(Json(out))
+}
+
+// ---------------- event sync ----------------
+#[derive(Deserialize)]
+pub struct SyncQ {
+    pub session_token:   String,
+    pub after_event_id:  Option<i64>,
+    pub limit:           Option<i64>,
+}
+
+pub async fn sync_events(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<SyncQ>,
+) -> Result<Json<Vec<ChatEventOut>>, (StatusCode, String)> {
+    let me = auth_user(&s, &q.session_token).await?;
+    let after = q.after_event_id.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let rows = sqlx::query(
+        r#"SELECT e.id, e.chat_id, e.event_type, e.message_id, e.actor_id, e.payload, e.created_at
+           FROM chat_events e
+           LEFT JOIN chats c ON c.id = e.chat_id
+           WHERE e.id > $1
+             AND (
+                e.chat_id IS NULL
+                OR (c.kind = 'channel' AND c.is_official = TRUE)
+                OR EXISTS (
+                    SELECT 1 FROM chat_members cm
+                    WHERE cm.chat_id = e.chat_id AND cm.user_id = $2
+                )
+             )
+           ORDER BY e.id ASC
+           LIMIT $3"#)
+        .bind(after)
+        .bind(me)
+        .bind(limit)
+        .fetch_all(&s.db).await.map_err(internal)?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(ChatEventOut {
+            id: r.try_get("id").map_err(internal)?,
+            chat_id: r.try_get::<Option<Uuid>, _>("chat_id").map_err(internal)?.map(|v| v.to_string()),
+            event_type: r.try_get("event_type").map_err(internal)?,
+            message_id: r.try_get("message_id").map_err(internal)?,
+            actor_id: r.try_get::<Option<Uuid>, _>("actor_id").map_err(internal)?.map(|v| v.to_string()),
+            payload: r.try_get("payload").map_err(internal)?,
+            created_at: r.try_get::<DateTime<Utc>, _>("created_at").map_err(internal)?.timestamp(),
+        });
+    }
+    Ok(Json(out))
 }
 
 // ---------------- 标记已读 ----------------
@@ -389,6 +580,14 @@ pub async fn mark_read(
         "UPDATE chat_members SET last_read_message_id = $1 WHERE chat_id = $2 AND user_id = $3",
         req.up_to_message_id, req.chat_id, me)
         .execute(&s.db).await.map_err(internal)?;
+    let _ = create_event(
+        &s,
+        Some(req.chat_id),
+        "read",
+        Some(req.up_to_message_id),
+        Some(me),
+        serde_json::json!({ "up_to_message_id": req.up_to_message_id }),
+    ).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -424,6 +623,14 @@ pub async fn react(
                VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
             req.message_id, me, emoji).execute(&s.db).await.map_err(internal)?;
     }
+    let _ = create_event(
+        &s,
+        Some(chat_id),
+        "reaction",
+        Some(req.message_id),
+        Some(me),
+        serde_json::json!({ "emoji": emoji, "remove": req.remove }),
+    ).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -448,10 +655,21 @@ pub async fn delete_msg(
     }
     sqlx::query!("UPDATE messages SET deleted_at = now() WHERE id = $1", req.message_id)
         .execute(&s.db).await.map_err(internal)?;
+    let event_id = create_event(
+        &s,
+        Some(row.chat_id),
+        "message_deleted",
+        Some(req.message_id),
+        Some(me),
+        serde_json::json!({ "message_id": req.message_id }),
+    ).await?;
     let payload = serde_json::json!({
-        "type": "message_deleted",
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "message_deleted",
         "message_id": req.message_id,
-        "chat_id": row.chat_id.to_string()
+        "chat_id": row.chat_id.to_string(),
+        "legacy_type": "message_deleted"
     });
     let members = sqlx::query_scalar!(
         "SELECT user_id FROM chat_members WHERE chat_id = $1", row.chat_id)

@@ -37,8 +37,8 @@
         <h2 class="card-title text-base">已生成的邀请码</h2>
         <span class="badge badge-outline">{{ items.len() }}</span>
       </div>
-      <div class="admin-table-wrap">
-        <table class="table table-zebra table-sm admin-table">
+      <div class="overflow-x-auto">
+        <table class="table table-zebra table-sm">
           <thead>
             <tr><th>Code</th><th>用量</th><th>状态</th><th>备注</th><th>创建</th><th></th></tr>
           </thead>
@@ -47,7 +47,7 @@
             <tr class="hover">
               <td><code class="font-mono text-orange-400 text-base">{{ it.code }}</code></td>
               <td class="font-mono">{{ it.uses }}</td>
-              <td class="whitespace-nowrap">
+              <td>
                 {% if it.status == "active" %}<span class="badge badge-active badge-sm">可用</span>
                 {% else if it.status == "revoked" %}<span class="badge badge-revoked badge-sm">已撤销</span>
                 {% else if it.status == "expired" %}<span class="badge badge-expired badge-sm">已过期</span>
@@ -56,7 +56,7 @@
               </td>
               <td class="text-xs opacity-70">{{ it.note }}</td>
               <td class="text-xs opacity-60 font-mono">{{ it.created }}</td>
-              <td class="admin-actions">
+              <td>
                 {% if it.status == "active" %}
                 <form method="post" action="/admin/invites/{{ it.code }}/revoke">
                   <button class="btn btn-xs btn-ghost text-rose-500">撤销</button>

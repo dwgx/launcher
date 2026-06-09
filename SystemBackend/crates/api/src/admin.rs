@@ -128,6 +128,7 @@ pub struct AuditRow {
 pub struct DashboardPage {
     pub title:           String,
     pub subtitle:        Option<String>,
+    pub notice:          Option<ui::AdminNotice>,
     pub host:            &'static str,
     pub route:           &'static str,
 
@@ -185,6 +186,7 @@ async fn dashboard(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Respon
     ui::render(&DashboardPage {
         title: "仪表盘".into(),
         subtitle: Some(format!("{} · 当前 {} 个活跃 session", ui::host(), active_sessions)),
+        notice: None,
         host: ui::host(),
         route: ui::ROUTE_DASHBOARD,
         user_count, user_today, active_sessions, pending_rebinds, active_invites,

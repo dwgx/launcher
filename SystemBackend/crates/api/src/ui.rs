@@ -11,6 +11,18 @@ pub const ROUTE_CHANNELS:  &str = "channels";
 
 pub fn host() -> &'static str { "154.40.36.22:1337" }
 
+#[derive(Clone)]
+pub struct AdminNotice {
+    pub kind: &'static str,
+    pub text: &'static str,
+}
+
+impl AdminNotice {
+    pub fn success(text: &'static str) -> Self { Self { kind: "success", text } }
+    pub fn error(text: &'static str) -> Self { Self { kind: "error", text } }
+    pub fn warning(text: &'static str) -> Self { Self { kind: "warning", text } }
+}
+
 pub fn render<T: askama::Template>(t: &T) -> axum::response::Html<String> {
     axum::response::Html(
         t.render().unwrap_or_else(|e| format!("<pre>template error: {e}</pre>"))

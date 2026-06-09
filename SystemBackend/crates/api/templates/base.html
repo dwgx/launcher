@@ -35,7 +35,6 @@
   }
   body {
     font-family: 'Source Han Sans CN', 'BIZ UDPGothic', 'Segoe UI', system-ui, sans-serif;
-    color: hsl(var(--bc));
     background:
       radial-gradient(1200px 600px at 90% -10%, rgba(217,119,87,.06), transparent 60%),
       radial-gradient(800px 400px at -10% 110%, rgba(217,119,87,.04), transparent 50%),
@@ -72,76 +71,33 @@
   }
   /* 表格行 hover 主色微亮 */
   table tbody tr:hover { background: hsl(18 56% 53% / 0.05); }
-  .admin-table-wrap {
-    overflow-x: auto;
-    overflow-y: visible;
-  }
-  .admin-table-wrap:has(.dropdown[open]) {
-    overflow: visible;
-  }
-  .admin-table {
-    position: relative;
-    border-collapse: separate;
-    border-spacing: 0;
-  }
-  .admin-table th,
-  .admin-table td {
-    vertical-align: middle;
-  }
-  .admin-table td {
-    color: hsl(var(--bc) / 0.86);
-  }
-  .admin-table code,
-  .admin-table .font-mono {
+  .admin-notice {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    margin-top: .9rem;
+    width: fit-content;
+    max-width: min(48rem, 100%);
+    padding: .65rem .85rem;
+    border-radius: .7rem;
+    border: 1px solid hsl(var(--b3) / .72);
+    background: hsl(var(--b2) / .86);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / .03) inset, 0 10px 28px -20px rgba(0,0,0,.55);
+    font-size: .82rem;
     line-height: 1.35;
   }
-  .admin-table .badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 1.25rem;
-    line-height: 1;
-    white-space: nowrap;
-    vertical-align: middle;
+  .admin-notice-dot {
+    width: .45rem;
+    height: .45rem;
+    border-radius: 999px;
+    flex: 0 0 auto;
   }
-  .admin-table tbody tr:has(.dropdown[open]) {
-    position: relative;
-    z-index: 40;
-  }
-  .admin-actions {
-    position: relative;
-    overflow: visible;
-    text-align: right;
-    white-space: nowrap;
-  }
-  .admin-actions .dropdown {
-    position: relative;
-    z-index: 20;
-  }
-  .admin-actions .dropdown[open] {
-    z-index: 90;
-  }
-  .admin-actions .dropdown-content {
-    z-index: 90;
-    top: calc(100% + .25rem);
-    right: 0;
-    background: hsl(var(--b2));
-    text-align: left;
-  }
-  .admin-actions summary.btn {
-    min-width: 5rem;
-    justify-content: space-between;
-  }
-  .admin-actions form {
-    display: inline-flex;
-    justify-content: flex-end;
-  }
-  .admin-actions summary {
-    list-style: none;
-  }
-  .admin-actions summary::-webkit-details-marker {
-    display: none;
-  }
+  .admin-notice-success { border-color: rgba(44,138,110,.55); color: hsl(36 28% 92%); }
+  .admin-notice-success .admin-notice-dot { background: #2C8A6E; }
+  .admin-notice-error { border-color: rgba(177,68,68,.62); color: hsl(36 28% 92%); }
+  .admin-notice-error .admin-notice-dot { background: #B14444; }
+  .admin-notice-warning { border-color: rgba(180,117,51,.62); color: hsl(36 28% 92%); }
+  .admin-notice-warning .admin-notice-dot { background: #B47533; }
   /* badge 状态色（不依赖 daisyUI 的 success/error，直接写） */
   .badge-active   { background: #2C8A6E; color: #fff; }
   .badge-revoked  { background: #B14444; color: #fff; }
@@ -206,6 +162,13 @@
         <h1 class="text-3xl font-bold tracking-tight">{{ title }}</h1>
         {% if subtitle.is_some() %}
           <p class="text-sm opacity-60 mt-1">{{ subtitle.as_ref().unwrap() }}</p>
+        {% endif %}
+        {% if notice.is_some() %}
+          {% let n = notice.as_ref().unwrap() %}
+          <div class="admin-notice admin-notice-{{ n.kind }}">
+            <span class="admin-notice-dot"></span>
+            <span>{{ n.text }}</span>
+          </div>
         {% endif %}
       </div>
       {% block content %}{% endblock %}

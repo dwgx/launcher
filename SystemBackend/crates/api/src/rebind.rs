@@ -189,12 +189,32 @@ pub struct RebindRowVm {
 pub struct RebindPage {
     pub title:    String,
     pub subtitle: Option<String>,
+    pub notice:   Option<ui::AdminNotice>,
     pub host:     &'static str,
     pub route:    &'static str,
     pub rows:     Vec<RebindRowVm>,
 }
 
-pub async fn admin_pending_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+pub struct RebindNoticeQuery {
+    pub ok: Option<String>,
+    pub err: Option<String>,
+}
+
+fn rebind_notice(q: &RebindNoticeQuery) -> Option<ui::AdminNotice> {
+    match (q.ok.as_deref(), q.err.as_deref()) {
+        (Some("approve"), _) => Some(ui::AdminNotice::success("HWID 重绑已通过")),
+        (Some("deny"), _) => Some(ui::AdminNotice::success("HWID 重绑已拒绝")),
+        (_, Some("not_found")) => Some(ui::AdminNotice::warning("请求不存在或已处理")),
+        _ => None,
+    }
+}
+
+pub async fn admin_pending_page(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<RebindNoticeQuery>,
+) -> Response {
     if !crate::admin::has_admin_session(&headers, &s) {
         return crate::admin::admin_login_redirect();
     }
@@ -217,6 +237,7 @@ pub async fn admin_pending_page(State(s): State<Arc<AppState>>, headers: HeaderM
     ui::render(&RebindPage {
         title: "HWID 重绑定".into(),
         subtitle: Some("用户换硬件后等你审批".into()),
+        notice: rebind_notice(&q),
         host: ui::host(),
         route: ui::ROUTE_REBIND,
         rows,
@@ -255,7 +276,7 @@ async fn form_approve(
             "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.approve',$1,NULL)",
             id.to_string()).execute(&s.db).await;
     }
-    axum::response::Redirect::to("/admin/rebind").into_response()
+    axum::response::Redirect::to("/admin/rebind?ok=approve").into_response()
 }
 
 async fn form_deny(
@@ -273,5 +294,5 @@ async fn form_deny(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.deny',$1,NULL)",
         id.to_string()).execute(&s.db).await;
-    axum::response::Redirect::to("/admin/rebind").into_response()
+    axum::response::Redirect::to("/admin/rebind?ok=deny").into_response()
 }

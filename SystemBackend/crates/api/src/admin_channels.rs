@@ -4,7 +4,7 @@
 use crate::state::AppState;
 use crate::ui;
 use axum::{
-    extract::{State, Path, Form},
+    extract::{State, Path, Form, Query},
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
     Router,
@@ -30,12 +30,32 @@ pub struct ChannelVm {
 pub struct ChannelsPage {
     pub title:    String,
     pub subtitle: Option<String>,
+    pub notice:   Option<ui::AdminNotice>,
     pub host:     &'static str,
     pub route:    &'static str,
     pub channels: Vec<ChannelVm>,
 }
 
-async fn channels_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+pub struct ChannelsNoticeQuery {
+    pub ok: Option<String>,
+    pub err: Option<String>,
+}
+
+fn channels_notice(q: &ChannelsNoticeQuery) -> Option<ui::AdminNotice> {
+    match (q.ok.as_deref(), q.err.as_deref()) {
+        (Some("rename"), _) => Some(ui::AdminNotice::success("频道名称已保存")),
+        (Some("clear"), _) => Some(ui::AdminNotice::success("频道消息已清空")),
+        (_, Some("title")) => Some(ui::AdminNotice::warning("频道标题不能为空，且最多 64 个字符")),
+        _ => None,
+    }
+}
+
+async fn channels_page(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<ChannelsNoticeQuery>,
+) -> Response {
     if !crate::admin::has_admin_session(&headers, &s) {
         return crate::admin::admin_login_redirect();
     }
@@ -63,6 +83,7 @@ async fn channels_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Re
     ui::render(&ChannelsPage {
         title: "频道管控".into(),
         subtitle: Some("官方频道写死，可改名 / 清空消息，但不能删除".into()),
+        notice: channels_notice(&q),
         host: ui::host(),
         route: ui::ROUTE_CHANNELS,
         channels,
