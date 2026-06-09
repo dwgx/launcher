@@ -18,9 +18,10 @@
 1. `README.md`
 2. `docs/WORKFLOW.md`
 3. `docs/PROJECT_OUTLINE.md`
-4. `SESSION_HANDOFF.md`
-5. `docs/PHASE_2_D2D_MIGRATION.md`，仅当工作涉及 D2D UI 或渲染迁移
-6. `SystemBackend/migrations/` 和 `SystemBackend/crates/api/src/`，仅当工作涉及后端
+4. `docs/UI_STYLE_LEARNING.md`，仅当工作涉及后台 Admin UI 或 `tools/preview-d2d/` UI
+5. `SESSION_HANDOFF.md`
+6. `docs/PHASE_2_D2D_MIGRATION.md`，仅当工作涉及 D2D UI 或渲染迁移
+7. `SystemBackend/migrations/` 和 `SystemBackend/crates/api/src/`，仅当工作涉及后端
 
 ## 最低验证
 
