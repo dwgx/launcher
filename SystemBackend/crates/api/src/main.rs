@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = axum::Router::new()
         .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/admin") }))
+        .route("/admin/", axum::routing::get(|| async { axum::response::Redirect::to("/admin") }))
         .route("/ws/chat", axum::routing::get(ws::ws_handler))
         .nest("/api",   api_routes(state.clone()))
         .nest("/admin", admin::routes(state.clone()))

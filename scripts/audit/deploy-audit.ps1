@@ -54,6 +54,27 @@ function Invoke-RemoteScript {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+function Assert-MigrationSqlUsesLf {
+    $migrationDir = Join-Path $root 'SystemBackend\migrations'
+    $bad = @()
+    Get-ChildItem -Path $migrationDir -Filter '*.sql' | ForEach-Object {
+        $bytes = [IO.File]::ReadAllBytes($_.FullName)
+        for ($i = 0; $i -lt ($bytes.Length - 1); $i++) {
+            if ($bytes[$i] -eq 13 -and $bytes[$i + 1] -eq 10) {
+                $bad += $_.Name
+                break
+            }
+        }
+    }
+    if ($bad.Count -gt 0) {
+        Write-Error "SQL migration files must use LF line endings because sqlx checks migration bytes: $($bad -join ', ')"
+        exit 1
+    }
+}
+
+Write-Host '== verify migration line endings ==' -ForegroundColor Cyan
+Assert-MigrationSqlUsesLf
+
 Write-Host '== create audit source archive ==' -ForegroundColor Cyan
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("launcher-audit-src-{0}.tar.gz" -f ([guid]::NewGuid().ToString('N')))
 & tar -C $root `
@@ -64,6 +85,8 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("launcher-audit-src-{0}.tar.gz" -f 
     --exclude=out `
     --exclude=SystemBackend/target `
     --exclude=.deploy.local `
+    --exclude=.env `
+    --exclude=.env.local `
     -czf $tmp .
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

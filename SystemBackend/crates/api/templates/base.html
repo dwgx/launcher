@@ -35,6 +35,7 @@
   }
   body {
     font-family: 'Source Han Sans CN', 'BIZ UDPGothic', 'Segoe UI', system-ui, sans-serif;
+    color: hsl(var(--bc));
     background:
       radial-gradient(1200px 600px at 90% -10%, rgba(217,119,87,.06), transparent 60%),
       radial-gradient(800px 400px at -10% 110%, rgba(217,119,87,.04), transparent 50%),
@@ -71,6 +72,76 @@
   }
   /* 表格行 hover 主色微亮 */
   table tbody tr:hover { background: hsl(18 56% 53% / 0.05); }
+  .admin-table-wrap {
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+  .admin-table-wrap:has(.dropdown[open]) {
+    overflow: visible;
+  }
+  .admin-table {
+    position: relative;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .admin-table th,
+  .admin-table td {
+    vertical-align: middle;
+  }
+  .admin-table td {
+    color: hsl(var(--bc) / 0.86);
+  }
+  .admin-table code,
+  .admin-table .font-mono {
+    line-height: 1.35;
+  }
+  .admin-table .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 1.25rem;
+    line-height: 1;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  .admin-table tbody tr:has(.dropdown[open]) {
+    position: relative;
+    z-index: 40;
+  }
+  .admin-actions {
+    position: relative;
+    overflow: visible;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .admin-actions .dropdown {
+    position: relative;
+    z-index: 20;
+  }
+  .admin-actions .dropdown[open] {
+    z-index: 90;
+  }
+  .admin-actions .dropdown-content {
+    z-index: 90;
+    top: calc(100% + .25rem);
+    right: 0;
+    background: hsl(var(--b2));
+    text-align: left;
+  }
+  .admin-actions summary.btn {
+    min-width: 5rem;
+    justify-content: space-between;
+  }
+  .admin-actions form {
+    display: inline-flex;
+    justify-content: flex-end;
+  }
+  .admin-actions summary {
+    list-style: none;
+  }
+  .admin-actions summary::-webkit-details-marker {
+    display: none;
+  }
   /* badge 状态色（不依赖 daisyUI 的 success/error，直接写） */
   .badge-active   { background: #2C8A6E; color: #fff; }
   .badge-revoked  { background: #B14444; color: #fff; }

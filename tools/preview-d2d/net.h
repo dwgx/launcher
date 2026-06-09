@@ -35,6 +35,13 @@ struct Endpoint {
     bool allow_insecure_tls = false;
 };
 
+inline bool envTruthy(const wchar_t* value) {
+    return wcscmp(value, L"1") == 0
+        || _wcsicmp(value, L"true") == 0
+        || _wcsicmp(value, L"yes") == 0
+        || _wcsicmp(value, L"on") == 0;
+}
+
 inline Endpoint endpoint() {
     static Endpoint ep = []() {
         Endpoint out;
@@ -50,9 +57,13 @@ inline Endpoint endpoint() {
         wchar_t scheme[16]{};
         DWORD sn = GetEnvironmentVariableW(L"LAUNCHER_API_SCHEME", scheme, (DWORD)(sizeof(scheme) / sizeof(scheme[0])));
         if (sn > 0 && _wcsicmp(scheme, L"http") == 0) out.secure = false;
-        wchar_t insecure[8]{};
+        wchar_t insecure[16]{};
         DWORD in = GetEnvironmentVariableW(L"LAUNCHER_ALLOW_INSECURE_TLS", insecure, (DWORD)(sizeof(insecure) / sizeof(insecure[0])));
-        out.allow_insecure_tls = in > 0 && wcscmp(insecure, L"1") == 0;
+        if (in > 0 && in < (sizeof(insecure) / sizeof(insecure[0]))) {
+            out.allow_insecure_tls = envTruthy(insecure);
+        } else if (out.secure && _wcsicmp(out.host.c_str(), kDefaultHost) == 0 && out.port == kDefaultPort) {
+            out.allow_insecure_tls = true;
+        }
         return out;
     }();
     return ep;

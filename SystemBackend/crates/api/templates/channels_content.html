@@ -11,8 +11,8 @@
       清空 = 软删 (deleted_at) 该频道全部消息。
     </div>
 
-    <div class="overflow-x-auto">
-      <table class="table table-zebra table-sm">
+    <div class="admin-table-wrap">
+      <table class="table table-zebra table-sm admin-table">
         <thead>
           <tr>
             <th>分组</th>
@@ -21,7 +21,7 @@
             <th>消息数</th>
             <th>最后活动</th>
             <th>类型</th>
-            <th class="w-24"></th>
+            <th class="w-28 text-right"></th>
           </tr>
         </thead>
         <tbody>
@@ -32,17 +32,17 @@
             <td class="font-medium">{{ c.title }}</td>
             <td class="font-mono opacity-80">{{ c.message_count }}</td>
             <td class="text-xs opacity-60 font-mono">{{ c.last_at }}</td>
-            <td>
+            <td class="whitespace-nowrap">
               {% if c.is_official %}
                 <span class="badge badge-active badge-sm">官方</span>
               {% else %}
                 <span class="badge badge-outline badge-sm">普通</span>
               {% endif %}
             </td>
-            <td>
+            <td class="admin-actions">
               <details class="dropdown dropdown-end">
                 <summary class="btn btn-xs btn-ghost">操作 ▾</summary>
-                <ul class="dropdown-content menu bg-base-200 rounded-box w-44 p-1 shadow border border-base-300/60 z-10">
+                <ul class="dropdown-content menu bg-base-200 rounded-box w-44 p-1 shadow border border-base-300/60">
                   <li>
                     <a onclick="document.getElementById('rename-{{ c.id }}').showModal()">
                       <span>✎</span> 改名
