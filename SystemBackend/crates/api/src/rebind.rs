@@ -11,8 +11,8 @@ use crate::state::AppState;
 use crate::ui;
 use axum::{
     extract::{State, Path, Json, Query},
-    http::StatusCode,
-    response::{IntoResponse, Html},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Router,
     routing::{get, post},
 };
@@ -194,7 +194,11 @@ pub struct RebindPage {
     pub rows:     Vec<RebindRowVm>,
 }
 
-pub async fn admin_pending_page(State(s): State<Arc<AppState>>) -> Html<String> {
+pub async fn admin_pending_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let rows = sqlx::query!(
         r#"SELECT id, user_id, submitted_at, old_fingerprint, new_fingerprint,
                   user_reason, parts_diff
@@ -216,7 +220,7 @@ pub async fn admin_pending_page(State(s): State<Arc<AppState>>) -> Html<String> 
         host: ui::host(),
         route: ui::ROUTE_REBIND,
         rows,
-    })
+    }).into_response()
 }
 
 pub fn admin_routes() -> Router<Arc<AppState>> {
@@ -231,8 +235,13 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
 // SSR 的 form approve/deny（无 body）走简化 handler，复用 admin_approve 的 SQL
 async fn form_approve(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     if let Ok(Some(row)) = sqlx::query!(
         r#"UPDATE hwid_rebind_requests SET status='approved', reviewed_at=now(), reviewer='admin'
            WHERE id=$1 AND status='pending' RETURNING user_id, new_fingerprint"#, id)
@@ -246,18 +255,23 @@ async fn form_approve(
             "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.approve',$1,NULL)",
             id.to_string()).execute(&s.db).await;
     }
-    axum::response::Redirect::to("/admin/rebind")
+    axum::response::Redirect::to("/admin/rebind").into_response()
 }
 
 async fn form_deny(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let _ = sqlx::query!(
         "UPDATE hwid_rebind_requests SET status='denied', reviewed_at=now(), reviewer='admin' WHERE id=$1 AND status='pending'",
         id).execute(&s.db).await;
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','hwid_rebind.deny',$1,NULL)",
         id.to_string()).execute(&s.db).await;
-    axum::response::Redirect::to("/admin/rebind")
+    axum::response::Redirect::to("/admin/rebind").into_response()
 }

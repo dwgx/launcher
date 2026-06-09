@@ -298,12 +298,41 @@ pub async fn review(
         return Err((StatusCode::BAD_REQUEST, "rating 1-5".into()));
     }
     let mut tx = s.db.begin().await.map_err(internal)?;
+    let order_id = if let Some(order_id) = req.order_id {
+        let ok = sqlx::query_scalar!(
+            r#"SELECT 1 as ok FROM market_orders
+               WHERE id = $1
+                 AND listing_id = $2
+                 AND buyer_id = $3
+                 AND status = 'delivered'"#,
+            order_id, req.listing_id, me)
+            .fetch_optional(&mut *tx).await.map_err(internal)?
+            .is_some();
+        if !ok {
+            return Err((StatusCode::FORBIDDEN, "order not found for reviewer".into()));
+        }
+        Some(order_id)
+    } else {
+        let order_id = sqlx::query_scalar!(
+            r#"SELECT id FROM market_orders
+               WHERE listing_id = $1
+                 AND buyer_id = $2
+                 AND status = 'delivered'
+               ORDER BY created_at DESC
+               LIMIT 1"#,
+            req.listing_id, me)
+            .fetch_optional(&mut *tx).await.map_err(internal)?;
+        let Some(order_id) = order_id else {
+            return Err((StatusCode::FORBIDDEN, "review requires purchase".into()));
+        };
+        Some(order_id)
+    };
     sqlx::query!(
         r#"INSERT INTO market_reviews (listing_id, order_id, reviewer_id, rating, body)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (listing_id, reviewer_id)
            DO UPDATE SET rating = EXCLUDED.rating, body = EXCLUDED.body"#,
-        req.listing_id, req.order_id, me, req.rating, req.body)
+        req.listing_id, order_id, me, req.rating, req.body)
         .execute(&mut *tx).await.map_err(internal)?;
 
     // 重算商品 rating_avg/count

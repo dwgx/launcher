@@ -236,6 +236,45 @@ pub async fn remove_from_pack(
 }
 
 // ---------- 看 pack 详情 ----------
+// ---------- delete one sticker ----------
+// Desktop deleteSticker() sends sha256 because local cache paths are named by media sha.
+#[derive(Deserialize)]
+pub struct DeleteStickerReq {
+    pub session_token: String,
+    pub sha256:        Option<String>,
+    pub sticker_id:    Option<Uuid>,
+}
+
+pub async fn delete_sticker(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<DeleteStickerReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let affected = if let Some(sticker_id) = req.sticker_id {
+        sqlx::query!(
+            "DELETE FROM stickers WHERE id = $1 AND creator_id = $2",
+            sticker_id, me)
+            .execute(&s.db).await.map_err(internal)?
+            .rows_affected()
+    } else if let Some(sha) = req.sha256.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        sqlx::query!(
+            r#"DELETE FROM stickers s
+               USING media_files m
+               WHERE s.media_id = m.id
+                 AND s.creator_id = $1
+                 AND m.sha256 = $2"#,
+            me, sha)
+            .execute(&s.db).await.map_err(internal)?
+            .rows_affected()
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "sha256 or sticker_id required".into()));
+    };
+    if affected == 0 {
+        return Err((StatusCode::NOT_FOUND, "sticker not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn get_pack(
     State(s): State<Arc<AppState>>,
     Path(id): Path<Uuid>,

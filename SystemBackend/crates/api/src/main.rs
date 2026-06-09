@@ -113,6 +113,7 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/chat/delete",           post(chat::delete_msg))
         // sticker
         .route("/sticker",               post(sticker::create_sticker))
+        .route("/sticker/delete",        post(sticker::delete_sticker))
         .route("/sticker/pack",          post(sticker::create_pack))
         .route("/sticker/pack/:id",      get(sticker::get_pack))
         .route("/sticker/pack/add",      post(sticker::add_to_pack))

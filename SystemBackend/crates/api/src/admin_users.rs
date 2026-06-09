@@ -5,8 +5,8 @@ use crate::state::AppState;
 use crate::ui;
 use axum::{
     extract::{State, Query, Path, Json, Form},
-    http::StatusCode,
-    response::{IntoResponse, Redirect, Html},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     Router,
     routing::{get, post},
 };
@@ -150,7 +150,11 @@ pub struct UsersPage {
     pub roles:    Vec<RoleVm>,
 }
 
-async fn users_page(State(s): State<Arc<AppState>>) -> Html<String> {
+async fn users_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let rows = sqlx::query!(
         r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used, role, role_label
            FROM users ORDER BY created_at DESC LIMIT 200"#)
@@ -178,7 +182,7 @@ async fn users_page(State(s): State<Arc<AppState>>) -> Html<String> {
         host: ui::host(),
         route: ui::ROUTE_USERS,
         users, roles,
-    })
+    }).into_response()
 }
 
 #[derive(Deserialize)]
@@ -193,9 +197,14 @@ pub struct EditForm {
 
 async fn user_edit_submit(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Form(form): Form<EditForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let _ = sqlx::query!(
         r#"UPDATE users SET
             uid = COALESCE(NULLIF($2,''), uid),
@@ -214,7 +223,7 @@ async fn user_edit_submit(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.edit_user',$1,NULL)",
         id.to_string()).execute(&s.db).await;
-    Redirect::to("/admin/users")
+    Redirect::to("/admin/users").into_response()
 }
 
 // SSR 重置密码：表单 POST，强制断开该用户所有 session
@@ -223,16 +232,21 @@ pub struct ResetPwForm { pub new_password: String }
 
 async fn user_reset_pw_form(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Form(form): Form<ResetPwForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     if form.new_password.len() < 8 {
-        return Redirect::to("/admin/users?err=pw_too_short");
+        return Redirect::to("/admin/users?err=pw_too_short").into_response();
     }
     let h = match hashing::hash_password(&form.new_password,
         s.cfg.argon_memory_kib, s.cfg.argon_iterations) {
         Ok(v) => v,
-        Err(_) => return Redirect::to("/admin/users?err=hash_failed"),
+        Err(_) => return Redirect::to("/admin/users?err=hash_failed").into_response(),
     };
     let _ = sqlx::query!(
         "UPDATE users SET password_hash=$1, password_changed_at=now() WHERE id=$2",
@@ -242,7 +256,7 @@ async fn user_reset_pw_form(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.reset_password_form',$1,NULL)",
         id.to_string()).execute(&s.db).await;
-    Redirect::to("/admin/users?reset=ok")
+    Redirect::to("/admin/users?reset=ok").into_response()
 }
 
 // =====================================================================
@@ -263,18 +277,23 @@ pub struct DeleteForm { pub confirm_username: String }
 
 async fn user_delete_submit(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Form(form): Form<DeleteForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     // 第一道：拿真 username 跟客户端输入比对（防误删）
     let actual = sqlx::query_scalar!("SELECT username FROM users WHERE id=$1", id)
         .fetch_optional(&s.db).await.ok().flatten().flatten();
     let actual = match actual {
         Some(u) => u,
-        None => return Redirect::to("/admin/users?err=user_not_found"),
+        None => return Redirect::to("/admin/users?err=user_not_found").into_response(),
     };
     if actual != form.confirm_username.trim() {
-        return Redirect::to("/admin/users?err=delete_confirm_mismatch");
+        return Redirect::to("/admin/users?err=delete_confirm_mismatch").into_response();
     }
 
     // 解除引用 (SET NULL) — 保留内容但去除作者
@@ -302,9 +321,9 @@ async fn user_delete_submit(
     let res = sqlx::query!("DELETE FROM users WHERE id=$1", id).execute(&s.db).await;
     if let Err(e) = res {
         tracing::error!("delete user failed: {}", e);
-        return Redirect::to("/admin/users?err=delete_failed");
+        return Redirect::to("/admin/users?err=delete_failed").into_response();
     }
-    Redirect::to("/admin/users?delete=ok")
+    Redirect::to("/admin/users?delete=ok").into_response()
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

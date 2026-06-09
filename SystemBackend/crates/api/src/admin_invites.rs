@@ -4,8 +4,8 @@ use crate::state::AppState;
 use crate::ui;
 use axum::{
     extract::{State, Form, Path, Query},
-    http::StatusCode,
-    response::{IntoResponse, Redirect, Html},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     Router,
     routing::{get, post},
 };
@@ -36,7 +36,11 @@ pub struct InvitesPage {
     pub items:    Vec<InviteVm>,
 }
 
-async fn list_page(State(s): State<Arc<AppState>>) -> Html<String> {
+async fn list_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let rows = sqlx::query!(
         r#"SELECT code, note, max_uses, use_count, expires_at, revoked_at, created_at
            FROM invite_codes ORDER BY created_at DESC LIMIT 200"#)
@@ -60,7 +64,7 @@ async fn list_page(State(s): State<Arc<AppState>>) -> Html<String> {
         host: ui::host(),
         route: ui::ROUTE_INVITES,
         items,
-    })
+    }).into_response()
 }
 
 // HTML form 留空字段会发 `field=`（空字符串）；serde 默认 Option<i32>::deserialize 把它
@@ -78,8 +82,13 @@ pub struct CreateForm {
 
 async fn create_submit(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<CreateForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let n = form.count.unwrap_or(1).clamp(1, 50);
     let max_uses = form.max_uses.unwrap_or(1).clamp(1, 1000);
     let expires_at = form.days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
@@ -92,17 +101,22 @@ async fn create_submit(
             code, form.note, max_uses, expires_at)
             .execute(&s.db).await;
     }
-    Redirect::to("/admin/invites")
+    Redirect::to("/admin/invites").into_response()
 }
 
 async fn revoke(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let _ = sqlx::query!(
         "UPDATE invite_codes SET revoked_at = now(), revoked_by = 'admin' WHERE code = $1",
         code).execute(&s.db).await;
-    Redirect::to("/admin/invites")
+    Redirect::to("/admin/invites").into_response()
 }
 
 #[derive(Deserialize)]

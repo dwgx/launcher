@@ -5,7 +5,8 @@ use crate::state::AppState;
 use crate::ui;
 use axum::{
     extract::{State, Path, Form},
-    response::{IntoResponse, Redirect, Html},
+    http::HeaderMap,
+    response::{IntoResponse, Redirect, Response},
     Router,
     routing::{get, post},
 };
@@ -34,7 +35,11 @@ pub struct ChannelsPage {
     pub channels: Vec<ChannelVm>,
 }
 
-async fn channels_page(State(s): State<Arc<AppState>>) -> Html<String> {
+async fn channels_page(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let rows = sqlx::query!(
         r#"SELECT c.id, c.slug, c.title, c.group_label, c.is_official, c.last_message_at,
                   (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id AND m.deleted_at IS NULL) AS msg_count
@@ -61,7 +66,7 @@ async fn channels_page(State(s): State<Arc<AppState>>) -> Html<String> {
         host: ui::host(),
         route: ui::ROUTE_CHANNELS,
         channels,
-    })
+    }).into_response()
 }
 
 #[derive(Deserialize)]
@@ -69,12 +74,17 @@ pub struct RenameForm { pub title: String }
 
 async fn rename_submit(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Form(form): Form<RenameForm>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let title = form.title.trim();
     if title.is_empty() || title.len() > 64 {
-        return Redirect::to("/admin/channels?err=title");
+        return Redirect::to("/admin/channels?err=title").into_response();
     }
     let _ = sqlx::query!(
         "UPDATE chats SET title=$1 WHERE id=$2 AND kind='channel'",
@@ -83,13 +93,18 @@ async fn rename_submit(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.channel_rename',$1,$2)",
         id.to_string(),
         Some(serde_json::json!({ "title": title }))).execute(&s.db).await;
-    Redirect::to("/admin/channels?ok=rename")
+    Redirect::to("/admin/channels?ok=rename").into_response()
 }
 
 async fn clear_messages(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> impl IntoResponse {
+) -> Response {
+    if !crate::admin::has_admin_session(&headers, &s) {
+        return crate::admin::admin_login_redirect();
+    }
+
     let res = sqlx::query!(
         "UPDATE messages SET deleted_at=now() WHERE chat_id=$1 AND deleted_at IS NULL",
         id).execute(&s.db).await;
@@ -98,7 +113,7 @@ async fn clear_messages(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.channel_clear',$1,$2)",
         id.to_string(),
         Some(serde_json::json!({ "soft_deleted": n }))).execute(&s.db).await;
-    Redirect::to("/admin/channels?ok=clear")
+    Redirect::to("/admin/channels?ok=clear").into_response()
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
