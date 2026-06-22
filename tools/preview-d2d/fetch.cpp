@@ -550,15 +550,16 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
             auto p1 = r.body.find("\"tags\":[");
             if (p1 != std::string::npos) {
                 size_t pos = p1 + 8;
-                while (true) {
+                size_t end = r.body.find(']', pos);
+                if (end == std::string::npos) end = r.body.size();
+                while (pos < end) {
                     auto q1 = r.body.find('"', pos);
-                    if (q1 == std::string::npos) break;
+                    if (q1 == std::string::npos || q1 >= end) break;
                     auto q2 = r.body.find('"', q1 + 1);
-                    if (q2 == std::string::npos) break;
+                    if (q2 == std::string::npos || q2 > end) break;
                     next.tags.push_back(utf8ToW(
                         r.body.substr(q1 + 1, q2 - q1 - 1)));
                     pos = q2 + 1;
-                    if (pos < r.body.size() && r.body[pos] == ']') break;
                 }
             }
             next.loaded = true;

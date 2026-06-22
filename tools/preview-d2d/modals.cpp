@@ -43,6 +43,9 @@ MuteUserState     g_mute_user;
 PackPreviewState  g_pack_preview_modal;
 SearchState       g_search;
 
+static void closeMsgMenu();
+static void closeUserMenu();
+
 namespace {
 
 float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
@@ -280,6 +283,14 @@ bool anyOpen() {
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
         || g_webview_modal.open || g_msg_menu.open || g_user_menu.open || g_mute_user.open
         || g_pack_preview_modal.open
+        || g_search.open;
+}
+
+bool hasBlockingModalOpen() {
+    return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
+        || g_addtag.open || g_createpack.open || g_renamepack.open
+        || g_user_profile.open || g_edit_status.open || g_edit_bio.open
+        || g_webview_modal.open || g_mute_user.open || g_pack_preview_modal.open
         || g_search.open;
 }
 
@@ -924,6 +935,7 @@ void onRenamePackResult(bool success) {
 }
 // ============== UserProfile modal ==============
 void openUserProfile(const std::wstring& uid_or_nickname) {
+    closeContextMenus();
     g_user_profile.open = true;
     g_user_profile.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
     if (isSelfProfileKey(uid_or_nickname)) {
@@ -1060,8 +1072,11 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
             auto* chip_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
             for (auto& tag : peer.tags) {
                 float max_chip_w = cw - 48.0f;
-                std::wstring tag_disp = fitText(app, tag, chip_fmt, max_chip_w - 20.0f);
-                float tw = (std::min)(measureW(app, tag_disp, chip_fmt) + 20.0f, max_chip_w);
+                float target_chip_w = (std::min)((std::max)(measureW(app, tag, chip_fmt) + 20.0f, 64.0f),
+                                                 max_chip_w);
+                std::wstring tag_disp = fitText(app, tag, chip_fmt, target_chip_w - 20.0f);
+                float tw = (std::min)((std::max)(measureW(app, tag_disp, chip_fmt) + 20.0f, 64.0f),
+                                      max_chip_w);
                 if (tx + tw > cx + cw - 24) { tx = cx + 24; ty_ += 28; }
                 if (ty_ > cy + 280) break;
                 prim::fillRR(ctx, tx, ty_, tw, 22, 11, br.solidA(pal.surface, t));
@@ -1386,11 +1401,14 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
 
 // ============== Message context menu ==============
 void openMsgContextMenu(POINT anchor_dip, int src_idx) {
+    if (hasBlockingModalOpen()) return;
     auto& msgs = chat::streamFor(chat::g_active);
     if (src_idx < 0 || src_idx >= (int)msgs.size()) return;
     const chat::Msg& m = msgs[src_idx];
+    closeUserMenu();
     g_msg_menu.open = true;
     g_msg_menu.anchor = anchor_dip;
+    g_msg_menu.menu_rect = {};
     g_msg_menu.src_idx = src_idx;
     g_msg_menu.slug = chat::g_active;
     g_msg_menu.kind_int = (int)m.kind;
@@ -1401,6 +1419,7 @@ void openMsgContextMenu(POINT anchor_dip, int src_idx) {
         ? utf8ToWModal(g_user_id)
         : (!m.peer_key.empty() ? m.peer_key : (!m.author_key.empty() ? m.author_key : m.from));
     g_msg_menu.server_id = m.server_id;
+    g_msg_menu.client_msg_id = m.client_msg_id;
     g_msg_menu.reply_author = m.reply_author;
     g_msg_menu.reply_preview = m.reply_preview;
     g_msg_menu.t.start(0, 1, 0.18f, 0, curve::easeOutCubic);
@@ -1412,8 +1431,11 @@ static void closeMsgMenu() {
 
 void openUserContextMenu(POINT anchor_dip, const std::wstring& profile_key, const std::wstring& label) {
     if (profile_key.empty()) return;
+    if (hasBlockingModalOpen()) return;
+    closeMsgMenu();
     g_user_menu.open = true;
     g_user_menu.anchor = anchor_dip;
+    g_user_menu.menu_rect = {};
     g_user_menu.profile_key = profile_key;
     g_user_menu.label = label.empty() ? profile_key : label;
     g_user_menu.t.start(0, 1, 0.18f, 0, curve::easeOutCubic);
@@ -1423,6 +1445,11 @@ void openUserContextMenu(POINT anchor_dip, const std::wstring& profile_key, cons
 static void closeUserMenu() {
     g_user_menu.t.start(g_user_menu.t.value(), 0, 0.14f, 0, curve::easeOutCubic);
     g_user_menu.open = false;
+}
+
+void closeContextMenus() {
+    if (g_msg_menu.open) closeMsgMenu();
+    if (g_user_menu.open) closeUserMenu();
 }
 
 static int64_t muteDurationSeconds() {
@@ -1509,6 +1536,7 @@ void copyTextToClipboard(HWND hwnd, const std::wstring& s) {
 }
 
 void paintMsgContextMenu(D2DApp& app, float W, float H) {
+    if (hasBlockingModalOpen()) return;
     if (!g_msg_menu.open && g_msg_menu.t.value() < 0.001f) return;
     float t = g_msg_menu.t.value();
     if (t < 0.001f) return;
@@ -1523,7 +1551,7 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
 
     struct Item { std::wstring label; std::function<void()> click; bool danger; };
     std::vector<Item> items;
-    if (g_msg_menu.server_id > 0) items.push_back({ trW("msg.reply"), [](){
+    items.push_back({ trW("msg.reply"), [](){
         std::wstring body = g_msg_menu.body;
         if (body.size() > 80) body = body.substr(0, 80) + L"...";
         if (body.empty()) {
@@ -1534,16 +1562,12 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
             else if (k == chat::MsgKind::Video) body = L"[video]";
             else body = L"[message]";
         }
-        chat::g_pending_reply.active = true;
-        chat::g_pending_reply.id = g_msg_menu.server_id;
-        chat::g_pending_reply.slug = g_msg_menu.slug;
-        chat::g_pending_reply.author = g_msg_menu.author;
-        chat::g_pending_reply.author_key = g_msg_menu.profile_key;
-        chat::g_pending_reply.preview = body;
+        chat::beginReplyToMessage(g_msg_menu.slug, g_msg_menu.server_id,
+                                  g_msg_menu.client_msg_id, g_msg_menu.author,
+                                  g_msg_menu.profile_key, body);
         if (g_msg_menu.from != L"me" && !g_msg_menu.profile_key.empty()) {
             chat::addMentionToComposer(g_msg_menu.profile_key, g_msg_menu.author);
         }
-        chat::g_focus_composer = true;
         closeMsgMenu();
     }, false });
     if (!g_msg_menu.profile_key.empty()) {
@@ -1645,6 +1669,7 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
     if (my + mh > H - 8) my = H - 8 - mh;
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
+    g_msg_menu.menu_rect = { mx, my, mw, mh };
 
     // Register a full-screen catchall hit; item hits consume clicks first.
     // Clicking outside the menu closes it.
@@ -1673,6 +1698,7 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
 }
 
 void paintUserContextMenu(D2DApp& app, float W, float H) {
+    if (hasBlockingModalOpen()) return;
     if (!g_user_menu.open && g_user_menu.t.value() < 0.001f) return;
     float t = g_user_menu.t.value();
     if (t < 0.001f) return;
@@ -1734,6 +1760,10 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
     if (my + mh > H - 8) my = H - mh - 8;
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
+    g_user_menu.menu_rect = { mx, my, mw, mh };
+
+    hit({ 0, 0, W, H }, [](){ closeUserMenu(); }, false);
+
     prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);
     auto* fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
@@ -2169,6 +2199,20 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
         else if (g_history.open) closeHistory();
     }
     return true;
+}
+
+bool onMouseRDown(HWND /*hwnd*/, POINT dip) {
+    if (g_msg_menu.open) {
+        bool inside = g_msg_menu.menu_rect.contains(dip);
+        if (!inside) closeMsgMenu();
+        return inside;
+    }
+    if (g_user_menu.open) {
+        bool inside = g_user_menu.menu_rect.contains(dip);
+        if (!inside) closeUserMenu();
+        return inside;
+    }
+    return hasBlockingModalOpen();
 }
 
 bool onChar(HWND hwnd, wchar_t c, bool ctrl) {

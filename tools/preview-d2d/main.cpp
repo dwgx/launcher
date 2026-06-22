@@ -143,11 +143,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd, &pt);
             POINT dip = physToDip(pt);
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat) {
+                return HTCLIENT;
+            }
             return anyHover(dip) ? HTCLIENT : HTCAPTION;
         }
         case WM_MOUSEMOVE: {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             g_mouse = physToDip(pt);
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && chat::onMouseMove(hwnd, g_mouse)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
         case WM_LBUTTONDOWN: {
@@ -203,7 +212,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 if (chat::g_picker_open) {
                     chat::g_picker_open = false;
-                    chat::g_picker_t.start(chat::g_picker_t.value(), 0, 0.18f,
+                    chat::g_picker_t.start(chat::g_picker_t.value(), 0, 0.12f,
                                            0, curve::easeOutCubic);
                     return 0;
                 }
@@ -438,7 +447,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         chat::g_picker_tab = 1 + idx;     // 0 = emoji, 1+ = pack idx
                         if (!chat::g_picker_open) {
                             chat::g_picker_open = true;
-                            chat::g_picker_t.start(0, 1, 0.22f, 0, curve::easeOutBack);
+                            chat::g_picker_t.start(chat::g_picker_t.value(), 1, 0.16f, 0, curve::easeOutCubic);
                         }
                     }
                 }
@@ -520,6 +529,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 52: {                    // 发消息后，把 server message_id 绑到本地 me 消息
             chat::applySendResult();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 53: {                    // 删消息结果（仅自己消息）
@@ -629,6 +639,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_RBUTTONDOWN: {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             POINT dip = physToDip(pt);
+            if (modal::onMouseRDown(hwnd, dip)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             // 在 chat 里右键命中头像 → 看主页（不要最小化）
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat

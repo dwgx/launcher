@@ -149,6 +149,7 @@ struct MsgContextMenuState {
     bool open = false;
     Tween t;
     POINT anchor{};
+    LayoutRect menu_rect{};
     int   src_idx = -1;        // 在 streamFor(slug) 里的索引
     std::wstring slug;         // 频道 slug
     // 拷贝快照（避免 streamFor 容器变动后悬空）
@@ -158,6 +159,7 @@ struct MsgContextMenuState {
     std::wstring from;
     std::wstring profile_key;
     int64_t server_id = 0;
+    std::string client_msg_id;
     std::wstring reply_author;
     std::wstring reply_preview;
 };
@@ -169,6 +171,7 @@ struct UserContextMenuState {
     bool open = false;
     Tween t;
     POINT anchor{};
+    LayoutRect menu_rect{};
     std::wstring profile_key;
     std::wstring label;
 };
@@ -251,9 +254,12 @@ void tickAll(float dt);
 
 // 任意 modal 在显示
 bool anyOpen();
+bool hasBlockingModalOpen();
+void closeContextMenus();
 
 // 鼠标 / 键盘事件路由：return true = 已处理（modal 吃掉事件）
 bool onMouseLDown(HWND hwnd, POINT dip);
+bool onMouseRDown(HWND hwnd, POINT dip);
 bool onChar(HWND hwnd, wchar_t c, bool ctrl);
 bool onKey(HWND hwnd, int vk, bool shift, bool ctrl);
 

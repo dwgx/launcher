@@ -30,6 +30,7 @@ extern bool         g_focus_composer;
 struct PendingReply {
     bool active = false;
     int64_t id = 0;
+    std::string client_msg_id;
     std::wstring slug;
     std::wstring author;
     std::wstring author_key;
@@ -116,13 +117,20 @@ struct Msg {
     std::string  client_msg_id;
     int64_t      server_id = 0;     // 后端 messages.id (软删除时 POST /chat/delete 用)
     int64_t      reply_to_id = 0;
+    std::string  reply_client_msg_id;
     std::wstring reply_author;
     std::wstring reply_preview;
+    bool         waiting_reply_target = false;
 };
 
 std::vector<Msg>& streamFor(const std::wstring& slug);
 void switchChannel(const std::wstring& slug);
 std::string activeChatId();
+void beginReplyToMessage(const std::wstring& slug, int64_t server_id,
+                         const std::string& client_msg_id,
+                         const std::wstring& author,
+                         const std::wstring& author_key,
+                         const std::wstring& preview);
 
 // 顶层 paint — 分两半：list 240 / pane 1fr
 void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah);
@@ -130,6 +138,7 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah);
 void tick(float dt);
 
 bool onMouseLDown(HWND hwnd, POINT dip);
+bool onMouseMove(HWND hwnd, POINT dip);
 bool onMouseLUp(HWND hwnd, POINT dip);
 // 右键命中消息 → 弹消息菜单；命中头像 → 看主页
 bool onMouseRDown(HWND hwnd, POINT dip);

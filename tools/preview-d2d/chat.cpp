@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <limits>
@@ -98,9 +99,15 @@ static std::vector<AvatarHit> g_avatar_hits;
 static float g_emoji_scroll_y = 0.0f;
 static float g_emoji_grid_h_last = 0.0f;
 static float g_emoji_total_h_last = 0.0f;
+static std::vector<float> g_emoji_hover_t;
+static float g_pack_scroll_y = 0.0f;
+static float g_pack_grid_h_last = 0.0f;
+static float g_pack_total_h_last = 0.0f;
 // 消息体 hit 表 — paintChatPane 帧首清空，paintBubble 填充
 struct MsgHit { LayoutRect rect; int idx; };
 static std::vector<MsgHit> g_msg_hits;
+static std::vector<MsgHit> g_msg_row_hits;
+static LayoutRect g_chat_stream_rect{};
 struct FocusTarget {
     std::wstring slug;
     int64_t server_id = 0;
@@ -114,6 +121,45 @@ struct PackTabRect { LayoutRect r; int idx; };
 static std::vector<PackTabRect> g_pack_tab_rects;
 // 鼠标在 picker 上的本地相对坐标（pack tabs 子区域）
 static float g_picker_origin_x = 0, g_picker_origin_y = 0;
+static LayoutRect g_picker_rect{};
+static LayoutRect g_picker_content_rect{};
+static Tween g_picker_content_t;
+static int g_picker_content_tab = 0;
+struct PickerScrollDrag {
+    bool active = false;
+    int mode = 0; // 0 = emoji grid, 1 = sticker grid
+    float anchor_mouse_y = 0.0f;
+    float anchor_scroll_y = 0.0f;
+    float track_h = 0.0f;
+    float thumb_h = 0.0f;
+    float max_scroll = 0.0f;
+};
+static PickerScrollDrag g_picker_scroll_drag;
+struct ComposerDrag {
+    bool active = false;
+    int anchor_cursor = 0;
+};
+static ComposerDrag g_composer_drag;
+static std::vector<float> g_composer_caret_xs;
+constexpr float kStreamTopPad = 12.0f;
+constexpr float kStreamBottomPad = 18.0f;
+
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void setPickerOpen(bool open) {
+    g_picker_open = open;
+    if (open) {
+        g_picker_t.start(g_picker_t.value(), 1.0f, 0.18f, 0, curve::easeOutCubic);
+    } else {
+        g_picker_t.start(g_picker_t.value(), 0.0f, 0.12f, 0, curve::easeOutCubic);
+        g_picker_scroll_drag = PickerScrollDrag{};
+        g_pack_drag = PackDrag{};
+    }
+}
 
 std::vector<Msg>& streamFor(const std::wstring& slug) {
     auto it = g_streams.find(slug);
@@ -157,9 +203,14 @@ bool hasMessageServerId(const std::wstring& slug, int64_t server_id);
 }
 
 void onWheel(int delta) {
-    // picker 开 + emoji tab 时，滚轮滚 emoji grid
-    if (g_picker_open && g_picker_tab == 0) {
-        g_emoji_scroll_y -= (float)delta * 0.5f;
+    if (g_picker_open && g_picker_rect.contains(g_mouse)) {
+        if (g_picker_tab == 0) {
+            float max_scroll = (std::max)(0.0f, g_emoji_total_h_last - g_emoji_grid_h_last);
+            g_emoji_scroll_y = clampf(g_emoji_scroll_y - (float)delta * 0.5f, 0.0f, max_scroll);
+        } else {
+            float max_scroll = (std::max)(0.0f, g_pack_total_h_last - g_pack_grid_h_last);
+            g_pack_scroll_y = clampf(g_pack_scroll_y - (float)delta * 0.5f, 0.0f, max_scroll);
+        }
         return;
     }
     auto& sc = g_scroll[g_active];
@@ -175,6 +226,9 @@ void onWheel(int delta) {
 
 void appendLocalMessage(Msg msg) {
     appendOrMergeMessage(g_active, std::move(msg));
+    auto& sc = g_scroll[g_active];
+    sc.offset_from_bottom = 0;
+    sc.target_offset = 0;
 }
 
 void retargetTopSeg() {
@@ -184,10 +238,10 @@ void retargetTopSeg() {
     float target_w = (idx == 0) ? 60.0f : 80.0f;     // 表情 60 / 表情包 80
     if (!g_top_seg_x.started) g_top_seg_x.start(target_x, target_x, 0.001f, 0, curve::easeOutQuint);
     else if (std::abs(g_top_seg_x.to - target_x) > 0.5f)
-        g_top_seg_x.start(g_top_seg_x.value(), target_x, 0.30f, 0, curve::easeOutQuint);
+        g_top_seg_x.start(g_top_seg_x.value(), target_x, 0.10f, 0, curve::easeOutCubic);
     if (!g_top_seg_w.started) g_top_seg_w.start(target_w, target_w, 0.001f, 0, curve::easeOutQuint);
     else if (std::abs(g_top_seg_w.to - target_w) > 0.5f)
-        g_top_seg_w.start(g_top_seg_w.value(), target_w, 0.30f, 0, curve::easeOutQuint);
+        g_top_seg_w.start(g_top_seg_w.value(), target_w, 0.10f, 0, curve::easeOutCubic);
 }
 
 void retargetPackTab() {
@@ -202,10 +256,24 @@ void retargetPackTab() {
     if (!found) return;
     if (!g_pack_tab_x.started) g_pack_tab_x.start(tr.x, tr.x, 0.001f, 0, curve::easeOutQuint);
     else if (std::abs(g_pack_tab_x.to - tr.x) > 0.5f)
-        g_pack_tab_x.start(g_pack_tab_x.value(), tr.x, 0.28f, 0, curve::easeOutQuint);
+        g_pack_tab_x.start(g_pack_tab_x.value(), tr.x, 0.10f, 0, curve::easeOutCubic);
     if (!g_pack_tab_w.started) g_pack_tab_w.start(tr.w, tr.w, 0.001f, 0, curve::easeOutQuint);
     else if (std::abs(g_pack_tab_w.to - tr.w) > 0.5f)
-        g_pack_tab_w.start(g_pack_tab_w.value(), tr.w, 0.28f, 0, curve::easeOutQuint);
+        g_pack_tab_w.start(g_pack_tab_w.value(), tr.w, 0.10f, 0, curve::easeOutCubic);
+}
+
+static void setPickerTabSmooth(int tab) {
+    if (tab < 0) tab = 0;
+    if (g_picker_tab == tab) return;
+    int old_tab = g_picker_tab;
+    g_picker_tab = tab;
+    g_picker_content_tab = tab;
+    if (tab > 0 && tab != old_tab) g_pack_scroll_y = 0.0f;
+    g_picker_scroll_drag = PickerScrollDrag{};
+    g_pack_drag = PackDrag{};
+    g_picker_content_t.start(0.0f, 1.0f, 0.16f, 0, curve::easeOutCubic);
+    retargetTopSeg();
+    if (g_picker_tab > 0) retargetPackTab();
 }
 
 namespace {
@@ -437,6 +505,26 @@ bool hasMessageServerId(const std::wstring& slug, int64_t server_id) {
     return false;
 }
 
+int64_t serverIdForClientMsgId(const std::wstring& slug, const std::string& client_msg_id) {
+    if (client_msg_id.empty()) return 0;
+    for (auto& m : streamFor(slug)) {
+        if (m.client_msg_id == client_msg_id && m.server_id > 0) return m.server_id;
+    }
+    return 0;
+}
+
+void resolveLocalReplyTargets(const std::wstring& slug) {
+    auto& msgs = streamFor(slug);
+    for (auto& m : msgs) {
+        if (m.reply_to_id > 0 || m.reply_client_msg_id.empty()) continue;
+        int64_t resolved = serverIdForClientMsgId(slug, m.reply_client_msg_id);
+        if (resolved > 0) {
+            m.reply_to_id = resolved;
+            m.waiting_reply_target = false;
+        }
+    }
+}
+
 bool isFocusWaitingForSlug(const std::wstring& slug) {
     return g_focus_target.server_id > 0
         && g_focus_target.slug == slug
@@ -470,6 +558,22 @@ void addMentionToComposer(const std::wstring& user_id, const std::wstring& label
     g_focus_composer = true;
 }
 
+void beginReplyToMessage(const std::wstring& slug, int64_t server_id,
+                         const std::string& client_msg_id,
+                         const std::wstring& author,
+                         const std::wstring& author_key,
+                         const std::wstring& preview) {
+    g_pending_reply = PendingReply{};
+    g_pending_reply.active = true;
+    g_pending_reply.id = server_id;
+    g_pending_reply.client_msg_id = client_msg_id;
+    g_pending_reply.slug = slug.empty() ? g_active : slug;
+    g_pending_reply.author = author.empty() ? L"message" : author;
+    g_pending_reply.author_key = author_key;
+    g_pending_reply.preview = preview.empty() ? L"[message]" : preview;
+    g_focus_composer = true;
+}
+
 bool appendOrMergeMessage(const std::wstring& slug, Msg msg) {
     normalizeMsgIdentity(msg);
     fillReplySnapshot(msg);
@@ -481,10 +585,12 @@ bool appendOrMergeMessage(const std::wstring& slug, Msg msg) {
         mergeServerIdentity(existing, msg);
         fillReplySnapshot(existing);
         rememberReplySnapshot(slug, existing);
+        resolveLocalReplyTargets(slug);
         return false;
     }
     s.push_back(std::move(msg));
     rememberReplySnapshot(slug, s.back());
+    resolveLocalReplyTargets(slug);
     if (was_at_bottom) {
         sc.offset_from_bottom = 0;
         sc.target_offset = 0;
@@ -746,6 +852,149 @@ static float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) 
     return m.width;
 }
 
+static float spaceW(D2DApp& app, IDWriteTextFormat* fmt) {
+    float w = measureW(app, L"x x", fmt) - measureW(app, L"xx", fmt);
+    return w > 0.5f ? w : 4.0f;
+}
+
+static float caretMeasureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
+    if (s.empty() || !fmt) return 0.0f;
+    size_t end = s.size();
+    while (end > 0 && s[end - 1] == L' ') --end;
+    float w = measureW(app, s.substr(0, end), fmt);
+    if (end < s.size()) w += (float)(s.size() - end) * spaceW(app, fmt);
+    return w;
+}
+
+static int cursorFromComposerPoint(float x) {
+    if (g_composer_caret_xs.empty()) return 0;
+    int best = 0;
+    float best_dist = std::numeric_limits<float>::max();
+    for (int i = 0; i < (int)g_composer_caret_xs.size(); ++i) {
+        float d = std::abs(g_composer_caret_xs[i] - x);
+        if (d < best_dist) {
+            best_dist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+struct WrappedText {
+    std::wstring text;
+    DWRITE_TEXT_METRICS metrics{};
+    int line_count = 0;
+    float text_h = 0.0f;
+    float max_line_w = 0.0f;
+};
+
+static float dwriteMaxLineWidth(D2DApp& app, const std::wstring& text,
+                                IDWriteTextFormat* fmt, float max_w, float max_h) {
+    if (!fmt || text.empty()) return 0.0f;
+    auto layout = app.texts().layout(fmt, text, max_w, max_h);
+    if (!layout) return 0.0f;
+    UINT32 hit_count = 0;
+    HRESULT hr = layout->HitTestTextRange(0, (UINT32)text.size(), 0, 0,
+                                          nullptr, 0, &hit_count);
+    if (hr != E_NOT_SUFFICIENT_BUFFER || hit_count == 0) return 0.0f;
+    std::vector<DWRITE_HIT_TEST_METRICS> hits(hit_count);
+    if (FAILED(layout->HitTestTextRange(0, (UINT32)text.size(), 0, 0,
+                                        hits.data(), hit_count, &hit_count))) {
+        return 0.0f;
+    }
+    float widest = 0.0f;
+    for (UINT32 i = 0; i < hit_count; ++i) {
+        widest = (std::max)(widest, hits[i].left + hits[i].width);
+    }
+    return widest;
+}
+
+static WrappedText wrapTextForWidth(D2DApp& app, std::wstring_view src,
+                                    IDWriteTextFormat* fmt, float max_w) {
+    WrappedText out;
+    if (!fmt || src.empty() || max_w <= 1.0f) return out;
+    float line_w = 0.0f;
+    size_t i = 0;
+    while (i < src.size()) {
+        wchar_t c = src[i];
+        if (c == L'\r') { ++i; continue; }
+        if (c == L'\n') {
+            out.text.push_back(c);
+            line_w = 0.0f;
+            ++i;
+            continue;
+        }
+        if (c == L' ' || c == L'\t') {
+            float cw = spaceW(app, fmt);
+            if (line_w <= 0.5f || line_w + cw > max_w) {
+                if (line_w > 0.5f) {
+                    out.text.push_back(L'\n');
+                    line_w = 0.0f;
+                }
+                ++i;
+                continue;
+            }
+            out.text.push_back(L' ');
+            line_w += cw;
+            ++i;
+            continue;
+        }
+
+        size_t start = i;
+        while (i < src.size()
+               && src[i] != L'\r'
+               && src[i] != L'\n'
+               && src[i] != L' '
+               && src[i] != L'\t') {
+            ++i;
+        }
+        std::wstring_view run = src.substr(start, i - start);
+        float run_w = measureW(app, run, fmt);
+        if (run_w <= max_w) {
+            if (line_w > 0.5f && line_w + run_w > max_w) {
+                out.text.push_back(L'\n');
+                line_w = 0.0f;
+            }
+            out.text.append(run.data(), run.size());
+            line_w += run_w;
+            continue;
+        }
+
+        if (line_w > 0.5f) {
+            out.text.push_back(L'\n');
+            line_w = 0.0f;
+        }
+        for (size_t j = 0; j < run.size(); ++j) {
+            wchar_t rc = run[j];
+            float cw = measureW(app, std::wstring_view(&rc, 1), fmt);
+            if (line_w > 0.5f && line_w + cw > max_w) {
+                out.text.push_back(L'\n');
+                line_w = 0.0f;
+            }
+            out.text.push_back(rc);
+            line_w += cw;
+        }
+    }
+    app.texts().measure(fmt, out.text, max_w, 8192.0f, &out.metrics);
+    out.line_count = out.text.empty() ? 0 : 1;
+    for (wchar_t c : out.text) {
+        if (c == L'\n') ++out.line_count;
+    }
+    out.text_h = (std::max)(out.metrics.height, out.line_count * 18.0f);
+    float dwrite_w = dwriteMaxLineWidth(app, out.text, fmt, max_w, 8192.0f);
+    size_t line_start = 0;
+    while (line_start <= out.text.size()) {
+        size_t line_end = out.text.find(L'\n', line_start);
+        if (line_end == std::wstring::npos) line_end = out.text.size();
+        std::wstring_view line(out.text.data() + line_start, line_end - line_start);
+        out.max_line_w = (std::max)(out.max_line_w, caretMeasureW(app, line, fmt));
+        if (line_end >= out.text.size()) break;
+        line_start = line_end + 1;
+    }
+    out.max_line_w = (std::max)(out.max_line_w, dwrite_w);
+    return out;
+}
+
 static std::wstring authorKeyFor(const Msg& m) {
     if (!m.author_key.empty()) return m.author_key;
     if (!m.peer_key.empty()) return m.peer_key;
@@ -760,8 +1009,8 @@ static bool sameGroupedAuthor(const Msg& prev, const Msg& cur) {
 }
 
 static bool messageHasReplyPreview(const Msg& m) {
-    return m.reply_to_id > 0
-        && (!m.reply_author.empty() || !m.reply_preview.empty());
+    return m.reply_to_id > 0 || !m.reply_client_msg_id.empty()
+        || !m.reply_author.empty() || !m.reply_preview.empty();
 }
 
 static std::wstring replyPreviewLine(const Msg& m) {
@@ -778,6 +1027,7 @@ static float replyPreviewHeight(const Msg& m) {
 
 void tick(float dt) {
     g_picker_t.tick(dt);
+    g_picker_content_t.tick(dt);
     g_top_seg_x.tick(dt); g_top_seg_w.tick(dt);
     g_pack_tab_x.tick(dt); g_pack_tab_w.tick(dt);
 }
@@ -951,17 +1201,17 @@ static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool pre
         return prev_same_author ? 0.0f : 22.0f + 6.0f;
     }
     float bub_max_w = (std::min)(maxw * 0.65f, 480.0f);
-    DWRITE_TEXT_METRICS tm{};
-    app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
-    float bub_h = (std::max)(tm.height + 18, 28.0f);
+    float text_w = bub_max_w - 28;
+    WrappedText layout = wrapTextForWidth(app, m.body, body_fmt, text_w);
+    float bub_h = (std::max)(layout.text_h + 18.0f, 30.0f);
     if (m.from == L"me" && m.send_state != MsgSendState::Sent) {
         auto* state_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
         std::wstring state_text = (m.send_state == MsgSendState::Pending)
-            ? L"sending..."
+            ? (m.error_text.empty() ? L"sending..." : m.error_text)
             : (m.error_text.empty() ? L"send failed" : m.error_text);
         DWRITE_TEXT_METRICS sm{};
-        app.texts().measure(state_fmt, state_text, bub_max_w - 28, 64, &sm);
-        bub_h += (std::max)(12.0f, sm.height + 2.0f);
+        app.texts().measure(state_fmt, state_text, text_w, 64, &sm);
+        bub_h += (std::max)(14.0f, sm.height + 4.0f);
     }
     if (!url.empty()) bub_h += 4;
     return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
@@ -1072,6 +1322,26 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
     float reply_h = replyPreviewHeight(m);
     float reply_y = y + (prev_same_author ? 0 : 22);
     float bub_y = reply_y + reply_h;
+    if (reply_h > 0.0f) {
+        float ref_w = (std::min)(maxw * 0.58f, 420.0f);
+        float ref_x = me ? (avatar_x - gap - ref_w) : (avatar_x + ar * 2 + gap);
+        bool clickable = m.reply_to_id > 0;
+        prim::fillRR(ctx, ref_x, reply_y + 2, ref_w, 22, 7.0f,
+                     br.solidA(me ? 0xFFFFFF : pal.primary, me ? 0.12f : 0.10f));
+        prim::fillRR(ctx, ref_x + 8, reply_y + 6, 3, 14, 1.5f,
+                     br.solidA(me ? 0xFFFFFF : pal.primary, clickable ? 0.80f : 0.42f));
+        auto* ref_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+        prim::drawText_(ctx, replyPreviewLine(m), ref_fmt,
+                        ref_x + 16, reply_y + 5, ref_w - 24, 14,
+                        br.solidA(me ? 0xFFFFFF : pal.text_muted, clickable ? 0.92f : 0.68f));
+        if (clickable) {
+            int64_t target_id = m.reply_to_id;
+            std::wstring target_slug = g_active;
+            hit({ ref_x, reply_y + 2, ref_w, 22 }, [target_slug, target_id]() {
+                focusMessage(target_slug, target_id);
+            }, true);
+        }
+    }
     if (!prev_same_author) {
         // author + time 在气泡上方那一行
         // me：和气泡一样靠右；别人：和气泡靠左
@@ -1322,24 +1592,26 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
     }
 
     float bub_max_w = (std::min)(maxw * 0.65f, 480.0f);
-    DWRITE_TEXT_METRICS tm{};
-    app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
+    float text_w = bub_max_w - 28.0f;
+    WrappedText body_layout = wrapTextForWidth(app, m.body, body_fmt, text_w);
     auto* state_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
     bool show_state = me && m.send_state != MsgSendState::Sent;
     std::wstring state_text;
     if (show_state) {
         state_text = (m.send_state == MsgSendState::Pending)
-            ? L"sending..."
+            ? (m.error_text.empty() ? L"sending..." : m.error_text)
             : (m.error_text.empty() ? L"send failed" : m.error_text);
     }
     float state_h = 0.0f;
     if (show_state) {
         DWRITE_TEXT_METRICS sm{};
-        app.texts().measure(state_fmt, state_text, bub_max_w - 28, 64, &sm);
-        state_h = (std::max)(12.0f, sm.height + 2.0f);
+        app.texts().measure(state_fmt, state_text, text_w, 64, &sm);
+        state_h = (std::max)(14.0f, sm.height + 4.0f);
     }
-    float bub_w = tm.width + 28;
-    float bub_h = (std::max)(tm.height + 18, 28.0f) + state_h;
+    float content_w = (std::max)((float)std::ceil(body_layout.max_line_w) + 8.0f, 16.0f);
+    float bub_w = (std::max)(44.0f, (std::min)(content_w + 28.0f, bub_max_w));
+    if (body_layout.max_line_w >= text_w - 1.0f) bub_w = bub_max_w;
+    float bub_h = (std::max)(body_layout.text_h + 18.0f, 30.0f) + state_h;
     float bub_x = bub_x_for(bub_w);
 
     uint32_t bub_bg = me
@@ -1348,12 +1620,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
     uint32_t bub_fg = me ? 0xFFFFFFFF : pal.text;
     prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
                  m.send_state == MsgSendState::Pending ? br.solidA(bub_bg, 0.72f) : br.solid(bub_bg));
-    prim::drawText_(ctx, m.body, body_fmt,
-                    bub_x + 14, bub_y + 8, bub_w - 28, bub_h - 16 - state_h,
+    prim::drawText_(ctx, body_layout.text, body_fmt,
+                    bub_x + 12, bub_y + 8, bub_w - 24, body_layout.text_h + 4.0f,
                     br.solid(bub_fg));
     if (show_state) {
         prim::drawText_(ctx, state_text, state_fmt,
-                        bub_x + 14, bub_y + bub_h - state_h - 2, bub_w - 28, state_h,
+                        bub_x + 12, bub_y + bub_h - state_h - 2, bub_w - 24, state_h,
                         br.solidA(0xFFFFFFFF, m.send_state == MsgSendState::Failed ? 0.95f : 0.72f),
                         DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
@@ -1444,12 +1716,20 @@ void applySendResult() {
                     it->send_state = MsgSendState::Sent;
                     it->error_text.clear();
                     rememberReplySnapshot(la.slug, *it);
+                    resolveLocalReplyTargets(la.slug);
                 } else {
                     it->send_state = MsgSendState::Failed;
                     it->error_text = la.error_text.empty() ? L"发送失败" : la.error_text;
                 }
                 break;
             }
+        }
+        for (auto& msg : msgs) {
+            if (!msg.waiting_reply_target || msg.reply_to_id <= 0) continue;
+            msg.waiting_reply_target = false;
+            msg.error_text.clear();
+            sendChatMessage(GetActiveWindow(), msg.body, "text",
+                            msg.client_msg_id, msg.reply_to_id);
         }
     }
 }
@@ -1582,8 +1862,15 @@ void onWsMessageDeleted(int64_t server_id) {
 
 // 兼容老调用名
 static void sendTextMessage(HWND hwnd, const std::wstring& text) {
-    int64_t reply_to_id = (g_pending_reply.active && g_pending_reply.slug == g_active)
-        ? g_pending_reply.id : 0;
+    int64_t reply_to_id = 0;
+    std::string reply_client_msg_id;
+    if (g_pending_reply.active && g_pending_reply.slug == g_active) {
+        reply_to_id = g_pending_reply.id;
+        reply_client_msg_id = g_pending_reply.client_msg_id;
+        if (reply_to_id <= 0) {
+            reply_to_id = serverIdForClientMsgId(g_active, reply_client_msg_id);
+        }
+    }
     Msg m;
     m.kind = MsgKind::Text;
     m.from = L"me";
@@ -1594,14 +1881,25 @@ static void sendTextMessage(HWND hwnd, const std::wstring& text) {
     m.time = localTimeText();
     m.client_msg_id = makeClientMsgId();
     m.reply_to_id = reply_to_id;
-    if (reply_to_id > 0) {
+    m.reply_client_msg_id = reply_client_msg_id;
+    if (g_pending_reply.active && g_pending_reply.slug == g_active) {
         m.reply_author = g_pending_reply.author;
         m.reply_preview = g_pending_reply.preview;
     }
     m.send_state = MsgSendState::Pending;
     std::string client_msg_id = m.client_msg_id;
+    bool wait_for_reply_target = g_pending_reply.active
+        && g_pending_reply.slug == g_active
+        && reply_to_id <= 0
+        && !reply_client_msg_id.empty();
+    m.waiting_reply_target = wait_for_reply_target;
+    if (wait_for_reply_target) {
+        m.error_text = L"waiting reply target...";
+    }
     appendLocalMessage(std::move(m));
-    sendChatMessage(hwnd, text, "text", client_msg_id, reply_to_id);
+    if (!wait_for_reply_target) {
+        sendChatMessage(hwnd, text, "text", client_msg_id, reply_to_id);
+    }
     g_pending_reply = PendingReply{};
     g_pending_mentions.clear();
 }
@@ -1615,8 +1913,8 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawLine(ctx, ax, ay, ax + aw, ay,
                    br.solid(pal.divider), 1.0f);
 
-    float reply_h = (g_pending_reply.active && g_pending_reply.id > 0) ? 22.0f : 0.0f;
-    if (g_pending_reply.active && g_pending_reply.id > 0) {
+    float reply_h = g_pending_reply.active ? 22.0f : 0.0f;
+    if (g_pending_reply.active) {
         auto* reply_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f),
                                              DWRITE_FONT_WEIGHT_BOLD);
         auto* reply_body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
@@ -1650,9 +1948,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     icons::drawIcon(app, icons::Name::Smile, ix + 6, iy + 6, 18,
                     ehov ? pal.text : pal.text_muted);
     hit(emoji_btn, [](){
-        g_picker_open = !g_picker_open;
-        if (g_picker_open) g_picker_t.start(0, 1, 0.22f, 0, curve::easeOutBack);
-        else               g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+        setPickerOpen(!g_picker_open);
     }, true);
 
     // textarea
@@ -1675,31 +1971,46 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* tx_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
     const float pad_l = 16.0f;
     const float text_y = fy + (fh - 14.0f) * 0.5f;
+    const float text_w = fw - pad_l * 2;
+    float caret_w = g_composer.text.empty()
+        ? 0.0f
+        : caretMeasureW(app, g_composer.displaySlice(0, g_composer.cursor), tx_fmt);
+    float text_scroll_x = (std::max)(0.0f, caret_w - text_w + 6.0f);
+    g_composer_caret_xs.clear();
+    g_composer_caret_xs.reserve(g_composer.text.size() + 1);
+    for (int i = 0; i <= (int)g_composer.text.size(); ++i) {
+        g_composer_caret_xs.push_back(
+            fx + pad_l + caretMeasureW(app, g_composer.displaySlice(0, i), tx_fmt) - text_scroll_x);
+    }
 
     if (g_composer.text.empty()) {
         prim::drawText_(ctx, L"写点什么…", tx_fmt,
-                        fx + pad_l, text_y, fw - pad_l * 2, 18,
+                        fx + pad_l, text_y, text_w, 18,
                         br.solid(pal.text_muted));
     } else {
+        ctx->PushAxisAlignedClip(D2D1::RectF(fx + pad_l, fy + 4,
+                                             fx + pad_l + text_w, fy + fh - 4),
+                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         // 选区
         if (g_focus_composer && g_composer.hasSelection()) {
-            float pre_w = measureW(app,
+            float pre_w = caretMeasureW(app,
                 g_composer.displaySlice(0, g_composer.selStart()), tx_fmt);
-            float in_w = measureW(app,
+            float in_w = caretMeasureW(app,
                 g_composer.displaySlice(g_composer.selStart(), g_composer.selEnd()), tx_fmt);
             prim::fillRect(ctx,
-                           fx + pad_l + pre_w, text_y - 1, in_w, 18,
+                           fx + pad_l + pre_w - text_scroll_x, text_y - 1, in_w, 18,
                            br.solidA(pal.primary, 0.38f));
         }
         prim::drawText_(ctx, g_composer.text, tx_fmt,
-                        fx + pad_l, text_y, fw - pad_l * 2, 18,
+                        fx + pad_l - text_scroll_x, text_y,
+                        (std::max)(text_w, caretMeasureW(app, g_composer.text, tx_fmt) + 4.0f), 18,
                         br.solid(pal.text));
+        ctx->PopAxisAlignedClip();
     }
 
     // caret
     if (g_focus_composer && !g_composer.hasSelection()) {
-        float pre_w = measureW(app,
-            g_composer.displaySlice(0, g_composer.cursor), tx_fmt);
+        float pre_w = caret_w - text_scroll_x;
         int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
             prim::drawLine(ctx,
@@ -1721,7 +2032,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
                             : (sh_ ? pal.primary_hover : pal.primary);
     prim::fillCircle(ctx, sx + send_w * 0.5f, sy + send_w * 0.5f, send_w * 0.5f,
                      br.solid(sbg));
-    icons::drawIcon(app, icons::Name::Send, sx + 10, sy + 10, 18, 0xFFFFFFFF);
+    icons::drawIcon(app, icons::Name::ArrowUp, sx + 10, sy + 10, 18, 0xFFFFFFFF, 2.1f);
     if (can_send) {
         hit(send_btn, []() {
             sendTextMessage(GetActiveWindow(), g_composer.text);
@@ -1741,6 +2052,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::fillRect(ctx, ax, ay, aw, ah, br.solid(pal.bg));
     g_avatar_hits.clear();   // 帧首清，paintBubble 会填充
     g_msg_hits.clear();      // 帧首清，paintBubble 注册消息体 hit
+    g_msg_row_hits.clear();
 
     // header
     float hdr_h = 56;
@@ -1783,6 +2095,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     float comp_h = 64;
     float stream_y = ay + hdr_h;
     float stream_h = ah - hdr_h - comp_h;
+    g_chat_stream_rect = { ax, stream_y, aw, stream_h };
 
     // 用 PushAxisAlignedClip 保证消息溢出不画到 composer 上
     ctx->PushAxisAlignedClip(D2D1::RectF(ax, stream_y, ax + aw, stream_y + stream_h),
@@ -1821,7 +2134,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         rememberReplySnapshot(g_active, m);
     }
     std::vector<float> heights(msgs.size(), 0);
-    float total = 0;
+    float total = kStreamTopPad + kStreamBottomPad;
     for (size_t i = 0; i < msgs.size(); ++i) {
         const Msg& m = msgs[i];
         const Msg* prev = (i > 0) ? &msgs[i - 1] : nullptr;
@@ -1908,12 +2221,12 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     float my_top;
     if (total <= stream_h) {
         // 消息没把 viewport 填满 — 顶端开始，不滚
-        my_top = stream_y + 12;
+        my_top = stream_y + kStreamTopPad;
     } else {
         // total > viewport：offset_from_bottom 表示从底部往上滚了多少 px
         // offset = 0 → 锁底（最新消息在底部）→ my_top = stream_bottom - total
         // offset = max_off → 顶部（最早消息在顶部）→ my_top = stream_y
-        my_top = stream_y + stream_h - total + sc.offset_from_bottom + 12;
+        my_top = stream_y + stream_h - total + sc.offset_from_bottom + kStreamTopPad;
     }
 
     // ----- Pass 2：实际画 + 注册 hit -----
@@ -1936,6 +2249,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
             prim::fillRR(ctx, ax + 10, my - 2, aw - 20, heights[i], 8.0f,
                          br.solidA(pal.primary, alpha));
         }
+        g_msg_row_hits.push_back({ { ax, my, aw, heights[i] }, (int)i });
         paintBubble(app, m, (int)i, ax + 16, my, maxw, prev_same);
         my += heights[i];
     }
@@ -2027,12 +2341,16 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     auto* ctx = app.ctx();
     auto& br = app.brushes();
 
-    float pw = 380, ph = 340;          // 加宽给右上 3 个按钮腾位
+    float pw = 330, ph = 340;
     float px = anchor_x;
-    float py = anchor_y - ph - 8;
+    float py = anchor_y - ph - 8 + (1.0f - t) * 14.0f;
     g_picker_origin_x = px; g_picker_origin_y = py;
+    g_picker_rect = { px, py, pw, ph };
+    g_picker_content_rect = { px + 14, py + 50, pw - 28, ph - 62 };
+    hit(g_picker_rect, [](){}, false);
 
-    prim::drawShadow(ctx, br, px, py, pw, ph, 12.0f, pal.shadow_card_hover, t, 4.0f, 4);
+    prim::drawShadow(ctx, br, px, py, pw, ph, 12.0f,
+                     pal.shadow_card_hover, 0.28f * t, 2.0f, 2);
     prim::fillRR(ctx, px, py, pw, ph, 12.0f, br.solidA(pal.card, t));
     prim::strokeRR(ctx, px, py, pw, ph, 12.0f, br.solidA(pal.divider, t));
 
@@ -2056,17 +2374,14 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                     br.solidA(em_act ? pal.primary : pal.text_muted, t),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
     hit(tab_em, [](){
-        g_picker_tab = 0;
-        retargetTopSeg();
+        setPickerTabSmooth(0);
     }, true);
     prim::drawText_(ctx, L"表情包", tab_fmt,
                     tab_pk.x, tab_pk.y + 5, tab_pk.w, 18,
                     br.solidA(g_picker_tab > 0 ? pal.primary : pal.text_muted, t),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
     hit(tab_pk, [](){
-        if (g_picker_tab == 0) g_picker_tab = 1;
-        retargetTopSeg();
-        retargetPackTab();
+        setPickerTabSmooth(g_picker_tab == 0 ? 1 : g_picker_tab);
     }, true);
 
     // 决定当前 pack 状态（用于按钮 enable / 操作目标）
@@ -2100,14 +2415,14 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                         DWRITE_TEXT_ALIGNMENT_CENTER);
         hit(r, std::move(on_click), true);
     };
-    float bw_new = 56, bw_imp = 56, bw_exp = 56;
-    float bgap = 6;
+    float bw_new = 48, bw_imp = 48, bw_exp = 48;
+    float bgap = 5;
     float right_btn_y = seg_y;
     float bx_new = px + pw - 14 - bw_new;
     float bx_exp = bx_new - bgap - bw_exp;
     float bx_imp = bx_exp - bgap - bw_imp;
     // [↥ 导入]
-    draw_btn(bx_imp, right_btn_y, bw_imp, 26, L"↥ 导入", pal.text, false, [cur_pid](){
+    draw_btn(bx_imp, right_btn_y, bw_imp, 26, L"导入", pal.text, false, [cur_pid](){
         if (cur_pid.empty()) {
             PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
         } else {
@@ -2117,7 +2432,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         }
     });
     // [⇣ 导出]
-    draw_btn(bx_exp, right_btn_y, bw_exp, 26, L"⇣ 导出", pal.text, false, [cur_pid](){
+    draw_btn(bx_exp, right_btn_y, bw_exp, 26, L"导出", pal.text, false, [cur_pid](){
         if (cur_pid.empty()) {
             PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
         } else {
@@ -2125,18 +2440,25 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         }
     });
     // [+ 新建]
-    draw_btn(bx_new, right_btn_y, bw_new, 26, L"+ 新建", pal.primary, true, [](){
-        g_picker_open = false;
-        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    draw_btn(bx_new, right_btn_y, bw_new, 26, L"新建", pal.primary, true, [](){
+        setPickerOpen(false);
         PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
     });
+
+    float content_t = g_picker_content_t.started ? g_picker_content_t.value() : 1.0f;
+    float open_content_t = clampf((t - 0.22f) / 0.78f, 0.0f, 1.0f);
+    float ct = t * content_t * open_content_t;
+    float content_y = (1.0f - content_t) * 8.0f;
 
     if (g_picker_tab == 0) {
         // ===== 8 列 emoji grid + 垂直滚动 =====
         int cols = 8;
         int total_n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
-        float cell = 38.0f;
-        float grid_x = px + 14, grid_y = py + 50;
+        if ((int)g_emoji_hover_t.size() != total_n) {
+            g_emoji_hover_t.assign(total_n, 0.0f);
+        }
+        float cell = 37.0f;
+        float grid_x = px + 14, grid_y = py + 50 + content_y;
         // viewport：emoji 区高度 = picker 底部 - grid_y - 12 边距
         float view_h = (py + ph - 12) - grid_y;
         int rows_total = (total_n + cols - 1) / cols;
@@ -2145,14 +2467,23 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         g_emoji_total_h_last = total_h;
         // 钳 scroll
         float max_scroll = (std::max)(0.0f, total_h - view_h);
-        if (g_emoji_scroll_y < 0) g_emoji_scroll_y = 0;
-        if (g_emoji_scroll_y > max_scroll) g_emoji_scroll_y = max_scroll;
+        if (g_picker_scroll_drag.active && g_picker_scroll_drag.mode == 0 && g_mouse_pressed) {
+            float track_move = (std::max)(1.0f, g_picker_scroll_drag.track_h - g_picker_scroll_drag.thumb_h);
+            float dy = (float)g_mouse.y - g_picker_scroll_drag.anchor_mouse_y;
+            g_emoji_scroll_y = g_picker_scroll_drag.anchor_scroll_y
+                + (dy / track_move) * g_picker_scroll_drag.max_scroll;
+        } else if (!g_mouse_pressed) {
+            g_picker_scroll_drag.active = false;
+        }
+        g_emoji_scroll_y = clampf(g_emoji_scroll_y, 0.0f, max_scroll);
 
         // clip 到 emoji 区
         ctx->PushAxisAlignedClip(D2D1::RectF(grid_x, grid_y, grid_x + cols * cell, grid_y + view_h),
                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         auto* em_fmt = app.texts().format(L"Segoe UI Emoji", ptToDip(16.0f));
-        for (int i = 0; i < total_n; ++i) {
+        int first_row = (std::max)(0, (int)(g_emoji_scroll_y / cell) - 1);
+        int last_row = (std::min)(rows_total - 1, (int)((g_emoji_scroll_y + view_h) / cell) + 1);
+        for (int i = first_row * cols; i < total_n && i < (last_row + 1) * cols; ++i) {
             int row = i / cols, col = i % cols;
             float ex = grid_x + col * cell;
             float ey = grid_y + row * cell - g_emoji_scroll_y;
@@ -2161,13 +2492,22 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             if (ey > grid_y + view_h) break;
             LayoutRect cell_r{ ex, ey, cell, cell };
             bool hov = cell_r.contains(g_mouse);
-            if (hov) {
-                prim::fillRR(ctx, ex, ey, cell, cell, 6.0f,
-                             br.solidA(pal.text, t * 0.06f));
+            float& ht = g_emoji_hover_t[i];
+            ht += ((hov ? 1.0f : 0.0f) - ht) * 0.24f;
+            if (ht > 0.01f) {
+                float inset = 3.0f - ht;
+                prim::fillRR(ctx, ex + inset, ey + inset,
+                             cell - inset * 2.0f, cell - inset * 2.0f,
+                             7.0f, br.solidA(pal.primary, ct * (0.06f + 0.10f * ht)));
+                prim::strokeRR(ctx, ex + inset, ey + inset,
+                               cell - inset * 2.0f, cell - inset * 2.0f,
+                               7.0f, br.solidA(pal.primary, ct * 0.20f * ht), 1.0f);
             }
+            float lift = ht * 2.0f;
+            float grow = ht * 2.0f;
             prim::drawText_(ctx, kEmoji[i], em_fmt,
-                            ex, ey + 4, cell, cell - 4,
-                            br.solidA(pal.text, t),
+                            ex - grow * 0.5f, ey + 4 - lift, cell + grow, cell - 4 + grow,
+                            br.solidA(pal.text, ct),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
             const wchar_t* e = kEmoji[i];
             hit(cell_r, [e](){
@@ -2181,18 +2521,31 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         // 滚动条
         if (max_scroll > 0) {
             float bar_x = grid_x + cols * cell + 2;
-            float bar_w = 4;
-            float bar_top = grid_y + (g_emoji_scroll_y / total_h) * view_h;
-            float bar_h_p = (view_h / total_h) * view_h;
+            float bar_w = 6;
+            float bar_h_p = (std::max)(28.0f, (view_h / total_h) * view_h);
+            float bar_top = grid_y + (view_h - bar_h_p) * (g_emoji_scroll_y / max_scroll);
+            LayoutRect thumb{ bar_x - 4, bar_top, bar_w + 8, bar_h_p };
+            bool bar_hov = thumb.contains(g_mouse) || g_picker_scroll_drag.active;
             prim::fillRR(ctx, bar_x, grid_y, bar_w, view_h, 2.0f,
-                         br.solidA(pal.text, t * 0.05f));
+                         br.solidA(pal.text, ct * 0.05f));
             prim::fillRR(ctx, bar_x, bar_top, bar_w, bar_h_p, 2.0f,
-                         br.solidA(pal.text, t * 0.30f));
+                         br.solidA(pal.text, ct * (bar_hov ? 0.50f : 0.30f)));
+            float anchor_y = (float)g_mouse.y;
+            float anchor_scroll = g_emoji_scroll_y;
+            hit(thumb, [anchor_y, anchor_scroll, view_h, bar_h_p, max_scroll](){
+                g_picker_scroll_drag.active = true;
+                g_picker_scroll_drag.mode = 0;
+                g_picker_scroll_drag.anchor_mouse_y = anchor_y;
+                g_picker_scroll_drag.anchor_scroll_y = anchor_scroll;
+                g_picker_scroll_drag.track_h = view_h;
+                g_picker_scroll_drag.thumb_h = bar_h_p;
+                g_picker_scroll_drag.max_scroll = max_scroll;
+            }, true);
         }
     } else {
         // ===== 表情包面板 =====
         // pack 顶部 tab 行 — 横向滑动 + 拖拽排序
-        float tab_y = py + 50;
+        float tab_y = py + 50 + content_y;
         g_pack_tab_rects.clear();
         // pre-layout: 算每个 tab 的宽度
         std::vector<float> ws(packs.size(), 0);
@@ -2215,6 +2568,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         for (size_t i = 0; i < packs.size(); ++i) {
             g_pack_tab_rects.push_back({ {xs[i], tab_y, ws[i], 24}, (int)i });
         }
+        retargetPackTab();
         // ---- 拖拽检测 + 实时重排 ----
         if (g_pack_drag.from >= 0 && g_mouse_pressed) {
             float dx = (float)g_mouse.x - g_pack_drag.start_x;
@@ -2252,7 +2606,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         if (g_pack_tab_w.value() > 0.5f) {
             prim::fillRR(ctx, g_pack_tab_x.value(), tab_y,
                          g_pack_tab_w.value(), 24, 4.0f,
-                         br.solidA(pal.primary, t * 0.18f));
+                         br.solidA(pal.primary, ct * 0.18f));
         }
         // 画每个 tab
         for (size_t i = 0; i < packs.size(); ++i) {
@@ -2262,14 +2616,14 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 draw_x = g_mouse.x - g_pack_drag.anchor_dx;
                 // 不画背景 — 用纯文字 + 半透明高亮
                 prim::fillRR(ctx, draw_x, tab_y, ws[i], 24, 4.0f,
-                             br.solidA(pal.primary, t * 0.30f));
+                             br.solidA(pal.primary, ct * 0.30f));
             }
             wchar_t buf[40]; swprintf_s(buf, L"%.10ls", packs[i].name.c_str());
             bool pa = ((int)i == active_pack);
             uint32_t tcol = pa ? pal.primary : pal.text_muted;
             prim::drawText_(ctx, buf, hint_fmt,
                             draw_x + 4, tab_y + 5, ws[i] - 8, 16,
-                            br.solidA(tcol, t),
+                            br.solidA(tcol, ct),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
             int idx = (int)i;
             // 注意 hit 的是 tab 实际位置（拖动时这个 hit 跟着移）— 让点击到拖到位置上
@@ -2278,75 +2632,102 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             hit(r, [idx, anchor_dx](){
                 // 如果不是拖动结束的 click（左键单击）就切 active
                 if (g_pack_drag.from == idx && g_pack_drag.moved) return;
-                g_picker_tab = 1 + idx;
-                retargetPackTab();
+                setPickerTabSmooth(1 + idx);
             }, true);
         }
 
         // ===== 当前 pack 内容 =====
-        if (active_pack < 0 || active_pack >= (int)packs.size()) return;
-        const auto& cur_pack = packs[active_pack];
-        // 创建人小标
-        if (!cur_pack.creator_name.empty() || !cur_pack.is_owner) {
-            std::wstring tip;
-            if (cur_pack.is_owner) tip = L"我创建的";
-            else if (!cur_pack.creator_name.empty()) tip = L"by " + cur_pack.creator_name;
-            else tip = L"已安装";
-            prim::drawText_(ctx, tip, hint_fmt,
-                            px + 14, py + 78, pw - 28, 14,
-                            br.solidA(pal.text_faint, t));
-        }
-        if (cur_pack.stickers.empty()) {
-            prim::drawText_(ctx,
-                cur_pack.name == L"系统 emoji"
-                    ? L"切到 表情 标签" : L"还没贴纸 — 拖文件 / 上传 / 安装",
-                hint_fmt,
-                px + 14, py + 130, pw - 28, 18,
-                br.solidA(pal.text_muted, t),
-                DWRITE_TEXT_ALIGNMENT_CENTER);
+        bool has_active_pack = active_pack >= 0 && active_pack < (int)packs.size();
+        if (!has_active_pack) {
+            g_pack_grid_h_last = 1.0f;
+            g_pack_total_h_last = 0.0f;
+            prim::drawText_(ctx, L"还没有表情包",
+                            hint_fmt, px + 14, py + 130, pw - 28, 18,
+                            br.solidA(pal.text_muted, ct),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
         } else {
-            int cols = 5;
-            float cell = 60.0f;
-            float gx = px + 14, gy = py + 96;
-            for (size_t i = 0; i < cur_pack.stickers.size(); ++i) {
-                int row = (int)(i / cols), col = (int)(i % cols);
-                float ex = gx + col * (cell + 4), ey = gy + row * (cell + 4);
-                if (ey + cell > py + ph - 44) break;
-                LayoutRect sr{ ex, ey, cell, cell };
-                bool sh_ = sr.contains(g_mouse);
-                if (sh_) {
-                    prim::fillRR(ctx, ex, ey, cell, cell, 6,
-                                 br.solidA(pal.primary, t * 0.12f));
+            const auto& cur_pack = packs[active_pack];
+            // 创建人小标
+            if (!cur_pack.creator_name.empty() || !cur_pack.is_owner) {
+                std::wstring tip;
+                if (cur_pack.is_owner) tip = L"我创建的";
+                else if (!cur_pack.creator_name.empty()) tip = L"by " + cur_pack.creator_name;
+                else tip = L"已安装";
+                prim::drawText_(ctx, tip, hint_fmt,
+                                px + 14, py + 78, pw - 28, 14,
+                                br.solidA(pal.text_faint, ct));
+            }
+            if (cur_pack.stickers.empty()) {
+                g_pack_grid_h_last = 1.0f;
+                g_pack_total_h_last = 0.0f;
+                prim::drawText_(ctx,
+                    cur_pack.name == L"系统 emoji"
+                        ? L"切到 表情 标签" : L"还没贴纸 — 拖文件 / 上传 / 安装",
+                    hint_fmt,
+                    px + 14, py + 130, pw - 28, 18,
+                    br.solidA(pal.text_muted, ct),
+                    DWRITE_TEXT_ALIGNMENT_CENTER);
+            } else {
+                int cols = 5;
+                float cell = 56.0f;
+                float gap = 5.0f;
+                float gx = px + 14, gy = py + 96 + content_y;
+                float view_h = (py + ph - 44.0f) - gy;
+                int rows_total = ((int)cur_pack.stickers.size() + cols - 1) / cols;
+                float row_h = cell + gap;
+                float total_h = rows_total * row_h;
+                g_pack_grid_h_last = view_h;
+                g_pack_total_h_last = total_h;
+                float max_scroll = (std::max)(0.0f, total_h - view_h);
+                if (g_picker_scroll_drag.active && g_picker_scroll_drag.mode == 1 && g_mouse_pressed) {
+                    float track_move = (std::max)(1.0f, g_picker_scroll_drag.track_h - g_picker_scroll_drag.thumb_h);
+                    float dy = (float)g_mouse.y - g_picker_scroll_drag.anchor_mouse_y;
+                    g_pack_scroll_y = g_picker_scroll_drag.anchor_scroll_y
+                        + (dy / track_move) * g_picker_scroll_drag.max_scroll;
+                } else if (!g_mouse_pressed) {
+                    g_picker_scroll_drag.active = false;
                 }
-                ID2D1Bitmap* sticker_bmp = nullptr;
-                std::wstring sp = cur_pack.stickers[i];
-                auto sd = sp.find_last_of(L'.');
-                bool is_gif = (sd != std::wstring::npos
-                               && (sp.substr(sd) == L".gif"
-                                   || sp.substr(sd) == L".GIF"));
-                if (is_gif) {
-                    auto* sa = app.gifs().fromFile(sp);
-                    if (sa) sticker_bmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
-                }
-                if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp);
-                if (sticker_bmp) {
-                    prim::pushLayerRR(ctx, app.factory(),
-                                      ex + 4, ey + 4, cell - 8, cell - 8, 8.0f);
-                    ctx->DrawBitmap(sticker_bmp,
-                        D2D1::RectF(ex + 4, ey + 4, ex + cell - 4, ey + cell - 4),
-                        t, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                    prim::popLayer(ctx);
-                }
-                std::wstring path = cur_pack.stickers[i];
-                bool can_delete = cur_pack.is_owner;
-                if (sh_ && can_delete) {
-                    LayoutRect xb{ ex + cell - 18, ey + 2, 16, 16 };
-                    bool xh = xb.contains(g_mouse);
-                    prim::fillCircle(ctx, xb.x + 8, xb.y + 8, 8,
-                                     br.solidA(0x000000, t * (xh ? 0.85f : 0.65f)));
-                    icons::drawIcon(app, icons::Name::X, xb.x + 2, xb.y + 2, 12,
-                                    fadeArgb(0xFFFFFFFF, t));
-                    hit(sr, [path](){
+                g_pack_scroll_y = clampf(g_pack_scroll_y, 0.0f, max_scroll);
+
+                ctx->PushAxisAlignedClip(D2D1::RectF(gx, gy, gx + cols * (cell + gap), gy + view_h),
+                                         D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                int first_row = (std::max)(0, (int)(g_pack_scroll_y / row_h) - 1);
+                int last_row = (std::min)(rows_total - 1, (int)((g_pack_scroll_y + view_h) / row_h) + 1);
+                bool decode_bitmaps = ct > 0.45f;
+                for (size_t i = (size_t)(first_row * cols);
+                     i < cur_pack.stickers.size() && i < (size_t)((last_row + 1) * cols); ++i) {
+                    int row = (int)(i / cols), col = (int)(i % cols);
+                    float ex = gx + col * (cell + gap), ey = gy + row * row_h - g_pack_scroll_y;
+                    if (ey + cell < gy) continue;
+                    if (ey > gy + view_h) break;
+                    LayoutRect sr{ ex, ey, cell, cell };
+                    bool sh_ = sr.contains(g_mouse);
+                    prim::fillRR(ctx, ex, ey, cell, cell, 7.0f,
+                                 br.solidA(pal.primary, ct * (sh_ ? 0.12f : 0.035f)));
+                    ID2D1Bitmap* sticker_bmp = nullptr;
+                    std::wstring sp = cur_pack.stickers[i];
+                    auto sd = sp.find_last_of(L'.');
+                    bool is_gif = (sd != std::wstring::npos
+                                   && (sp.substr(sd) == L".gif"
+                                       || sp.substr(sd) == L".GIF"));
+                    if (decode_bitmaps) {
+                        if (is_gif) {
+                            auto* sa = app.gifs().fromFile(sp);
+                            if (sa) sticker_bmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
+                        }
+                        if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp);
+                    }
+                    if (sticker_bmp) {
+                        prim::pushLayerRR(ctx, app.factory(),
+                                          ex + 4, ey + 4, cell - 8, cell - 8, 8.0f);
+                        ctx->DrawBitmap(sticker_bmp,
+                            D2D1::RectF(ex + 4, ey + 4, ex + cell - 4, ey + cell - 4),
+                            ct, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                        prim::popLayer(ctx);
+                    }
+                    std::wstring path = cur_pack.stickers[i];
+                    bool can_delete = cur_pack.is_owner;
+                    auto send_sticker = [path]() {
                         Msg m;
                         auto sd2 = path.find_last_of(L'.');
                         bool is_g = (sd2 != std::wstring::npos
@@ -2365,40 +2746,49 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                         appendLocalMessage(std::move(m));
                         sendChatMessage(GetActiveWindow(), path,
                                         is_g ? "gif" : "sticker", client_msg_id);
-                        g_picker_open = false;
-                        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
-                    }, true);
-                    hit(xb, [path](){
-                        auto* payload = new std::wstring(path);
-                        PostMessageW(GetActiveWindow(), WM_APP + 40,
-                                     (WPARAM)payload, 0);
-                    }, true);
-                } else {
-                    hit(sr, [path](){
-                        Msg m;
-                        auto sd2 = path.find_last_of(L'.');
-                        bool is_g = (sd2 != std::wstring::npos
-                                     && (path.substr(sd2) == L".gif"
-                                         || path.substr(sd2) == L".GIF"));
-                        m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
-                        m.from = L"me";
-                        m.author = g_user.nickname;
-                        m.author_key = selfAuthorKey();
-                        m.status = L"online";
-                        m.body = path;
-                        m.time = localTimeText();
-                        m.client_msg_id = makeClientMsgId();
-                        m.send_state = MsgSendState::Pending;
-                        std::string client_msg_id = m.client_msg_id;
-                        appendLocalMessage(std::move(m));
-                        sendChatMessage(GetActiveWindow(), path,
-                                        is_g ? "gif" : "sticker", client_msg_id);
-                        g_picker_open = false;
-                        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                        setPickerOpen(false);
+                    };
+                    hit(sr, send_sticker, true);
+                    if (sh_ && can_delete) {
+                        LayoutRect xb{ ex + cell - 18, ey + 2, 16, 16 };
+                        bool xh = xb.contains(g_mouse);
+                        prim::fillCircle(ctx, xb.x + 8, xb.y + 8, 8,
+                                         br.solidA(0x000000, ct * (xh ? 0.85f : 0.65f)));
+                        icons::drawIcon(app, icons::Name::X, xb.x + 2, xb.y + 2, 12,
+                                        fadeArgb(0xFFFFFFFF, ct));
+                        hit(xb, [path](){
+                            auto* payload = new std::wstring(path);
+                            PostMessageW(GetActiveWindow(), WM_APP + 40,
+                                         (WPARAM)payload, 0);
+                        }, true);
+                    }
+                }
+                ctx->PopAxisAlignedClip();
+
+                if (max_scroll > 0) {
+                    float bar_x = px + pw - 18.0f;
+                    float bar_w = 6.0f;
+                    float bar_h_p = (std::max)(28.0f, (view_h / total_h) * view_h);
+                    float bar_top = gy + (view_h - bar_h_p) * (g_pack_scroll_y / max_scroll);
+                    LayoutRect thumb{ bar_x - 4, bar_top, bar_w + 8, bar_h_p };
+                    bool bar_hov = thumb.contains(g_mouse) || (g_picker_scroll_drag.active && g_picker_scroll_drag.mode == 1);
+                    prim::fillRR(ctx, bar_x, gy, bar_w, view_h, 2.0f,
+                                 br.solidA(pal.text, ct * 0.05f));
+                    prim::fillRR(ctx, bar_x, bar_top, bar_w, bar_h_p, 2.0f,
+                                 br.solidA(pal.text, ct * (bar_hov ? 0.50f : 0.30f)));
+                    float anchor_y = (float)g_mouse.y;
+                    float anchor_scroll = g_pack_scroll_y;
+                    hit(thumb, [anchor_y, anchor_scroll, view_h, bar_h_p, max_scroll](){
+                        g_picker_scroll_drag.active = true;
+                        g_picker_scroll_drag.mode = 1;
+                        g_picker_scroll_drag.anchor_mouse_y = anchor_y;
+                        g_picker_scroll_drag.anchor_scroll_y = anchor_scroll;
+                        g_picker_scroll_drag.track_h = view_h;
+                        g_picker_scroll_drag.thumb_h = bar_h_p;
+                        g_picker_scroll_drag.max_scroll = max_scroll;
                     }, true);
                 }
             }
-        }
 
         // ===== 操作行：[复制分享链接] [重命名(仅 owner)] [删除(仅 owner)] =====
         if (!cur_pack.is_system && !cur_pack.id.empty()) {
@@ -2411,10 +2801,10 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             LayoutRect sb{ px + 14, oy, 110, 24 };
             bool s_h = sb.contains(g_mouse);
             prim::fillRR(ctx, sb.x, sb.y, sb.w, sb.h, 4,
-                         br.solidA(pal.primary, t * (s_h ? 0.30f : 0.15f)));
+                         br.solidA(pal.primary, ct * (s_h ? 0.30f : 0.15f)));
             prim::drawText_(ctx, L"⧉ 复制分享链接", hint_fmt,
                             sb.x, sb.y + 5, sb.w, 16,
-                            br.solidA(pal.primary, t),
+                            br.solidA(pal.primary, ct),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
             hit(sb, [pid](){
                 sticker::sharePack(GetActiveWindow(), pid, true);
@@ -2425,14 +2815,13 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 LayoutRect rb{ bx2, oy, 64, 24 };
                 bool rh = rb.contains(g_mouse);
                 prim::fillRR(ctx, rb.x, rb.y, rb.w, rb.h, 4,
-                             br.solidA(pal.text, t * (rh ? 0.10f : 0.05f)));
+                             br.solidA(pal.text, ct * (rh ? 0.10f : 0.05f)));
                 prim::drawText_(ctx, L"重命名", hint_fmt,
                                 rb.x, rb.y + 5, rb.w, 16,
-                                br.solidA(pal.text, t),
+                                br.solidA(pal.text, ct),
                                 DWRITE_TEXT_ALIGNMENT_CENTER);
                 hit(rb, [pid, pname](){
-                    g_picker_open = false;
-                    g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+                    setPickerOpen(false);
                     auto* payload = new PackActionPayload{ pid, pname };
                     PostMessageW(GetActiveWindow(), WM_APP + 31,
                                  (WPARAM)payload, 0);
@@ -2444,10 +2833,10 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             LayoutRect db{ bx2, oy, 64, 24 };
             bool dh = db.contains(g_mouse);
             prim::fillRR(ctx, db.x, db.y, db.w, db.h, 4,
-                         br.solidA(0xE34B4B, t * (dh ? 0.18f : 0.08f)));
+                         br.solidA(0xE34B4B, ct * (dh ? 0.18f : 0.08f)));
             prim::drawText_(ctx, del_lbl, hint_fmt,
                             db.x, db.y + 5, db.w, 16,
-                            br.solidA(0xE34B4B, t),
+                            br.solidA(0xE34B4B, ct),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
             hit(db, [pid, pname, is_owner](){
                 auto* payload = new PackActionPayload{ pid, pname };
@@ -2460,7 +2849,36 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 }
             }, true);
         }
+        }
     }
+
+    // 顶部固定命中层最后注册，避免滚动内容或贴纸格子吞掉 tab/按钮点击。
+    hit(tab_em, [](){
+        setPickerTabSmooth(0);
+    }, true);
+    hit(tab_pk, [](){
+        setPickerTabSmooth(g_picker_tab == 0 ? 1 : g_picker_tab);
+    }, true);
+    hit({ bx_imp, right_btn_y, bw_imp, 26 }, [cur_pid](){
+        if (cur_pid.empty()) {
+            PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
+        } else {
+            auto* payload = new std::string(cur_pid);
+            PostMessageW(GetActiveWindow(), WM_APP + 34,
+                         (WPARAM)payload, 0);
+        }
+    }, true);
+    hit({ bx_exp, right_btn_y, bw_exp, 26 }, [cur_pid](){
+        if (cur_pid.empty()) {
+            PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
+        } else {
+            sticker::exportPackToFolder(GetActiveWindow(), cur_pid);
+        }
+    }, true);
+    hit({ bx_new, right_btn_y, bw_new, 26 }, [](){
+        setPickerOpen(false);
+        PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
+    }, true);
 }
 
 void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
@@ -2475,6 +2893,16 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
 // ============== 事件 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
+    if (g_composer.bounds.contains(dip)) {
+        g_focus_composer = true;
+        int pos = cursorFromComposerPoint((float)dip.x);
+        g_composer.cursor = pos;
+        g_composer.sel_anchor = pos;
+        g_composer_drag.active = true;
+        g_composer_drag.anchor_cursor = pos;
+    } else {
+        g_composer_drag.active = false;
+    }
     // pack tab 拖拽起点 — 在 picker 打开 + 表情包 tab + 命中某个 tab 时初始化拖动状态
     g_pack_drag = PackDrag{};
     if (g_picker_open && g_picker_tab > 0) {
@@ -2493,14 +2921,27 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (g_focus_composer && !g_composer.bounds.contains(dip)) {
         g_focus_composer = false;
     }
+    if (g_composer_drag.active && !g_composer.hasSelection()) {
+        g_composer.clearSel();
+    }
     if (g_picker_open && !consumed) {
-        g_picker_open = false;
-        g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+        setPickerOpen(false);
     }
     return consumed;
 }
 
+bool onMouseMove(HWND /*hwnd*/, POINT dip) {
+    if (!g_composer_drag.active || !g_mouse_pressed) return false;
+    g_focus_composer = true;
+    if (g_composer.sel_anchor < 0) {
+        g_composer.sel_anchor = g_composer_drag.anchor_cursor;
+    }
+    g_composer.cursor = cursorFromComposerPoint((float)dip.x);
+    return true;
+}
+
 bool onMouseRDown(HWND hwnd, POINT dip) {
+    if (modal::hasBlockingModalOpen()) return true;
     // 优先：头像右键 → 用户菜单（主页 / @ / 管理）
     for (auto it = g_avatar_hits.rbegin(); it != g_avatar_hits.rend(); ++it) {
         if (it->rect.contains(dip)) {
@@ -2513,24 +2954,30 @@ bool onMouseRDown(HWND hwnd, POINT dip) {
             } else if (it->peer_key == selfAuthorKey()) {
                 label = g_user.nickname.empty() ? g_user.username : g_user.nickname;
             }
+            if (g_picker_open) setPickerOpen(false);
             modal::openUserContextMenu(dip, it->peer_key, label);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return true;
         }
     }
-    // 其次：消息体右键 → 弹消息菜单（回复 / 复制 / 添加到表情）
     auto& msgs = streamFor(g_active);
-    for (auto it = g_msg_hits.rbegin(); it != g_msg_hits.rend(); ++it) {
-        if (it->rect.contains(dip)) {
+    auto open_msg_menu = [&](const std::vector<MsgHit>& hits) -> bool {
+        for (auto it = hits.rbegin(); it != hits.rend(); ++it) {
+            if (!it->rect.contains(dip)) continue;
             int idx = it->idx;
             if (idx < 0 || idx >= (int)msgs.size()) return true;
-            // 跳过 system / day divider
             const Msg& m = msgs[idx];
             if (m.kind == MsgKind::System || m.kind == MsgKind::DayDivider) return true;
-            auto* payload = new MsgContextPayload{ dip, idx };
-            PostMessageW(hwnd, WM_APP + 50, (WPARAM)payload, 0);
+            if (g_picker_open) setPickerOpen(false);
+            modal::openMsgContextMenu(dip, idx);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return true;
         }
-    }
+        return false;
+    };
+    if (open_msg_menu(g_msg_row_hits)) return true;
+    if (open_msg_menu(g_msg_hits)) return true;
+    modal::closeContextMenus();
     return true;
 }
 
@@ -2547,7 +2994,9 @@ bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
         sticker::reorderPacks(GetActiveWindow(), ids);
     }
     g_pack_drag = PackDrag{};
+    g_composer_drag.active = false;
     g_scroll_drag.active = false;
+    g_picker_scroll_drag.active = false;
     return false;
 }
 

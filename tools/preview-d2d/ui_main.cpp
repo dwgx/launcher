@@ -609,9 +609,12 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         tags = { L"CS2", L"Premier 18k", L"东京机房" };
     }
     for (auto& tag : tags) {
-        float max_chip_w = (std::max)(80.0f, cw - 54.0f);
-        std::wstring tag_disp = fitText(app, tag, chip_fmt, max_chip_w - 24.0f);
-        float tw = (std::min)(measureW(app, tag_disp, chip_fmt) + 24.0f, max_chip_w);
+        float max_chip_w = (std::max)(96.0f, cw - 54.0f);
+        float target_chip_w = (std::min)((std::max)(measureW(app, tag, chip_fmt) + 24.0f, 72.0f),
+                                         max_chip_w);
+        std::wstring tag_disp = fitText(app, tag, chip_fmt, target_chip_w - 24.0f);
+        float tw = (std::min)((std::max)(measureW(app, tag_disp, chip_fmt) + 24.0f, 72.0f),
+                              max_chip_w);
         LayoutRect chip_rect{ chipx, chipy, tw, 26 };
         bool chov = chip_rect.contains(g_mouse);
         prim::fillRR(ctx, chipx, chipy, tw, 26, 13,

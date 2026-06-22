@@ -175,6 +175,11 @@ void drawIcon(D2DApp& app, Name n, float x, float y, float size,
         drawPath(sp);
         break;
     }
+    case Name::ArrowUp:
+        line(12, 19, 12, 5);
+        line(5, 12, 12, 5);
+        line(19, 12, 12, 5);
+        break;
     case Name::Phone: {
         PathBuilder pp(factory);
         pp.addLine(sx(22), sy(16.9f), sx(22), sy(19.9f));

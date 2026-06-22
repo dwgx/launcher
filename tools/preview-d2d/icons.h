@@ -8,7 +8,7 @@ namespace launcher::d2d::icons {
 
 enum class Name {
     Home, Library, Cloud, Chat, Settings, Logout, Logo,
-    Eye, EyeOff, X, History, Search, Send, Phone, Video, More,
+    Eye, EyeOff, X, History, Search, Send, ArrowUp, Phone, Video, More,
     Smile, Paperclip, Check, Check2, User, Moon, Shield, Bell,
     Reply, At, Link, Play, Trash, Edit, Plus, Hash,
     Cart,
