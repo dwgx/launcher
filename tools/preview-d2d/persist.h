@@ -23,5 +23,6 @@ bool loadCreds(std::wstring& u, std::wstring& p);
 void clearCreds();
 void saveSession(const std::string& tok, const std::string& uid);
 bool loadSession(std::string& tok, std::string& uid);
+void clearSession();
 
 }  // namespace launcher::d2d::persist

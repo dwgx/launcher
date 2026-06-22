@@ -19,6 +19,9 @@ struct UserInfo {
     std::wstring email     = L"dwgx1337@outlook.com";
     std::wstring device_id = L"f8a1c2d4...e5b6";
     std::wstring expires   = L"2026-05-09";
+    std::wstring role      = L"user";
+    std::wstring role_label;
+    bool is_admin = false;
     std::wstring status_text;          // 自定义状态消息（48 字以内）
     std::wstring bio;                   // 个人签名（240 字以内）
 };

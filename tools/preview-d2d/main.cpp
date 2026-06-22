@@ -9,6 +9,7 @@
 #include <ShlObj.h>
 #include <chrono>
 #include <memory>
+#include <string>
 
 #pragma comment(lib, "shell32.lib")
 
@@ -40,6 +41,36 @@ using namespace launcher::d2d;
 
 static D2DApp g_app;
 
+namespace {
+constexpr UINT kMsgAutoLoginResult = WM_APP + 56;
+
+static std::string envStringA(const char* name) {
+    char buf[4096]{};
+    DWORD n = GetEnvironmentVariableA(name, buf, (DWORD)_countof(buf));
+    if (n == 0 || n >= _countof(buf)) return {};
+    return std::string(buf, n);
+}
+
+static std::wstring utf8ToWMain(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(n - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
+}
+
+static void applyEnvIdentity() {
+    std::string uid = envStringA("LAUNCHER_UID");
+    std::string username = envStringA("LAUNCHER_USERNAME");
+    std::string nickname = envStringA("LAUNCHER_NICKNAME");
+    if (!uid.empty()) g_user.uid = utf8ToWMain(uid);
+    if (!username.empty()) g_user.username = utf8ToWMain(username);
+    if (!nickname.empty()) g_user.nickname = utf8ToWMain(nickname);
+    else if (!username.empty()) g_user.nickname = g_user.username;
+}
+}
+
 static POINT physToDip(POINT phys) {
     float scale = g_app.dpi() / 96.0f;
     if (scale < 0.001f) scale = 1.0f;
@@ -62,6 +93,40 @@ static void afterLogin(HWND hwnd) {
     sticker::fetchMyPacks(hwnd);
     sticker::fetchMyStickers(hwnd);
     fetch::marketListings(hwnd);
+}
+
+static void validateSavedSession(HWND hwnd, const std::string& token) {
+    struct A { HWND h; std::string tok; };
+    auto* a = new A{ hwnd, token };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + a->tok
+            + "\",\"hwid_hex\":\"" + hwidHex() + "\"}";
+        auto r = net::postJson(L"/api/heartbeat", body);
+        PostMessageW(a->h, kMsgAutoLoginResult, r.ok() ? 1 : 0, (LPARAM)r.status);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+static void leaveInvalidSession(HWND hwnd, bool clear_persisted, bool show_toast) {
+    ws::stop();
+    if (clear_persisted) persist::clearSession();
+    g_session_token.clear();
+    g_user_id.clear();
+    g_avatar_path.clear();
+    g_app.images().invalidate();
+    stages::g_skip_auth_after_loading = false;
+    stages::g_auth_validation_pending = false;
+    if (stages::g_stage == stages::Stage::Main
+        || stages::g_stage == stages::Stage::ExpandMain) {
+        stages::enterAuthFromLogout();
+    }
+    if (show_toast) {
+        toast::show(clear_persisted
+            ? L"登录已过期，请重新登录"
+            : L"无法验证登录状态，请重新登录");
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -167,11 +232,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == 'D') { g_dark = !g_dark; persist::saveTheme(g_dark); return 0; }
-            if (wp == 'S' && stages::g_stage == stages::Stage::Loading) {
-                stages::g_skip_auth_after_loading = true;
-                stages::g_time_in_stage = 1.5f;
-                return 0;
-            }
             return 0;
         }
         case WM_CHAR: {
@@ -214,7 +274,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 3: {                     // 头像上传结果
-            toast::show(wp ? L"头像已同步到云端 ✓" : L"头像上传失败");
+            std::unique_ptr<std::wstring> p((std::wstring*)lp);
+            if (wp && p && !p->empty()) {
+                g_avatar_path = *p;
+                g_app.images().invalidate();
+                toast::show(L"头像已同步到云端 ✓");
+            } else {
+                toast::show(L"头像上传失败");
+            }
             return 0;
         }
         case WM_APP + 4: {                     // ChangePw result
@@ -225,7 +292,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 5: {                     // Chat official channels result
             chat::applyOfficialResult();
             // 拉到 chat_id 后立即 fetchHistory 当前频道
-            chat::fetchHistory(hwnd, chat::g_active);
+            chat::switchChannel(chat::g_active);
             return 0;
         }
         case WM_APP + 10: {                    // WS message arrived
@@ -290,9 +357,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 26: {                    // pack share result; lp = std::string* short_name (if pub)
+            std::unique_ptr<std::string> sn((std::string*)lp);
             if (wp) {
-                if (lp) {
-                    auto* sn = (std::string*)lp;
+                if (sn) {
                     std::wstring link = L"launcher://pack/";
                     for (char c : *sn) link.push_back((wchar_t)c);
                     if (OpenClipboard(hwnd)) {
@@ -334,17 +401,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 31: {                    // chat picker → rename pack
-            auto* pid = (std::string*)wp;
-            auto* nm = (std::wstring*)lp;
-            if (pid && nm) modal::openRenamePack(*pid, *nm);
+            std::unique_ptr<chat::PackActionPayload> payload((chat::PackActionPayload*)wp);
+            if (payload) modal::openRenamePack(payload->id, payload->name);
             return 0;
         }
         case WM_APP + 32: {                    // chat picker → delete pack confirm
-            auto* pid = (std::string*)wp;
-            auto* nm = (std::wstring*)lp;
-            if (pid && nm) {
-                std::string id_copy = *pid;
-                std::wstring nm_copy = *nm;
+            std::unique_ptr<chat::PackActionPayload> payload((chat::PackActionPayload*)wp);
+            if (payload) {
+                std::string id_copy = payload->id;
+                std::wstring nm_copy = payload->name;
                 modal::openConfirm(L"删除表情包",
                     L"确认删除「" + nm_copy + L"」？分享出去的也会失效。",
                     [id_copy](){
@@ -358,13 +423,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 29: {                    // sticker import 完成；wp=成功数 lp=pack_id
+            std::unique_ptr<std::string> pid((std::string*)lp);
             wchar_t buf[64];
             if (wp > 0) {
                 swprintf_s(buf, L"已导入 %d 张表情 ✓", (int)wp);
                 toast::show(buf);
                 // 切 picker active tab 到这个 pack（让用户立刻看到导入的图）
-                if (lp) {
-                    auto* pid = (std::string*)lp;
+                if (pid) {
                     int idx = -1;
                     for (size_t i = 0; i < sticker::g_packs.size(); ++i) {
                         if (sticker::g_packs[i].id == *pid) { idx = (int)i; break; }
@@ -383,7 +448,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 34: {                    // chat picker → 弹文件夹对话框 + 上传
-            auto* pid = (std::string*)wp;
+            std::unique_ptr<std::string> pid((std::string*)wp);
             if (pid && !pid->empty()) {
                 int total = sticker::totalUserStickers();
                 if (total >= 50) {
@@ -402,7 +467,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 40: {                    // chat picker → 删单个 sticker (lp = std::wstring* path)
-            auto* p = (std::wstring*)wp;
+            std::unique_ptr<std::wstring> p((std::wstring*)wp);
             if (p) sticker::deleteSticker(hwnd, *p);
             return 0;
         }
@@ -416,12 +481,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 46: {                    // chat video bubble 点击 (wp = std::wstring* path)
-            auto* p = (std::wstring*)wp;
+            std::unique_ptr<std::wstring> p((std::wstring*)wp);
             if (p && !p->empty()) modal::openVideoPlayer(*p);
             return 0;
         }
         case WM_APP + 47: {                    // chat text 链接点击 (wp = std::wstring* url)
-            auto* p = (std::wstring*)wp;
+            std::unique_ptr<std::wstring> p((std::wstring*)wp);
             if (p && !p->empty()) modal::openWebPage(*p);
             return 0;
         }
@@ -443,14 +508,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 49: {                    // chat 链接卡片点击 → 弹 PackPreview (wp = std::string* short)
-            auto* p = (std::string*)wp;
+            std::unique_ptr<std::string> p((std::string*)wp);
             if (p && !p->empty()) modal::openPackPreviewModal(*p);
             return 0;
         }
         case WM_APP + 50: {                    // 消息右键菜单 (wp = struct{POINT, idx}*)
-            struct Pl { POINT pt; int idx; };
-            auto* p = (Pl*)wp;
+            std::unique_ptr<chat::MsgContextPayload> p((chat::MsgContextPayload*)wp);
             if (p) modal::openMsgContextMenu(p->pt, p->idx);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 52: {                    // 发消息后，把 server message_id 绑到本地 me 消息
@@ -462,19 +527,36 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 54: {                    // myProfile 拉回
-            if (wp) fetch::applyMyProfileResult();
+            if (wp) {
+                fetch::applyMyProfileResult();
+            } else if ((DWORD)lp == 401 || (DWORD)lp == 403) {
+                leaveInvalidSession(hwnd, true, true);
+            }
             return 0;
         }
         case WM_APP + 55: {                    // chat search 结果回来
             modal::drainSearchResult();
             return 0;
         }
+        case WM_APP + 57: {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 58: {
+            modal::onMuteUserResult(wp != 0);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 59: {
+            modal::onUnmuteUserResult(wp != 0);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         case WM_APP + 51: {                    // chat picker → 卸载非 owner pack (wp/lp 同 +32)
-            auto* pid = (std::string*)wp;
-            auto* nm = (std::wstring*)lp;
-            if (pid && nm) {
-                std::string id_copy = *pid;
-                std::wstring nm_copy = *nm;
+            std::unique_ptr<chat::PackActionPayload> payload((chat::PackActionPayload*)wp);
+            if (payload) {
+                std::string id_copy = payload->id;
+                std::wstring nm_copy = payload->name;
                 modal::openConfirm(L"卸载表情包",
                     L"确认卸载「" + nm_copy + L"」？只是从你的列表移除，不影响别人。",
                     [id_copy](){
@@ -502,19 +584,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case kMsgAutoLoginResult: {
+            stages::g_auth_validation_pending = false;
+            if (wp) {
+                stages::g_skip_auth_after_loading = true;
+                if (stages::g_stage == stages::Stage::Loading) {
+                    stages::g_time_in_stage = 1.5f;
+                }
+                afterLogin(hwnd);
+            } else {
+                DWORD status = (DWORD)lp;
+                leaveInvalidSession(hwnd, status == 401 || status == 403, true);
+            }
+            return 0;
+        }
         case WM_APP + 35: {                    // profile update result
-            modal::onEditStatusTextResult(wp != 0);
-            modal::onEditBioResult(wp != 0);
+            bool ok = wp != 0;
+            auto kind = static_cast<fetch::ProfileUpdateKind>((int)lp);
+            if (kind == fetch::ProfileUpdateKind::StatusText) {
+                modal::onEditStatusTextResult(ok);
+            } else if (kind == fetch::ProfileUpdateKind::Bio) {
+                modal::onEditBioResult(ok);
+            } else {
+                modal::onEditStatusTextResult(ok);
+                modal::onEditBioResult(ok);
+            }
             if (wp) toast::show(L"已保存");
             return 0;
         }
         case WM_APP + 36: {                    // peer profile fetched
-            // paint 帧自动用最新 g_peer
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 37: {                    // chat 头像右键 → 看主页 (lp = std::wstring*)
             std::unique_ptr<std::wstring> p((std::wstring*)lp);
             if (p && !p->empty()) modal::openUserProfile(*p);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case tray::kTrayCallbackMsg: {
@@ -595,10 +700,21 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     // 启动后尝试 autologin — 有 saved session 且 saved creds 时直接走主页
     {
         std::string tok, uid;
-        if (persist::loadSession(tok, uid) && !tok.empty()) {
+        bool from_env = false;
+        std::string env_tok = envStringA("LAUNCHER_SESSION_TOKEN");
+        std::string env_uid = envStringA("LAUNCHER_USER_ID");
+        if (!env_tok.empty()) {
+            tok = env_tok;
+            uid = env_uid;
+            from_env = true;
+            applyEnvIdentity();
+        } else if (persist::loadSession(tok, uid) && !tok.empty()) {
+            from_env = false;
+        }
+        if (!tok.empty()) {
             g_session_token = tok;
             g_user_id = uid;
-            stages::g_skip_auth_after_loading = true;
+            stages::g_auth_validation_pending = true;
             // 头像如果之前下载过，本地路径还在
             wchar_t base[MAX_PATH] = {0};
             if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
@@ -620,7 +736,13 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
                 }
             }
             // 启动后异步刷新
-            PostMessageW(hwnd, WM_APP + 50, 0, 0);   // 自定义：稍后 afterLogin
+            if (from_env) {
+                stages::g_auth_validation_pending = false;
+                stages::g_skip_auth_after_loading = true;
+                afterLogin(hwnd);
+            } else {
+                validateSavedSession(hwnd, tok);
+            }
         }
     }
 
@@ -633,16 +755,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     auto last = std::chrono::steady_clock::now();
     MSG msg{};
     bool quit = false;
-    bool autologin_kicked = false;
     while (!quit) {
         DWORD r = g_app.waitFrame(100);
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { quit = true; break; }
-            if (msg.message == WM_APP + 50 && !autologin_kicked) {
-                autologin_kicked = true;
-                afterLogin(hwnd);
-                continue;
-            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

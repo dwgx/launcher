@@ -21,6 +21,7 @@ Stage    g_stage = Stage::Dot;
 AuthMode g_auth_mode = AuthMode::Login;
 View     g_view = View::Home;
 bool     g_skip_auth_after_loading = false;
+bool     g_auth_validation_pending = false;
 float    g_time_in_stage = 0.0f;
 float    g_spin_angle = 0.0f;
 bool     g_auth_succeeded = false;
@@ -116,6 +117,7 @@ void enterAuthFromLogout() {
     g_time_in_stage = 0.0f;
     g_auth_succeeded = false;
     g_skip_auth_after_loading = false;
+    g_auth_validation_pending = false;
     // 主窗 / topbar / sidebar 全归零（避免下次再进 Main 残留）
     g_sidebar_x.start(g_sidebar_x.value(), 0.0f, 0.20f, 0, curve::easeOutCubic);
     g_topbar_y.start(g_topbar_y.value(),  0.0f, 0.20f, 0, curve::easeOutCubic);
@@ -172,7 +174,7 @@ bool driveTransitions(D2DApp& app, int sw, int sh) {
     } else if (g_stage == Stage::ExpandLoading) {
         resize_to_tween();
         if (g_window_w.done()) { enterLoadingStage(); transitioned = true; }
-    } else if (g_stage == Stage::Loading && g_time_in_stage > 1.4f) {
+    } else if (g_stage == Stage::Loading && g_time_in_stage > 1.4f && !g_auth_validation_pending) {
         if (g_skip_auth_after_loading) {
             // auto-login: 跳 Auth 直扩到 Main
             g_stage = Stage::ExpandMain;

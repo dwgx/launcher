@@ -8,17 +8,28 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace launcher::d2d::sticker {
 
+struct StickerItem {
+    std::wstring path;       // local cache path for preview/rendering
+    std::string sticker_id;  // backend stickers.id
+    int64_t media_id = 0;
+    std::string media_url;   // /api/media/<sha>/file.<ext>, remote payload source
+    std::string sha256;
+    std::string mime;
+};
+
 struct Pack {
     std::string  id;
     std::wstring name;
-    std::vector<std::wstring> stickers;     // 本地路径
-    std::vector<std::string>  sticker_ids;
+    std::vector<std::wstring> stickers;     // 本地路径，保留给现有 picker/render 兼容
+    std::vector<std::string>  sticker_ids;  // 与 stickers 同步，保留给旧调用
+    std::vector<StickerItem>  items;        // 新主数据：本地路径 + 远端 id/url
     bool is_system = false;
     bool is_public = false;
     bool is_owner  = false;        // 当前用户是否是 pack 创建人
@@ -70,6 +81,7 @@ struct PackPreview {
     int          install_count = 0;
     bool         already_installed = false;
     std::vector<std::wstring> sticker_paths;   // 本地 cache 路径
+    std::vector<StickerItem>  items;           // same stickers with remote ids/urls
     std::wstring cover_path;                   // 第一张图本地路径
 };
 extern PackPreview g_pack_preview;
@@ -92,6 +104,11 @@ int totalUserStickers();
 // 删单个 sticker — 本地从 g_packs 移除路径 + POST /api/sticker/delete
 // (后端可能没此端点；客户端本地删除立即生效，后端失败 silent)
 void deleteSticker(HWND notify, const std::wstring& path);
+
+// 给 chat 接入用：不要把 local path 作为远端 payload。
+// stickerPayloadJsonForPath 返回 {"sticker_id","media_id","media_url","url","sha256","mime"}。
+bool stickerForPath(const std::wstring& path, StickerItem* out);
+std::string stickerPayloadJsonForPath(const std::wstring& path);
 
 // 启动后调 — 如果 g_packs 里"我的表情"(name=='我的表情') 还没真 backend pack id，
 // 自动 POST /api/sticker/pack 创建一个名为"我的表情"的 pack，把 id 写回。

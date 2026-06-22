@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <commdlg.h>
 #include <ShlObj.h>
+#include <wrl/client.h>
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -48,11 +49,67 @@ constexpr MenuEntry kMenu[] = {
     { stages::View::Settings, "menu.settings", icons::Name::Settings },
 };
 
+std::wstring lowerExt(const std::wstring& path) {
+    auto dot = path.find_last_of(L'.');
+    if (dot == std::wstring::npos) return L"";
+    std::wstring ext = path.substr(dot);
+    for (auto& c : ext) {
+        if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+    }
+    return ext;
+}
+
+bool supportedAvatarExt(const std::wstring& path) {
+    std::wstring ext = lowerExt(path);
+    return ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".gif";
+}
+
 float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
     if (s.empty() || !fmt) return 0.0f;
     DWRITE_TEXT_METRICS m{};
     if (!app.texts().measure(fmt, s, 8192.0f, 256.0f, &m)) return 0.0f;
     return m.width;
+}
+
+std::wstring fitText(D2DApp& app, const std::wstring& s,
+                     IDWriteTextFormat* fmt, float max_w) {
+    if (s.empty() || max_w <= 4.0f || measureW(app, s, fmt) <= max_w) return s;
+    const std::wstring ell = L"…";
+    float ell_w = measureW(app, ell, fmt);
+    if (ell_w >= max_w) return ell;
+    size_t lo = 0, hi = s.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        std::wstring candidate = s.substr(0, mid) + ell;
+        if (measureW(app, candidate, fmt) <= max_w) lo = mid;
+        else hi = mid - 1;
+    }
+    return s.substr(0, lo) + ell;
+}
+
+bool drawCoverCircle(D2DApp& app, ID2D1Bitmap* bmp,
+                     float x, float y, float r, float opacity) {
+    if (!bmp) return false;
+    auto* ctx = app.ctx();
+    D2D1_SIZE_F sz = bmp->GetSize();
+    if (sz.width <= 0 || sz.height <= 0) return false;
+    float dest = r * 2.0f;
+    float scale = (std::max)(dest / sz.width, dest / sz.height);
+    float draw_w = sz.width * scale;
+    float draw_h = sz.height * scale;
+    float dx = x + (dest - draw_w) * 0.5f;
+    float dy = y + (dest - draw_h) * 0.5f;
+    D2D1_BITMAP_BRUSH_PROPERTIES bp = D2D1::BitmapBrushProperties(
+        D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
+        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    Microsoft::WRL::ComPtr<ID2D1BitmapBrush> bb;
+    if (FAILED(ctx->CreateBitmapBrush(bmp, bp, &bb))) return false;
+    auto mt = D2D1::Matrix3x2F::Scale({scale, scale}, {0, 0})
+            * D2D1::Matrix3x2F::Translation(dx, dy);
+    bb->SetTransform(mt);
+    bb->SetOpacity(opacity);
+    ctx->FillEllipse(D2D1::Ellipse({x + r, y + r}, r, r), bb.Get());
+    return true;
 }
 
 // fade(c, op): apply alpha multiplier to ARGB hex
@@ -71,25 +128,7 @@ void drawAvatarPill(D2DApp& app, float ax, float ay, float ar, float op) {
     if (!g_avatar_path.empty()) {
         auto* bmp = app.images().fromFile(g_avatar_path);
         if (bmp) {
-            // 真圆形裁剪：BitmapBrush 配 FillEllipse — 比 PushLayer geometry mask 更轻量
-            // BitmapBrush 自动按 destination ellipse 裁剪 + linear interpolation 平滑
-            D2D1_BITMAP_BRUSH_PROPERTIES bp = D2D1::BitmapBrushProperties(
-                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
-                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            ComPtr<ID2D1BitmapBrush> bb;
-            if (SUCCEEDED(ctx->CreateBitmapBrush(bmp, bp, &bb))) {
-                D2D1_SIZE_F sz = bmp->GetSize();
-                if (sz.width > 0 && sz.height > 0) {
-                    float scale_x = (ar * 2) / sz.width;
-                    float scale_y = (ar * 2) / sz.height;
-                    auto m = D2D1::Matrix3x2F::Scale({scale_x, scale_y}, {0, 0})
-                           * D2D1::Matrix3x2F::Translation(ax, ay);
-                    bb->SetTransform(m);
-                    bb->SetOpacity(op);
-                    ctx->FillEllipse(D2D1::Ellipse({ax + ar, ay + ar}, ar, ar), bb.Get());
-                    return;
-                }
-            }
+            if (drawCoverCircle(app, bmp, ax, ay, ar, op)) return;
         }
     }
     // 占位：主色圆 + 首字母
@@ -125,7 +164,8 @@ void paintTopbar(D2DApp& app, float W) {
     float pill_pad_l = 12.0f, pill_pad_r = 4.0f, pill_gap = 10.0f;
 
     auto* nick_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
-    float name_w = measureW(app, g_user.nickname, nick_fmt) + 4.0f;
+    std::wstring top_name = fitText(app, g_user.nickname, nick_fmt, 160.0f);
+    float name_w = measureW(app, top_name, nick_fmt) + 4.0f;
     float pill_w = pill_pad_l + name_w + pill_gap + ar * 2 + pill_pad_r;
     float pill_x = W - 16.0f - pill_w;
     float pill_y = ty + (kTopbarH - pill_h) * 0.5f;
@@ -135,7 +175,7 @@ void paintTopbar(D2DApp& app, float W) {
         prim::fillRR(ctx, pill_x, pill_y, pill_w, pill_h, 16.0f,
                      br.solidA(pal.text, 0.04f));
     }
-    prim::drawText_(ctx, g_user.nickname, nick_fmt,
+    prim::drawText_(ctx, top_name, nick_fmt,
                     pill_x + pill_pad_l, pill_y + 8.0f, name_w, 16.0f,
                     br.solid(pal.text_muted));
 
@@ -183,7 +223,7 @@ void paintSidebar(D2DApp& app, float H) {
         }
         if (active) {
             // 左侧 3px 主色指示条
-            prim::fillRR(ctx, item.x - 10.0f, item.y + 9.0f, 3.0f, item.h - 18.0f, 1.5f,
+            prim::fillRR(ctx, sx + 1.0f, item.y + 9.0f, 3.0f, item.h - 18.0f, 1.5f,
                          br.solid(pal.primary));
         }
         uint32_t tc = active ? pal.primary : (hover ? pal.text : pal.text_muted);
@@ -239,10 +279,12 @@ void paintAccountDropdown(D2DApp& app, float W) {
     auto* nick_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.5f),
                                         DWRITE_FONT_WEIGHT_BOLD);
     auto* email_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.5f));
-    prim::drawText_(ctx, g_user.nickname, nick_fmt,
+    std::wstring dropdown_name = fitText(app, g_user.nickname, nick_fmt, dw - 64.0f);
+    prim::drawText_(ctx, dropdown_name, nick_fmt,
                     dx + 50, dy + 12, dw - 60, 20,
                     br.solidA(pal.text, t));
-    prim::drawText_(ctx, g_user.email, email_fmt,
+    std::wstring dropdown_email = fitText(app, g_user.email, email_fmt, dw - 64.0f);
+    prim::drawText_(ctx, dropdown_email, email_fmt,
                     dx + 50, dy + 28, dw - 60, 14,
                     br.solidA(pal.text_muted, t));
 
@@ -292,7 +334,8 @@ void paintAccountDropdown(D2DApp& app, float W) {
                         dx + 32, iy + 7, dw - 60, 16,
                         br.solidA(pal.text_faint, t));
     } else {
-        prim::drawText_(ctx, g_user.status_text, sm_fmt,
+        std::wstring status_text = fitText(app, g_user.status_text, sm_fmt, dw - 68.0f);
+        prim::drawText_(ctx, status_text, sm_fmt,
                         dx + 32, iy + 7, dw - 60, 16,
                         br.solidA(pal.text_muted, t));
     }
@@ -482,7 +525,8 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
                        br.solidA(pal.card, op), 3.0f);
 
     float fx = cx + 22 + ar * 2 + 18;
-    prim::drawText_(ctx, g_user.nickname, h1,
+    std::wstring home_name = fitText(app, g_user.nickname, h1, cw - (fx - cx) - 22.0f);
+    prim::drawText_(ctx, home_name, h1,
                     fx, cy + 24, cw - (fx - cx) - 22, 30,
                     br.solidA(pal.text, op));
     prim::drawText_(ctx, statusLabel(g_status), sub,
@@ -551,7 +595,7 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
     // tags chips
     auto* chip_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
-    prim::drawText_(ctx, L"我的标签", sub,
+    prim::drawText_(ctx, trW("home.tags"), sub,
                     cx, sy_ + 100, cw, 18,
                     br.solidA(pal.text_muted, op));
     float chipx = cx, chipy = sy_ + 124;
@@ -565,14 +609,16 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         tags = { L"CS2", L"Premier 18k", L"东京机房" };
     }
     for (auto& tag : tags) {
-        float tw = measureW(app, tag, chip_fmt) + 24;
+        float max_chip_w = (std::max)(80.0f, cw - 54.0f);
+        std::wstring tag_disp = fitText(app, tag, chip_fmt, max_chip_w - 24.0f);
+        float tw = (std::min)(measureW(app, tag_disp, chip_fmt) + 24.0f, max_chip_w);
         LayoutRect chip_rect{ chipx, chipy, tw, 26 };
         bool chov = chip_rect.contains(g_mouse);
         prim::fillRR(ctx, chipx, chipy, tw, 26, 13,
                      br.solidA(chov ? pal.bg : pal.surface, op));
         prim::strokeRR(ctx, chipx, chipy, tw, 26, 13,
                        br.solidA(pal.divider, op));
-        prim::drawText_(ctx, tag, chip_fmt,
+        prim::drawText_(ctx, tag_disp, chip_fmt,
                         chipx + 12, chipy + 5, tw - 24, 16,
                         br.solidA(pal.text, op));
         if (chov && !empty_real) {
@@ -590,7 +636,7 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     // + 添加 chip
     if (!empty_real) {
-        const wchar_t* add = L"+ 添加";
+        std::wstring add = trW("home.add_tag");
         float aw_ = measureW(app, add, chip_fmt) + 20;
         LayoutRect addr{ chipx, chipy, aw_, 26 };
         bool ahov = addr.contains(g_mouse);
@@ -683,13 +729,14 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     br.solidA(pal.text_muted, op));
 
     std::vector<fetch::Listing> listings;
+    bool market_loaded = false;
     {
         std::lock_guard<std::mutex> lk(fetch::g_market_mtx);
         listings = fetch::g_market_listings;
+        market_loaded = fetch::g_market_loaded;
     }
     if (listings.empty()) {
-        // 占位 — 启动后异步拉
-        prim::drawText_(ctx, L"商品加载中…", sub,
+        prim::drawText_(ctx, market_loaded ? L"暂无商品" : L"商品加载中…", sub,
                         ax + 32, ay + 100, aw - 64, 22,
                         br.solidA(pal.text_muted, op));
         return;
@@ -849,7 +896,7 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* lab_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.5f));
     auto* val_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
                                        DWRITE_FONT_WEIGHT_BOLD);
-    prim::drawText_(ctx, L"个人资料", h1,
+    prim::drawText_(ctx, trW("profile.title"), h1,
                     ax + 18, ay + 16, 200, 26,
                     br.solidA(pal.text, op));
 
@@ -858,30 +905,32 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 12.0f, pal.shadow_card, op, 2.0f, 3);
     prim::fillRR(ctx, cx, cy, cw, ch, 12.0f, br.solidA(pal.card, op));
 
-    auto field = [&](float fy, const wchar_t* label, const wchar_t* val, bool editable) {
+    auto field = [&](float fy, const std::wstring& label,
+                     const std::wstring& val, bool editable) {
         prim::drawText_(ctx, label, lab_fmt,
                         cx + 16, fy, 100, 14, br.solidA(pal.text_muted, op));
         LayoutRect box{ cx + 90, fy - 4, cw - 110, 26 };
         prim::fillRR(ctx, box.x, box.y, box.w, box.h, 5.0f,
                      br.solidA(editable ? pal.surface : pal.bg, op));
-        prim::drawText_(ctx, val, val_fmt,
+        std::wstring val_disp = fitText(app, val, val_fmt, box.w - 16.0f);
+        prim::drawText_(ctx, val_disp, val_fmt,
                         box.x + 8, box.y + 4, box.w - 16, 18,
                         br.solidA(editable ? pal.text : pal.text_faint, op));
     };
-    field(cy + 22, L"UID",       g_user.uid.c_str(),      false);
-    field(cy + 56, L"用户名",    g_user.username.c_str(), false);
-    field(cy + 90, L"昵称",      g_user.nickname.c_str(), true);
-    field(cy + 124, L"邮箱",     g_user.email.c_str(),    false);
-    field(cy + 158, L"订阅到期", g_user.expires.c_str(),  false);
+    field(cy + 22,  trW("profile.uid"),      g_user.uid,      false);
+    field(cy + 56,  trW("profile.username"), g_user.username, false);
+    field(cy + 90,  trW("profile.nickname"), g_user.nickname, true);
+    field(cy + 124, trW("profile.email"),    g_user.email,    false);
+    field(cy + 158, trW("profile.expires"),  g_user.expires,  false);
 
     // 个人签名 — 大 textarea + 编辑按钮
-    prim::drawText_(ctx, L"个人签名", lab_fmt,
+    prim::drawText_(ctx, trW("profile.bio"), lab_fmt,
                     cx + 16, cy + 196, 100, 14, br.solidA(pal.text_muted, op));
     LayoutRect bio_box{ cx + 16, cy + 214, cw - 32, 80 };
     prim::fillRR(ctx, bio_box.x, bio_box.y, bio_box.w, bio_box.h, 8.0f,
                  br.solidA(pal.surface, op));
     if (g_user.bio.empty()) {
-        prim::drawText_(ctx, L"还没设置签名 — 点击编辑", val_fmt,
+        prim::drawText_(ctx, trW("profile.bio_empty"), val_fmt,
                         bio_box.x + 12, bio_box.y + 8, bio_box.w - 24, 64,
                         br.solidA(pal.text_faint, op));
     } else {
@@ -901,7 +950,7 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                  br.solidA(up_hov ? pal.primary_hover : pal.primary, op));
     auto* btn_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
                                        DWRITE_FONT_WEIGHT_BOLD);
-    prim::drawText_(ctx, L"上传头像", btn_fmt,
+    prim::drawText_(ctx, trW("profile.upload_avatar"), btn_fmt,
                     up.x, up.y + up_lift, up.w, up.h,
                     br.solidA(0xFFFFFF, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -912,11 +961,21 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
         fnbuf[0] = 0;
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = GetActiveWindow();
-        ofn.lpstrFilter = L"图片\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0全部文件\0*.*\0";
+        std::wstring filter = trW("profile.upload_avatar");
+        filter.push_back(L'\0');
+        filter += L"*.png;*.jpg;*.jpeg;*.gif";
+        filter.push_back(L'\0');
+        filter.push_back(L'\0');
+        ofn.lpstrFilter = filter.c_str();
         ofn.lpstrFile = fnbuf;
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (GetOpenFileNameW(&ofn)) {
+            if (!supportedAvatarExt(fnbuf)) {
+                std::wstring msg = trW("profile.upload_avatar") + std::wstring(L": PNG/JPG/GIF");
+                toast::show(msg);
+                return;
+            }
             // 复制到 LOCALAPPDATA + 设 g_avatar_path
             wchar_t base[MAX_PATH] = {0};
             if (SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) {
@@ -940,8 +999,7 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                 if (stem.empty()) stem = L"unknown";
                 std::wstring dst = dir + L"\\" + stem + ext;
                 if (CopyFileW(fnbuf, dst.c_str(), FALSE)) {
-                    g_avatar_path = dst;
-                    toast::show(L"头像已更新，正在上传…");
+                    toast::show(trW("common.loading"));
                     fetch::uploadAvatar(GetActiveWindow(), dst);
                 }
             }
@@ -954,7 +1012,7 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                  br.solidA(pw_hov ? pal.bg : pal.card, op));
     prim::strokeRR(ctx, pw.x, pw.y, pw.w, pw.h, 6.0f,
                    br.solidA(pal.divider, op));
-    prim::drawText_(ctx, L"修改密码", btn_fmt,
+    prim::drawText_(ctx, trW("profile.change_pw"), btn_fmt,
                     pw.x, pw.y, pw.w, pw.h,
                     br.solidA(pal.text, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -1018,6 +1076,7 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintUserProfileModal(app, W, H);
     modal::paintEditStatusTextModal(app, W, H);
     modal::paintEditBioModal(app, W, H);
+    modal::paintMuteUserModal(app, W, H);
     // WebView2 modal 在最顶（CS2 modal 已经直接 webview，这是通用浏览器/视频）
     modal::paintWebViewModal(app, W, H);
 
@@ -1027,6 +1086,7 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintSearchModal(app, W, H);
     // 消息右键菜单 — 在所有 modal 之上、toast 之下
     modal::paintMsgContextMenu(app, W, H);
+    modal::paintUserContextMenu(app, W, H);
 
     // toast 在最最顶层
     toast::paint(app, W, H);

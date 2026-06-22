@@ -5,18 +5,23 @@
 #include "palette.h"
 #include "user_state.h"
 #include "net.h"
+#include "fetch.h"
 #include "hit.h"
 #include "stages.h"
 #include "sticker.h"
+#include "modals.h"
 #include "render/primitives.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <ctime>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <objbase.h>
+#include <unordered_map>
+#include <unordered_set>
 
 #pragma comment(lib, "ole32.lib")
 
@@ -24,6 +29,16 @@ namespace launcher::d2d::chat {
 
 // fadeArgb 复用 — 把 ARGB 的 alpha 分量乘 op
 namespace {
+void normalizeMsgIdentity(Msg& m);
+bool fillReplySnapshot(Msg& m);
+bool sameMessageIdentityStrict(const Msg& a, const Msg& b);
+void mergeServerIdentity(Msg& local, const Msg& server);
+void rememberReplySnapshot(const std::wstring& slug, const Msg& m);
+int64_t oldestServerId(const std::wstring& slug);
+bool hasMessageServerId(const std::wstring& slug, int64_t server_id);
+bool isFocusWaitingForSlug(const std::wstring& slug);
+std::wstring displayAuthorFor(const Msg& m, HWND notify = nullptr);
+
 inline uint32_t fadeArgb(uint32_t argb, float op) {
     uint32_t a = (argb >> 24) & 0xFFu;
     a = (uint32_t)(a * op + 0.5f);
@@ -48,6 +63,8 @@ const wchar_t* kGroups[] = { L"IMPORTANT", L"GENERAL", L"GAMES", L"SHOP" };
 std::wstring g_active = L"general";
 InputBox     g_composer;
 bool         g_focus_composer = false;
+PendingReply g_pending_reply;
+std::vector<PendingMention> g_pending_mentions;
 bool         g_picker_open = false;
 Tween        g_picker_t;
 int          g_picker_tab = 0;
@@ -62,6 +79,16 @@ static std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 static std::unordered_map<std::wstring, bool> g_group_collapsed;
 static std::mutex g_streams_mtx;
 
+struct ReplySnapshot {
+    std::wstring slug;
+    std::wstring author;
+    std::wstring preview;
+};
+static std::unordered_map<int64_t, ReplySnapshot> g_reply_snapshots;
+static std::mutex g_reply_snapshots_mtx;
+static std::unordered_map<std::wstring, float> g_peer_profile_requested_at;
+static std::mutex g_peer_profile_requested_mtx;
+
 static std::wstring localTimeText(time_t tt = time(nullptr));
 
 // 头像 hit 表 — paintChatPane 帧首清空，paintBubble 填充，WM_RBUTTONDOWN 命中
@@ -74,6 +101,14 @@ static float g_emoji_total_h_last = 0.0f;
 // 消息体 hit 表 — paintChatPane 帧首清空，paintBubble 填充
 struct MsgHit { LayoutRect rect; int idx; };
 static std::vector<MsgHit> g_msg_hits;
+struct FocusTarget {
+    std::wstring slug;
+    int64_t server_id = 0;
+    float highlight_until = 0.0f;
+    bool scroll_applied = false;
+    bool missing_reported = false;
+};
+static FocusTarget g_focus_target;
 // 当前 picker 内 pack tab 实际像素位置（paintPicker 写，鼠标命中读用以拖拽）
 struct PackTabRect { LayoutRect r; int idx; };
 static std::vector<PackTabRect> g_pack_tab_rects;
@@ -88,18 +123,37 @@ std::vector<Msg>& streamFor(const std::wstring& slug) {
     return it->second;
 }
 
-static std::unordered_map<std::wstring, bool> g_history_loaded;
+enum class HistoryLoadState { NotStarted, Loading, Loaded, Exhausted, Failed };
+static std::unordered_map<std::wstring, HistoryLoadState> g_history_state;
 
 void switchChannel(const std::wstring& slug) {
     g_active = slug;
     g_focus_composer = false;
-    // 第一次切到这个频道 → 异步拉历史 + 滚到底
-    if (!g_history_loaded[slug]) {
-        g_history_loaded[slug] = true;
+    if (g_pending_reply.active && g_pending_reply.slug != slug) {
+        g_pending_reply = PendingReply{};
+        g_pending_mentions.clear();
+    }
+    std::string chat_id;
+    for (auto& c : g_channels) {
+        if (c.slug == slug) { chat_id = c.id; break; }
+    }
+    auto& hist_state = g_history_state[slug];
+    if (!chat_id.empty()
+        && (hist_state == HistoryLoadState::NotStarted
+            || hist_state == HistoryLoadState::Failed)) {
         fetchHistory(GetActiveWindow(), slug);
     }
     // 切到这个频道时不重置 scroll — 保留之前的位置（用户切到设置再切回来还在原位）
     // 但首次进入会通过 ChatScroll::initialized = false 自动 stick to bottom
+}
+
+namespace {
+void normalizeMsgIdentity(Msg& m);
+bool fillReplySnapshot(Msg& m);
+bool sameMessageIdentityStrict(const Msg& a, const Msg& b);
+void mergeServerIdentity(Msg& local, const Msg& server);
+void rememberReplySnapshot(const std::wstring& slug, const Msg& m);
+bool hasMessageServerId(const std::wstring& slug, int64_t server_id);
 }
 
 void onWheel(int delta) {
@@ -120,15 +174,7 @@ void onWheel(int delta) {
 }
 
 void appendLocalMessage(Msg msg) {
-    auto& s = streamFor(g_active);
-    auto& sc = g_scroll[g_active];
-    bool was_at_bottom = (sc.offset_from_bottom < 8.0f);
-    s.push_back(std::move(msg));
-    // 在底部就跟随；不在底部说明用户在翻历史，不打扰
-    if (was_at_bottom) {
-        sc.offset_from_bottom = 0;
-        sc.target_offset = 0;
-    }
+    appendOrMergeMessage(g_active, std::move(msg));
 }
 
 void retargetTopSeg() {
@@ -163,9 +209,15 @@ void retargetPackTab() {
 }
 
 namespace {
-struct HistArg { std::wstring slug; std::string chat_id; HWND h; };
+struct HistArg { std::wstring slug; std::string chat_id; int64_t before_id = 0; HWND h; };
+struct HistoryResult {
+    bool ok = false;
+    int64_t before_id = 0;
+    std::vector<Msg> msgs;
+};
 std::mutex g_pending_hist_mtx;
-std::unordered_map<std::wstring, std::vector<Msg>> g_pending_history;
+std::unordered_map<std::wstring, HistoryResult> g_pending_history;
+static constexpr int kHistoryPageLimit = 100;
 
 std::wstring utf8wHist(const std::string& s) {
     if (s.empty()) return {};
@@ -175,22 +227,330 @@ std::wstring utf8wHist(const std::string& s) {
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
 }
+
+std::wstring mediaLocalPathFromUrl(const std::string& media_url) {
+    if (media_url.empty()) return {};
+    auto dl = launcher::d2d::fetch::downloadMediaToCache(media_url, L"chat");
+    if (dl.ok) return dl.path;
+    return utf8wHist(media_url);
+}
+
+std::wstring bodyFromPayloadObject(const std::string& payload_obj) {
+    std::string sub_url = net::jsonStr(payload_obj, "media_url");
+    if (sub_url.empty()) sub_url = net::jsonStr(payload_obj, "url");
+    if (!sub_url.empty()) return mediaLocalPathFromUrl(sub_url);
+    std::string sticker_id = net::jsonStr(payload_obj, "sticker_id");
+    if (!sticker_id.empty()) return utf8wHist(sticker_id);
+    return {};
+}
+
+std::wstring bodyFromMessageObject(const std::string& msg_obj) {
+    std::string raw = net::jsonRaw(msg_obj, "payload");
+    if (raw.empty() || raw == "null") return {};
+    if (raw.front() == '"') {
+        std::string decoded;
+        if (net::parseJsonStringAt(raw, 0, decoded)) return utf8wHist(decoded);
+    } else if (raw.front() == '{') {
+        return bodyFromPayloadObject(raw);
+    }
+    return utf8wHist(raw);
+}
+
+std::wstring selfAuthorKey() {
+    if (!g_user_id.empty()) return utf8wHist(g_user_id);
+    if (!g_user.uid.empty()) return g_user.uid;
+    if (!g_user.username.empty()) return g_user.username;
+    return g_user.nickname;
+}
+
+std::wstring msgAuthorDisplay(const Msg& m) {
+    if (m.from == L"me") {
+        if (!m.author.empty()) return m.author;
+        if (!g_user.nickname.empty()) return g_user.nickname;
+        if (!g_user.username.empty()) return g_user.username;
+        return L"me";
+    }
+    std::wstring display = displayAuthorFor(m);
+    if (!display.empty()) return display;
+    if (!m.author.empty()) return m.author;
+    if (!m.peer_key.empty()) return m.peer_key;
+    if (!m.from.empty()) return m.from;
+    return L"unknown";
+}
+
+bool looksLikeUuidW(const std::wstring& s) {
+    if (s.size() != 36) return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        wchar_t c = s[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != L'-') return false;
+            continue;
+        }
+        bool hex = (c >= L'0' && c <= L'9')
+            || (c >= L'a' && c <= L'f')
+            || (c >= L'A' && c <= L'F');
+        if (!hex) return false;
+    }
+    return true;
+}
+
+std::wstring shortPeerLabel(const std::wstring& key) {
+    if (key.empty()) return L"unknown";
+    if (looksLikeUuidW(key) && key.size() > 8) return key.substr(0, 8);
+    return key;
+}
+
+void requestPeerProfileOnce(const std::wstring& key, HWND notify) {
+    if (key.empty() || key == L"me") return;
+    float now = (float)(GetTickCount64() / 1000.0);
+    {
+        std::lock_guard<std::mutex> lk(g_peer_profile_requested_mtx);
+        auto it = g_peer_profile_requested_at.find(key);
+        if (it != g_peer_profile_requested_at.end() && now - it->second < 15.0f) return;
+        g_peer_profile_requested_at[key] = now;
+    }
+    fetch::peerProfile(notify ? notify : GetActiveWindow(), key);
+}
+
+std::wstring displayAuthorFor(const Msg& m, HWND notify) {
+    if (m.from == L"me") {
+        if (!m.author.empty()) return m.author;
+        if (!g_user.nickname.empty()) return g_user.nickname;
+        if (!g_user.username.empty()) return g_user.username;
+        return L"me";
+    }
+    std::wstring key = !m.author_key.empty() ? m.author_key
+                     : (!m.peer_key.empty() ? m.peer_key : m.from);
+    if (!key.empty()) {
+        fetch::PeerProfile peer = fetch::peerProfileCached(key);
+        if (peer.loaded && peer.err.empty()) {
+            if (!peer.nickname.empty()) return peer.nickname;
+            if (!peer.username.empty()) return peer.username;
+            if (!peer.uid.empty()) return peer.uid;
+        }
+        if (!peer.loading && peer.err.empty()) requestPeerProfileOnce(key, notify);
+    }
+    if (!m.author.empty() && !looksLikeUuidW(m.author)) return m.author;
+    if (!m.from.empty() && !looksLikeUuidW(m.from)) return m.from;
+    return shortPeerLabel(key);
+}
+
+std::wstring msgPreviewText(const Msg& m) {
+    if (!m.body.empty()) {
+        std::wstring preview = m.body;
+        for (auto& c : preview) {
+            if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+        }
+        while (preview.find(L"  ") != std::wstring::npos) {
+            preview.erase(preview.find(L"  "), 1);
+        }
+        if (preview.size() > 96) preview = preview.substr(0, 96) + L"...";
+        return preview;
+    }
+    switch (m.kind) {
+        case MsgKind::Image: return L"[image]";
+        case MsgKind::Sticker: return L"[sticker]";
+        case MsgKind::Gif: return L"[gif]";
+        case MsgKind::Video: return L"[video]";
+        case MsgKind::System: return L"[system]";
+        case MsgKind::DayDivider: return L"[day]";
+        default: return L"[message]";
+    }
+}
+
+void rememberReplySnapshot(const std::wstring& slug, const Msg& m) {
+    if (m.server_id <= 0) return;
+    ReplySnapshot snap;
+    snap.slug = slug;
+    snap.author = msgAuthorDisplay(m);
+    snap.preview = msgPreviewText(m);
+    std::lock_guard<std::mutex> lk(g_reply_snapshots_mtx);
+    g_reply_snapshots[m.server_id] = std::move(snap);
+}
+
+bool fillReplySnapshot(Msg& m) {
+    if (m.reply_to_id <= 0) return false;
+    if (!m.reply_author.empty() || !m.reply_preview.empty()) return true;
+    std::lock_guard<std::mutex> lk(g_reply_snapshots_mtx);
+    auto it = g_reply_snapshots.find(m.reply_to_id);
+    if (it == g_reply_snapshots.end()) return false;
+    m.reply_author = it->second.author;
+    m.reply_preview = it->second.preview;
+    return true;
+}
+
+void normalizeMsgIdentity(Msg& m) {
+    if (m.author_key.empty()) {
+        if (m.from == L"me") m.author_key = selfAuthorKey();
+        else if (!m.peer_key.empty()) m.author_key = m.peer_key;
+        else m.author_key = m.from;
+    }
+    if (m.from != L"me" && m.peer_key.empty()) m.peer_key = m.author_key;
+}
+
+bool sameMessageIdentity(const Msg& a, const Msg& b) {
+    if (a.server_id > 0 && b.server_id > 0 && a.server_id == b.server_id) return true;
+    return !a.client_msg_id.empty()
+        && !b.client_msg_id.empty()
+        && a.client_msg_id == b.client_msg_id;
+}
+
+bool sameMessageIdentityStrict(const Msg& a, const Msg& b) {
+    if (a.server_id > 0 && b.server_id > 0) return a.server_id == b.server_id;
+    if (!a.client_msg_id.empty() && !b.client_msg_id.empty()) {
+        return a.client_msg_id == b.client_msg_id;
+    }
+    return false;
+}
+
+void mergeServerIdentity(Msg& local, const Msg& server) {
+    if (local.server_id == 0 && server.server_id > 0) local.server_id = server.server_id;
+    if (local.client_msg_id.empty()) local.client_msg_id = server.client_msg_id;
+    if (local.author_key.empty()) local.author_key = server.author_key;
+    if (local.peer_key.empty()) local.peer_key = server.peer_key;
+    if (local.author.empty()) local.author = server.author;
+    if (local.time.empty()) local.time = server.time;
+    if (local.reply_to_id == 0) local.reply_to_id = server.reply_to_id;
+    if (local.reply_author.empty()) local.reply_author = server.reply_author;
+    if (local.reply_preview.empty()) local.reply_preview = server.reply_preview;
+    local.send_state = MsgSendState::Sent;
+    local.error_text.clear();
+}
+
+int64_t oldestServerId(const std::wstring& slug) {
+    int64_t oldest = std::numeric_limits<int64_t>::max();
+    bool found = false;
+    for (auto& m : streamFor(slug)) {
+        if (m.server_id > 0 && m.server_id < oldest) {
+            oldest = m.server_id;
+            found = true;
+        }
+    }
+    return found ? oldest : 0;
+}
+
+bool hasMessageServerId(const std::wstring& slug, int64_t server_id) {
+    if (server_id <= 0) return false;
+    for (auto& m : streamFor(slug)) {
+        if (m.server_id == server_id) return true;
+    }
+    return false;
+}
+
+bool isFocusWaitingForSlug(const std::wstring& slug) {
+    return g_focus_target.server_id > 0
+        && g_focus_target.slug == slug
+        && !g_focus_target.scroll_applied;
+}
+}
+
+static std::string makeClientMsgId();
+static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kind,
+                            std::string client_msg_id = {}, int64_t reply_to_id = 0);
+
+void addMentionToComposer(const std::wstring& user_id, const std::wstring& label) {
+    if (user_id.empty()) return;
+    for (auto& m : g_pending_mentions) {
+        if (m.user_id == user_id) return;
+    }
+    std::wstring clean = label.empty() ? user_id : label;
+    for (auto& c : clean) {
+        if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+    }
+    while (!clean.empty() && clean.front() == L' ') clean.erase(clean.begin());
+    while (!clean.empty() && clean.back() == L' ') clean.pop_back();
+    g_pending_mentions.push_back({ user_id, clean });
+    std::wstring token = L"@" + clean;
+    if (!g_composer.text.empty()) {
+        wchar_t prev = g_composer.text.back();
+        if (prev != L' ' && prev != L'\n' && prev != L'\t') token = L" " + token;
+    }
+    token += L" ";
+    g_composer.replaceSelection(token);
+    g_focus_composer = true;
+}
+
+bool appendOrMergeMessage(const std::wstring& slug, Msg msg) {
+    normalizeMsgIdentity(msg);
+    fillReplySnapshot(msg);
+    auto& s = streamFor(slug);
+    auto& sc = g_scroll[slug];
+    bool was_at_bottom = (sc.offset_from_bottom < 16.0f && sc.target_offset < 16.0f);
+    for (auto& existing : s) {
+        if (!sameMessageIdentityStrict(existing, msg)) continue;
+        mergeServerIdentity(existing, msg);
+        fillReplySnapshot(existing);
+        rememberReplySnapshot(slug, existing);
+        return false;
+    }
+    s.push_back(std::move(msg));
+    rememberReplySnapshot(slug, s.back());
+    if (was_at_bottom) {
+        sc.offset_from_bottom = 0;
+        sc.target_offset = 0;
+    }
+    return true;
+}
+
+void focusMessage(const std::wstring& slug, int64_t server_id) {
+    if (server_id <= 0) return;
+    if (!slug.empty()) switchChannel(slug);
+    g_focus_target.slug = slug.empty() ? g_active : slug;
+    g_focus_target.server_id = server_id;
+    g_focus_target.highlight_until = stages::g_time_in_stage + 2.2f;
+    g_focus_target.scroll_applied = false;
+    g_focus_target.missing_reported = false;
+    if (!hasMessageServerId(g_focus_target.slug, server_id)) {
+        auto state = g_history_state[g_focus_target.slug];
+        if (state == HistoryLoadState::Loaded || state == HistoryLoadState::Failed) {
+            fetchHistory(GetActiveWindow(), g_focus_target.slug);
+        } else if (state == HistoryLoadState::Exhausted) {
+            g_focus_target.missing_reported = true;
+        }
+    }
 }
 
 void fetchHistory(HWND notify, const std::wstring& slug) {
-    if (g_session_token.empty()) return;
+    if (g_session_token.empty()) {
+        g_history_state[slug] = HistoryLoadState::Failed;
+        return;
+    }
     std::string chat_id;
     for (auto& c : g_channels) if (c.slug == slug) { chat_id = c.id; break; }
-    if (chat_id.empty()) return;
+    if (chat_id.empty()) {
+        g_history_state[slug] = HistoryLoadState::NotStarted;
+        return;
+    }
+    auto& hist_state = g_history_state[slug];
+    if (hist_state == HistoryLoadState::Loading || hist_state == HistoryLoadState::Exhausted) {
+        return;
+    }
+    int64_t before_id = oldestServerId(slug);
+    hist_state = HistoryLoadState::Loading;
 
-    auto* a = new HistArg{ slug, chat_id, notify };
+    auto* a = new HistArg{ slug, chat_id, before_id, notify };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<HistArg> a((HistArg*)lp);
         std::string url = "/api/chat/history?session_token=" + g_session_token
-                        + "&chat_id=" + a->chat_id + "&limit=100";
+                        + "&chat_id=" + a->chat_id
+                        + "&limit=" + std::to_string(kHistoryPageLimit);
+        if (a->before_id > 0) {
+            url += "&before_id=" + std::to_string(a->before_id);
+        }
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
-        if (!r.ok()) return 0;
+        if (!r.ok()) {
+            {
+                std::lock_guard<std::mutex> lk(g_pending_hist_mtx);
+                HistoryResult hr;
+                hr.ok = false;
+                hr.before_id = a->before_id;
+                g_pending_history[a->slug] = std::move(hr);
+            }
+            auto* slug_p = new std::wstring(a->slug);
+            PostMessageW(a->h, WM_APP + 45, 0, (LPARAM)slug_p);
+            return 0;
+        }
         // 后端 history 真实字段（chat.rs MessageOut）：
         //   id (i64) / sender_id (Option<String>) / msg_type / payload (JSON Value)
         //   / created_at (i64) / deleted (bool)
@@ -237,51 +597,32 @@ void fetchHistory(HWND notify, const std::wstring& slug) {
             else if (kind == "system") m.kind = MsgKind::System;
             else m.kind = MsgKind::Text;
             m.server_id = net::jsonInt(obj, "id");
+            m.client_msg_id = net::jsonStr(obj, "client_msg_id");
             // sender_id 是 UUID — 跟当前 user_id 比较决定 me / 别人
             std::string sender = net::jsonStr(obj, "sender_id");
             if (!g_user_id.empty() && sender == g_user_id) {
                 m.from = L"me";
+                m.author_key = utf8wHist(g_user_id);
                 m.author = g_user.nickname;
             } else {
-                // Keep the full sender id for profile lookup; only shorten the visible fallback.
                 m.peer_key = utf8wHist(sender);
-                std::string sender_short = sender.size() > 8 ? sender.substr(0, 8) : sender;
-                m.from = utf8wHist(sender_short);
-                m.author = m.from;
+                m.author_key = m.peer_key;
+                m.from = shortPeerLabel(m.peer_key);
+                m.author = utf8wHist(net::jsonStr(obj, "sender_nickname"));
+                if (m.author.empty()) m.author = utf8wHist(net::jsonStr(obj, "sender_username"));
+                if (m.author.empty()) m.author = utf8wHist(net::jsonStr(obj, "sender_uid"));
             }
             // payload 可能是 string 字面量 "abc" 或 JSON object {...}（image/sticker 含 url 等）
             // 简单做法：找 "payload":" 后第一个 unescaped " 之间的内容
-            {
-                auto pp = obj.find("\"payload\":");
-                if (pp != std::string::npos) {
-                    pp += 10;
-                    while (pp < obj.size() && (obj[pp] == ' ' || obj[pp] == '\t')) ++pp;
-                    if (pp < obj.size() && obj[pp] == '"') {
-                        ++pp;
-                        std::string tmp;
-                        while (pp < obj.size() && obj[pp] != '"') {
-                            if (obj[pp] == '\\' && pp + 1 < obj.size()) {
-                                char nc = obj[pp + 1];
-                                if (nc == 'n') tmp.push_back('\n');
-                                else if (nc == 't') tmp.push_back('\t');
-                                else if (nc == 'r') tmp.push_back('\r');
-                                else tmp.push_back(nc);
-                                pp += 2;
-                            } else {
-                                tmp.push_back(obj[pp]);
-                                ++pp;
-                            }
-                        }
-                        m.body = utf8wHist(tmp);
-                    }
-                    // payload 是 object 时（image/video）— 提 url 字段
-                    else if (pp < obj.size() && obj[pp] == '{') {
-                        std::string sub_url = net::jsonStr(obj.substr(pp), "url");
-                        if (sub_url.empty()) sub_url = net::jsonStr(obj.substr(pp), "media_url");
-                        m.body = utf8wHist(sub_url);
-                    }
-                }
+            m.reply_to_id = net::jsonInt(obj, "reply_to_id");
+            std::string reply = net::jsonObject(obj, "reply_snapshot");
+            if (!reply.empty()) {
+                m.reply_author = utf8wHist(net::jsonStr(reply, "sender_nickname"));
+                if (m.reply_author.empty()) m.reply_author = utf8wHist(net::jsonStr(reply, "sender_username"));
+                if (m.reply_author.empty()) m.reply_author = utf8wHist(net::jsonStr(reply, "sender_uid"));
+                m.reply_preview = utf8wHist(net::jsonStr(reply, "preview"));
             }
+            m.body = bodyFromMessageObject(obj);
             // created_at i64 → HH:MM 格式
             int64_t ts = net::jsonInt(obj, "created_at");
             if (ts > 0) {
@@ -295,12 +636,19 @@ void fetchHistory(HWND notify, const std::wstring& slug) {
                 m.time = L"";
             }
             m.status = L"online";
+            normalizeMsgIdentity(m);
+            fillReplySnapshot(m);
             msgs.push_back(std::move(m));
             pos = cb + 1;
         }
+        std::reverse(msgs.begin(), msgs.end());
         {
             std::lock_guard<std::mutex> lk(g_pending_hist_mtx);
-            g_pending_history[a->slug] = std::move(msgs);
+            HistoryResult hr;
+            hr.ok = true;
+            hr.before_id = a->before_id;
+            hr.msgs = std::move(msgs);
+            g_pending_history[a->slug] = std::move(hr);
         }
         // PostMessage 让主线程把 pending 替换到 streamFor
         auto* slug_p = new std::wstring(a->slug);
@@ -311,23 +659,72 @@ void fetchHistory(HWND notify, const std::wstring& slug) {
 
 // 主线程调（WM_APP+45）— merge 历史到 streamFor
 void applyHistoryResult(const std::wstring& slug) {
-    std::vector<Msg> msgs;
+    HistoryResult result;
     {
         std::lock_guard<std::mutex> lk(g_pending_hist_mtx);
         auto it = g_pending_history.find(slug);
         if (it == g_pending_history.end()) return;
-        msgs = std::move(it->second);
+        result = std::move(it->second);
         g_pending_history.erase(it);
     }
+    if (!result.ok) {
+        g_history_state[slug] = HistoryLoadState::Failed;
+        return;
+    }
+    bool exhausted = result.msgs.empty() || result.msgs.size() < (size_t)kHistoryPageLimit;
+    g_history_state[slug] = exhausted ? HistoryLoadState::Exhausted : HistoryLoadState::Loaded;
+    auto& msgs = result.msgs;
     auto& s = streamFor(slug);
+    std::unordered_set<int64_t> seen_server_ids;
+    std::unordered_set<std::string> seen_client_ids;
+    for (auto& existing : s) {
+        normalizeMsgIdentity(existing);
+        if (existing.server_id > 0) seen_server_ids.insert(existing.server_id);
+        if (!existing.client_msg_id.empty()) seen_client_ids.insert(existing.client_msg_id);
+    }
+    auto exists = [&](Msg& candidate) -> bool {
+        normalizeMsgIdentity(candidate);
+        bool duplicate = false;
+        if (candidate.server_id > 0 && seen_server_ids.count(candidate.server_id)) duplicate = true;
+        if (!candidate.client_msg_id.empty() && seen_client_ids.count(candidate.client_msg_id)) duplicate = true;
+        if (!duplicate) {
+            if (candidate.server_id > 0) seen_server_ids.insert(candidate.server_id);
+            if (!candidate.client_msg_id.empty()) seen_client_ids.insert(candidate.client_msg_id);
+            return false;
+        }
+        for (auto& existing : s) {
+            if (sameMessageIdentity(existing, candidate)) {
+                mergeServerIdentity(existing, candidate);
+                break;
+            }
+        }
+        return true;
+    };
     // 历史消息插到流的开头（之前实时收到的"me"放在后面）
     if (s.empty()) {
+        for (auto& m : msgs) normalizeMsgIdentity(m);
         s = std::move(msgs);
     } else {
         // 简单 merge：历史在前，本地实时在后
-        std::vector<Msg> merged = std::move(msgs);
+        std::vector<Msg> merged;
+        merged.reserve(msgs.size() + s.size());
+        for (auto& m : msgs) {
+            if (!exists(m)) merged.push_back(std::move(m));
+        }
         for (auto& m : s) merged.push_back(std::move(m));
         s = std::move(merged);
+    }
+    for (auto& m : s) {
+        normalizeMsgIdentity(m);
+        fillReplySnapshot(m);
+        rememberReplySnapshot(slug, m);
+    }
+    if (isFocusWaitingForSlug(slug) && !hasMessageServerId(slug, g_focus_target.server_id)) {
+        if (!exhausted) {
+            fetchHistory(GetActiveWindow(), slug);
+        } else {
+            g_focus_target.missing_reported = true;
+        }
     }
 }
 
@@ -336,11 +733,47 @@ static Channel* activeChannel() {
     return &g_channels[2];   // general
 }
 
+std::string activeChatId() {
+    if (g_channels.empty()) return {};
+    if (auto* ch = activeChannel()) return ch->id;
+    return {};
+}
+
 static float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
     if (s.empty() || !fmt) return 0.0f;
     DWRITE_TEXT_METRICS m{};
     if (!app.texts().measure(fmt, s, 8192.0f, 256.0f, &m)) return 0.0f;
     return m.width;
+}
+
+static std::wstring authorKeyFor(const Msg& m) {
+    if (!m.author_key.empty()) return m.author_key;
+    if (!m.peer_key.empty()) return m.peer_key;
+    if (m.from == L"me") return L"me";
+    return m.from;
+}
+
+static bool sameGroupedAuthor(const Msg& prev, const Msg& cur) {
+    if (prev.kind != MsgKind::Text || cur.kind != MsgKind::Text) return false;
+    if (prev.from == L"me" || cur.from == L"me") return false;
+    return authorKeyFor(prev) == authorKeyFor(cur);
+}
+
+static bool messageHasReplyPreview(const Msg& m) {
+    return m.reply_to_id > 0
+        && (!m.reply_author.empty() || !m.reply_preview.empty());
+}
+
+static std::wstring replyPreviewLine(const Msg& m) {
+    std::wstring author = m.reply_author.empty() ? L"message" : m.reply_author;
+    std::wstring preview = m.reply_preview.empty() ? L"[unavailable]" : m.reply_preview;
+    std::wstring line = author + L": " + preview;
+    if (line.size() > 96) line = line.substr(0, 96) + L"...";
+    return line;
+}
+
+static float replyPreviewHeight(const Msg& m) {
+    return messageHasReplyPreview(m) ? 28.0f : 0.0f;
 }
 
 void tick(float dt) {
@@ -355,23 +788,36 @@ void appendMedia(const std::wstring& path) {
     auto dot = p.find_last_of(L'.');
     std::wstring ext = (dot != std::wstring::npos) ? p.substr(dot) : L"";
     for (auto& c : ext) c = (wchar_t)towlower(c);
+    const char* kind = "text";
     if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp" || ext == L".bmp") {
         m.kind = MsgKind::Image;
+        kind = "image";
     } else if (ext == L".gif") {
         m.kind = MsgKind::Gif;
+        kind = "gif";
     } else if (ext == L".mp4" || ext == L".webm" || ext == L".mov" || ext == L".avi" || ext == L".mkv") {
         m.kind = MsgKind::Video;
+        kind = "video";
     } else {
         m.kind = MsgKind::Text;
         m.body = L"[文件] " + path;
-        m.from = L"me"; m.time = localTimeText();
+        m.from = L"me"; m.author = g_user.nickname; m.author_key = selfAuthorKey();
+        m.status = L"online"; m.time = localTimeText();
+        m.client_msg_id = makeClientMsgId();
         appendLocalMessage(std::move(m));
         return;
     }
     m.from = L"me";
+    m.author = g_user.nickname;
+    m.author_key = selfAuthorKey();
+    m.status = L"online";
     m.body = path;
     m.time = localTimeText();
+    m.client_msg_id = makeClientMsgId();
+    m.send_state = MsgSendState::Pending;
+    std::string client_msg_id = m.client_msg_id;
     appendLocalMessage(std::move(m));
+    sendChatMessage(GetActiveWindow(), path, kind, client_msg_id);
 }
 
 // ============== 频道列表 ==============
@@ -476,13 +922,13 @@ static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool pre
             bub_h = bub_w * aspect;
             if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
     }
     if (m.kind == MsgKind::Video) {
-        return (prev_same_author ? 140.0f : 162.0f) + 6;
+        return (prev_same_author ? 140.0f : 162.0f) + replyPreviewHeight(m) + 6;
     }
     if (m.kind == MsgKind::Sticker) {
-        return (prev_same_author ? 100.0f : 122.0f) + 6;
+        return (prev_same_author ? 100.0f : 122.0f) + replyPreviewHeight(m) + 6;
     }
     // text — 处理 launcher://pack/ link 卡片
     auto find_url = [](const std::wstring& s) -> std::wstring {
@@ -498,7 +944,7 @@ static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool pre
     };
     std::wstring url = find_url(m.body);
     if (!url.empty() && url.compare(0, 15, L"launcher://pack/") == 0) {
-        return (prev_same_author ? 88.0f : 110.0f) + 6;
+        return (prev_same_author ? 88.0f : 110.0f) + replyPreviewHeight(m) + 6;
     }
     if (m.body.empty()) {
         // 空消息 — 不算高度（实际 paint 也跳过）
@@ -508,8 +954,17 @@ static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool pre
     DWRITE_TEXT_METRICS tm{};
     app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
     float bub_h = (std::max)(tm.height + 18, 28.0f);
+    if (m.from == L"me" && m.send_state != MsgSendState::Sent) {
+        auto* state_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
+        std::wstring state_text = (m.send_state == MsgSendState::Pending)
+            ? L"sending..."
+            : (m.error_text.empty() ? L"send failed" : m.error_text);
+        DWRITE_TEXT_METRICS sm{};
+        app.texts().measure(state_fmt, state_text, bub_max_w - 28, 64, &sm);
+        bub_h += (std::max)(12.0f, sm.height + 2.0f);
+    }
     if (!url.empty()) bub_h += 4;
-    return (prev_same_author ? bub_h : bub_h + 22) + 6;
+    return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
 }
 
 // ============== 单条气泡 ==============
@@ -587,9 +1042,8 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         if (!drew_real) {
             prim::fillCircle(ctx, avatar_x + ar, ay + ar, ar, br.solid(pal.primary));
             // 自己用 nickname 首字，否则用 from 首字（对方 UUID 前 8 字的首字符）
-            wchar_t key = me
-                ? (g_user.nickname.empty() ? L'?' : g_user.nickname[0])
-                : (m.from.empty() ? L'?' : m.from[0]);
+            std::wstring avatar_label = displayAuthorFor(m, app.hwnd());
+            wchar_t key = avatar_label.empty() ? L'?' : avatar_label[0];
             wchar_t initial[2] = { (wchar_t)towupper(key), 0 };
             auto* init_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f),
                                                 DWRITE_FONT_WEIGHT_BOLD);
@@ -600,8 +1054,8 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
                             DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
         // 头像左键看主页（me 自己跳过）
-        std::wstring profile_key = !m.peer_key.empty() ? m.peer_key : m.from;
-        if (!me && !profile_key.empty()) {
+        std::wstring profile_key = me ? selfAuthorKey() : (!m.peer_key.empty() ? m.peer_key : m.from);
+        if (!profile_key.empty()) {
             g_avatar_hits.push_back({ { avatar_x, ay, ar * 2, ar * 2 }, profile_key });
             hit({ avatar_x, ay, ar * 2, ar * 2 }, [profile_key](){
                 auto* p = new std::wstring(profile_key);
@@ -615,7 +1069,9 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         if (me) return avatar_x - gap - bub_w;
         return avatar_x + ar * 2 + gap;
     };
-    float bub_y = y + (prev_same_author ? 0 : 22);
+    float reply_h = replyPreviewHeight(m);
+    float reply_y = y + (prev_same_author ? 0 : 22);
+    float bub_y = reply_y + reply_h;
     if (!prev_same_author) {
         // author + time 在气泡上方那一行
         // me：和气泡一样靠右；别人：和气泡靠左
@@ -627,11 +1083,12 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         } else {
             author_disp = m.author.empty() ? m.from : m.author;
         }
-        float aw_ = measureW(app, author_disp, author_fmt);
+        std::wstring author_display = displayAuthorFor(m, app.hwnd());
+        float aw_ = measureW(app, author_display, author_fmt);
         float tw_ = m.time.empty() ? 0 : (measureW(app, m.time, time_fmt) + 8);
         float meta_w = aw_ + tw_;
         float meta_x = me ? (avatar_x - gap - meta_w) : (avatar_x + ar * 2 + gap);
-        prim::drawText_(ctx, author_disp, author_fmt,
+        prim::drawText_(ctx, author_display, author_fmt,
                         meta_x, y + 2, aw_ + 4, 14,
                         br.solid(me ? pal.primary : pal.text));
         if (!m.time.empty()) {
@@ -701,10 +1158,10 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
         // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
         {
-            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22) + reply_h;
             g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
     }
 
     if (m.kind == MsgKind::Video) {
@@ -727,18 +1184,17 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         // 点击 → WebView2 内嵌播放器
         std::wstring src = m.body;
         hit({ bub_x, bub_y, bub_w, bub_h }, [src](){
-            static std::wstring g_pending_video;
-            g_pending_video = src;
+            auto* payload = new std::wstring(src);
             PostMessageW(GetActiveWindow(), WM_APP + 46,
-                         (WPARAM)&g_pending_video, 0);
+                         (WPARAM)payload, 0);
         }, true);
         // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
         // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
         {
-            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22) + reply_h;
             g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
     }
 
     if (m.kind == MsgKind::Sticker) {
@@ -767,10 +1223,10 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
         // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
         {
-            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22) + reply_h;
             g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
     }
 
     // ---------- Text bubble ----------
@@ -852,34 +1308,55 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
             sticker::previewPackByShort(GetActiveWindow(), short_copy);
         }
         hit({ bub_x, bub_y, bub_w, bub_h }, [short_copy](){
-            static std::string g_pending_short;
-            g_pending_short = short_copy;
+            auto* payload = new std::string(short_copy);
             PostMessageW(GetActiveWindow(), WM_APP + 49,
-                         (WPARAM)&g_pending_short, 0);
+                         (WPARAM)payload, 0);
         }, true);
         // 整行 hit — 让用户右键 row 任何位置（含 avatar / meta header）都弹菜单
         // 不只是 bubble 本体（sticker 100×100 太精确，用户难命中）
         {
-            float _row_h = (prev_same_author ? bub_h : bub_h + 22);
+            float _row_h = (prev_same_author ? bub_h : bub_h + 22) + reply_h;
             g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
     }
 
     float bub_max_w = (std::min)(maxw * 0.65f, 480.0f);
     DWRITE_TEXT_METRICS tm{};
     app.texts().measure(body_fmt, m.body, bub_max_w - 28, 8192, &tm);
+    auto* state_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
+    bool show_state = me && m.send_state != MsgSendState::Sent;
+    std::wstring state_text;
+    if (show_state) {
+        state_text = (m.send_state == MsgSendState::Pending)
+            ? L"sending..."
+            : (m.error_text.empty() ? L"send failed" : m.error_text);
+    }
+    float state_h = 0.0f;
+    if (show_state) {
+        DWRITE_TEXT_METRICS sm{};
+        app.texts().measure(state_fmt, state_text, bub_max_w - 28, 64, &sm);
+        state_h = (std::max)(12.0f, sm.height + 2.0f);
+    }
     float bub_w = tm.width + 28;
-    float bub_h = (std::max)(tm.height + 18, 28.0f);
+    float bub_h = (std::max)(tm.height + 18, 28.0f) + state_h;
     float bub_x = bub_x_for(bub_w);
 
-    uint32_t bub_bg = me ? pal.primary : pal.card;
+    uint32_t bub_bg = me
+        ? (m.send_state == MsgSendState::Failed ? 0xFFE34B4B : pal.primary)
+        : pal.card;
     uint32_t bub_fg = me ? 0xFFFFFFFF : pal.text;
     prim::fillRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
-                 br.solid(bub_bg));
+                 m.send_state == MsgSendState::Pending ? br.solidA(bub_bg, 0.72f) : br.solid(bub_bg));
     prim::drawText_(ctx, m.body, body_fmt,
-                    bub_x + 14, bub_y + 8, bub_w - 28, bub_h - 16,
+                    bub_x + 14, bub_y + 8, bub_w - 28, bub_h - 16 - state_h,
                     br.solid(bub_fg));
+    if (show_state) {
+        prim::drawText_(ctx, state_text, state_fmt,
+                        bub_x + 14, bub_y + bub_h - state_h - 2, bub_w - 28, state_h,
+                        br.solidA(0xFFFFFFFF, m.send_state == MsgSendState::Failed ? 0.95f : 0.72f),
+                        DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
 
     if (!url.empty()) {
         // 链接气泡下加一个小提示行 + hit 整个气泡 → WebView2 打开
@@ -891,15 +1368,17 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         bub_h += 4;
         std::wstring url_copy = url;
         hit({ bub_x, bub_y, bub_w, bub_h }, [url_copy](){
-            static std::wstring g_pending_url;
-            g_pending_url = url_copy;
+            auto* payload = new std::wstring(url_copy);
             PostMessageW(GetActiveWindow(), WM_APP + 47,
-                         (WPARAM)&g_pending_url, 0);
+                         (WPARAM)payload, 0);
         }, true);
     }
-    g_msg_hits.push_back({ { bub_x, bub_y, bub_w, bub_h }, idx });
+    {
+        float _row_h = (prev_same_author ? bub_h : bub_h + 22) + reply_h;
+        g_msg_hits.push_back({ { x, y, maxw, _row_h }, idx });
+    }
 
-    return (prev_same_author ? bub_h : bub_h + 22) + 6;
+    return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
 }
 
 // ============== 异步发消息 ==============
@@ -909,15 +1388,25 @@ struct SendArg {
     std::string chat_id;
     std::string kind;          // text / sticker / image / gif
     std::string client_msg_id;
+    int64_t reply_to_id = 0;
+    std::vector<std::wstring> mentions;
     std::wstring slug;
     std::wstring body;
     HWND hwnd;
 };
-struct LinkArg { std::wstring slug; std::string client_msg_id; std::wstring body; int64_t mid; };
+struct LinkArg {
+    std::wstring slug;
+    std::string client_msg_id;
+    std::wstring body;
+    int64_t mid = 0;
+    bool ok = false;
+    std::wstring error_text;
+};
 std::mutex g_link_mtx;
 std::vector<LinkArg> g_pending_links;
+}
 
-std::string makeClientMsgId() {
+static std::string makeClientMsgId() {
     GUID g{};
     if (FAILED(CoCreateGuid(&g))) return {};
     char buf[40]{};
@@ -927,8 +1416,6 @@ std::string makeClientMsgId() {
         g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
     for (char& c : buf) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     return buf;
-}
-
 }
 
 static std::wstring localTimeText(time_t tt) {
@@ -952,47 +1439,110 @@ void applySendResult() {
             if (it->from == L"me" && it->server_id == 0
                 && ((!la.client_msg_id.empty() && it->client_msg_id == la.client_msg_id)
                     || (la.client_msg_id.empty() && it->body == la.body))) {
-                it->server_id = la.mid;
+                if (la.ok) {
+                    it->server_id = la.mid;
+                    it->send_state = MsgSendState::Sent;
+                    it->error_text.clear();
+                    rememberReplySnapshot(la.slug, *it);
+                } else {
+                    it->send_state = MsgSendState::Failed;
+                    it->error_text = la.error_text.empty() ? L"发送失败" : la.error_text;
+                }
                 break;
             }
         }
     }
 }
 
-static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kind = "text") {
-    if (g_session_token.empty()) return;
+static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kind,
+                            std::string client_msg_id, int64_t reply_to_id) {
+    std::wstring slug = g_active;
+    if (client_msg_id.empty()) client_msg_id = makeClientMsgId();
+    std::vector<std::wstring> mentions;
+    mentions.reserve(g_pending_mentions.size());
+    for (auto& m : g_pending_mentions) mentions.push_back(m.user_id);
+    auto fail = [&](const std::wstring& err) {
+        {
+            std::lock_guard<std::mutex> lk(g_link_mtx);
+            g_pending_links.push_back({ slug, client_msg_id, body, 0, false, err });
+        }
+        PostMessageW(hwnd, WM_APP + 52, 0, 0);
+    };
+    if (g_session_token.empty()) { fail(L"未登录"); return; }
     auto* ch = activeChannel();
+    if (ch->id.empty()) { fail(L"channel not ready"); return; }
     if (ch->id.empty()) return;     // 还没拿到 backend uuid
-    std::string client_msg_id = makeClientMsgId();
-    auto& msgs = streamFor(g_active);
+    auto& msgs = streamFor(slug);
     for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-        if (it->from == L"me" && it->server_id == 0 && it->body == body && it->client_msg_id.empty()) {
+        if (it->from == L"me" && it->server_id == 0
+            && it->body == body && it->client_msg_id.empty()) {
             it->client_msg_id = client_msg_id;
             break;
         }
     }
-    auto* a = new SendArg{ g_session_token, ch->id, kind, client_msg_id, g_active, body, hwnd };
+    auto* a = new SendArg{ g_session_token, ch->id, kind, client_msg_id, reply_to_id, mentions, slug, body, hwnd };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<SendArg> a((SendArg*)lp);
+        auto push_result = [&](bool ok, int64_t mid, const std::wstring& err) {
+            {
+                std::lock_guard<std::mutex> lk(g_link_mtx);
+                g_pending_links.push_back({ a->slug, a->client_msg_id, a->body, mid, ok, err });
+            }
+            PostMessageW(a->hwnd, WM_APP + 52, 0, 0);
+        };
+        std::string payload;
+        if (a->kind == "image" || a->kind == "video" || a->kind == "gif") {
+            if (a->kind == "gif") {
+                payload = sticker::stickerPayloadJsonForPath(a->body);
+                if (payload == "{}") payload.clear();
+            }
+            if (payload.empty()) {
+                auto media = launcher::d2d::fetch::uploadMediaFile(a->body);
+                if (!media.ok) {
+                    push_result(false, 0, media.error.empty() ? L"media upload failed" : utf8wHist(media.error));
+                    return 0;
+                }
+                payload = launcher::d2d::fetch::mediaPayloadJson(media);
+            }
+        } else if (a->kind == "sticker") {
+            payload = sticker::stickerPayloadJsonForPath(a->body);
+            if (payload == "{}") {
+                auto media = launcher::d2d::fetch::uploadMediaFile(a->body);
+                if (!media.ok) {
+                    push_result(false, 0, media.error.empty() ? L"sticker upload failed" : utf8wHist(media.error));
+                    return 0;
+                }
+                payload = launcher::d2d::fetch::mediaPayloadJson(media);
+            }
+        } else {
+            payload = "\"" + net::jsonEscape(a->body) + "\"";
+        }
         std::string b = "{\"session_token\":\"" + a->session_token
                       + "\",\"chat_id\":\"" + a->chat_id
                       + "\",\"msg_type\":\"" + a->kind
-                      + "\",\"payload\":\"" + net::jsonEscape(a->body) + "\"";
+                      + "\",\"payload\":" + payload;
         if (!a->client_msg_id.empty()) {
             b += ",\"client_msg_id\":\"" + a->client_msg_id + "\"";
         }
+        if (a->reply_to_id > 0) {
+            b += ",\"reply_to_id\":" + std::to_string(a->reply_to_id);
+        }
+        b += ",\"mentions\":[";
+        for (size_t i = 0; i < a->mentions.size(); ++i) {
+            if (i) b += ",";
+            b += "\"" + net::jsonEscape(a->mentions[i]) + "\"";
+        }
+        b += "]";
         b += "}";
         auto r = net::postJson(L"/api/chat/send", b);
         if (r.ok()) {
             int64_t mid = net::jsonInt(r.body, "id");
             if (mid > 0) {
-                {
-                    std::lock_guard<std::mutex> lk(g_link_mtx);
-                    g_pending_links.push_back({ a->slug, a->client_msg_id, a->body, mid });
-                }
-                PostMessageW(a->hwnd, WM_APP + 52, 0, 0);
+                push_result(true, mid, {});
+                return 0;
             }
         }
+        push_result(false, 0, r.body.empty() ? L"send failed" : utf8wHist(r.body.substr(0, 80)));
         return 0;
     }, a, 0, nullptr);
 }
@@ -1032,7 +1582,28 @@ void onWsMessageDeleted(int64_t server_id) {
 
 // 兼容老调用名
 static void sendTextMessage(HWND hwnd, const std::wstring& text) {
-    sendChatMessage(hwnd, text, "text");
+    int64_t reply_to_id = (g_pending_reply.active && g_pending_reply.slug == g_active)
+        ? g_pending_reply.id : 0;
+    Msg m;
+    m.kind = MsgKind::Text;
+    m.from = L"me";
+    m.author = g_user.nickname;
+    m.author_key = selfAuthorKey();
+    m.status = L"online";
+    m.body = text;
+    m.time = localTimeText();
+    m.client_msg_id = makeClientMsgId();
+    m.reply_to_id = reply_to_id;
+    if (reply_to_id > 0) {
+        m.reply_author = g_pending_reply.author;
+        m.reply_preview = g_pending_reply.preview;
+    }
+    m.send_state = MsgSendState::Pending;
+    std::string client_msg_id = m.client_msg_id;
+    appendLocalMessage(std::move(m));
+    sendChatMessage(hwnd, text, "text", client_msg_id, reply_to_id);
+    g_pending_reply = PendingReply{};
+    g_pending_mentions.clear();
 }
 
 // ============== Composer ==============
@@ -1044,9 +1615,32 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawLine(ctx, ax, ay, ax + aw, ay,
                    br.solid(pal.divider), 1.0f);
 
+    float reply_h = (g_pending_reply.active && g_pending_reply.id > 0) ? 22.0f : 0.0f;
+    if (g_pending_reply.active && g_pending_reply.id > 0) {
+        auto* reply_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f),
+                                             DWRITE_FONT_WEIGHT_BOLD);
+        auto* reply_body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
+        float rx = ax + 58.0f;
+        float ry = ay + 5.0f;
+        float rw = aw - 112.0f;
+        prim::fillRR(ctx, rx, ry, rw, 18.0f, 6.0f, br.solidA(pal.primary, 0.10f));
+        prim::drawText_(ctx, L"Reply", reply_fmt,
+                        rx + 10, ry + 3, 42, 12, br.solid(pal.primary));
+        std::wstring preview = g_pending_reply.author + L": " + g_pending_reply.preview;
+        if (preview.size() > 90) preview = preview.substr(0, 90) + L"...";
+        prim::drawText_(ctx, preview, reply_body_fmt,
+                        rx + 54, ry + 3, rw - 82, 12, br.solid(pal.text_muted));
+        LayoutRect cancel{ rx + rw - 22, ry, 18, 18 };
+        bool ch = cancel.contains(g_mouse);
+        if (ch) prim::fillCircle(ctx, cancel.x + 9, cancel.y + 9, 8, br.solidA(pal.text, 0.12f));
+        icons::drawIcon(app, icons::Name::X, cancel.x + 4, cancel.y + 4, 10,
+                        ch ? pal.text : pal.text_muted);
+        hit(cancel, [](){ g_pending_reply = PendingReply{}; }, true);
+    }
+
     const float ico_sz = 30.0f;
     float ix = ax + 14.0f;
-    float iy = ay + (ah - ico_sz) * 0.5f;
+    float iy = ay + reply_h + ((ah - reply_h) - ico_sz) * 0.5f;
     LayoutRect emoji_btn{ ix, iy, ico_sz, ico_sz };
     bool ehov = emoji_btn.contains(g_mouse);
     if (ehov) {
@@ -1130,14 +1724,6 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     icons::drawIcon(app, icons::Name::Send, sx + 10, sy + 10, 18, 0xFFFFFFFF);
     if (can_send) {
         hit(send_btn, []() {
-            Msg m;
-            m.kind = MsgKind::Text;
-            m.from = L"me";
-            m.author = L"";
-            m.status = L"online";
-            m.body = g_composer.text;
-            m.time = localTimeText();
-            appendLocalMessage(std::move(m));
             sendTextMessage(GetActiveWindow(), g_composer.text);
             g_composer.text.clear();
             g_composer.cursor = 0;
@@ -1187,6 +1773,9 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         icons::Name n = (i == 0) ? icons::Name::Search : icons::Name::More;
         icons::drawIcon(app, n, ar.x + 8, ar.y + 8, 18,
                         hov ? pal.text : pal.text_muted);
+        if (i == 0) {
+            hit(ar, [](){ modal::openSearch(); }, true);
+        }
         btn_x += 38;
     }
 
@@ -1215,6 +1804,10 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         sc.total_height = 0;
         sc.viewport_h = stream_h;
         sc.offset_from_bottom = 0;
+        sc.target_offset = 0;
+        sc.rendered_count = 0;
+        sc.tail_server_id = 0;
+        sc.tail_client_msg_id.clear();
         sc.initialized = true;
         // composer
         paintComposer(app, ax, ay + ah - comp_h, aw, comp_h);
@@ -1222,31 +1815,76 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     float maxw = aw - 32;
     // ----- Pass 1：dry-run 测每条 bubble 高度 + 算 total -----
+    for (auto& m : msgs) {
+        normalizeMsgIdentity(m);
+        fillReplySnapshot(m);
+        rememberReplySnapshot(g_active, m);
+    }
     std::vector<float> heights(msgs.size(), 0);
     float total = 0;
     for (size_t i = 0; i < msgs.size(); ++i) {
         const Msg& m = msgs[i];
         const Msg* prev = (i > 0) ? &msgs[i - 1] : nullptr;
-        bool prev_same = prev
-            && prev->kind == MsgKind::Text
-            && m.kind == MsgKind::Text
-            && prev->from == m.from
-            && m.from != L"me";
+        bool prev_same = prev && sameGroupedAuthor(*prev, m);
         heights[i] = measureBubbleHeight(app, m, maxw, prev_same);
         total += heights[i];
     }
     // ----- 滚动状态 -----
     auto& sc = g_scroll[g_active];
+    bool was_at_bottom = (sc.offset_from_bottom < 16.0f && sc.target_offset < 16.0f);
+    bool tail_changed = false;
+    int64_t tail_server_id = 0;
+    std::string tail_client_msg_id;
+    if (!msgs.empty()) {
+        tail_server_id = msgs.back().server_id;
+        tail_client_msg_id = msgs.back().client_msg_id;
+    }
+    if (sc.initialized) {
+        tail_changed = sc.tail_server_id != tail_server_id
+            || sc.tail_client_msg_id != tail_client_msg_id;
+    }
     sc.total_height = total;
     sc.viewport_h = stream_h;
     if (!sc.initialized) {
         sc.offset_from_bottom = 0;
         sc.target_offset = 0;
         sc.initialized = true;
+    } else if (tail_changed && was_at_bottom && !g_scroll_drag.active) {
+        sc.offset_from_bottom = 0;
+        sc.target_offset = 0;
     }
+    sc.rendered_count = msgs.size();
+    sc.tail_server_id = tail_server_id;
+    sc.tail_client_msg_id = tail_client_msg_id;
     float max_off = (std::max)(0.0f, total - stream_h);
     if (sc.target_offset > max_off) sc.target_offset = max_off;
     if (sc.target_offset < 0) sc.target_offset = 0;
+    if (g_focus_target.server_id > 0
+        && !g_focus_target.scroll_applied
+        && g_focus_target.slug == g_active) {
+        float before = 0.0f;
+        for (size_t i = 0; i < msgs.size(); ++i) {
+            if (msgs[i].server_id == g_focus_target.server_id) {
+                float target_center_from_top = before + heights[i] * 0.5f;
+                float target = max_off - target_center_from_top + stream_h * 0.5f;
+                if (target > max_off) target = max_off;
+                if (target < 0) target = 0;
+                sc.target_offset = target;
+                sc.offset_from_bottom = target;
+                g_focus_target.scroll_applied = true;
+                break;
+            }
+            before += heights[i];
+        }
+        if (!g_focus_target.scroll_applied) {
+            auto state = g_history_state[g_active];
+            if (state == HistoryLoadState::Loaded || state == HistoryLoadState::Failed) {
+                fetchHistory(GetActiveWindow(), g_active);
+            } else if (state == HistoryLoadState::Exhausted) {
+                g_focus_target.missing_reported = true;
+            }
+        }
+    }
     // 拖动滚动条期间直接同步；否则平滑 lerp 到 target（每帧 18% 趋近 — 连贯但不软）
     if (g_scroll_drag.active && g_mouse_pressed) {
         // 鼠标 y 增加 = 滚动条下移 = offset 减少（更接近底部）
@@ -1283,15 +1921,20 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     for (size_t i = 0; i < msgs.size(); ++i) {
         const Msg& m = msgs[i];
         const Msg* prev = (i > 0) ? &msgs[i - 1] : nullptr;
-        bool prev_same = prev
-            && prev->kind == MsgKind::Text
-            && m.kind == MsgKind::Text
-            && prev->from == m.from
-            && m.from != L"me";
+        bool prev_same = prev && sameGroupedAuthor(*prev, m);
         // 跳过完全在 viewport 之外的 bubble — 既省 D2D 也避免 hit 冲突
         if (my + heights[i] < stream_y || my > stream_y + stream_h) {
             my += heights[i];
             continue;
+        }
+        if (g_focus_target.server_id > 0
+            && g_focus_target.slug == g_active
+            && msgs[i].server_id == g_focus_target.server_id
+            && stages::g_time_in_stage < g_focus_target.highlight_until) {
+            float remain = g_focus_target.highlight_until - stages::g_time_in_stage;
+            float alpha = (std::min)(0.18f, 0.08f + remain * 0.05f);
+            prim::fillRR(ctx, ax + 10, my - 2, aw - 20, heights[i], 8.0f,
+                         br.solidA(pal.primary, alpha));
         }
         paintBubble(app, m, (int)i, ax + 16, my, maxw, prev_same);
         my += heights[i];
@@ -1468,10 +2111,9 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         if (cur_pid.empty()) {
             PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
         } else {
-            static std::string g_pending_import_pid;
-            g_pending_import_pid = cur_pid;
+            auto* payload = new std::string(cur_pid);
             PostMessageW(GetActiveWindow(), WM_APP + 34,
-                         (WPARAM)&g_pending_import_pid, 0);
+                         (WPARAM)payload, 0);
         }
     });
     // [⇣ 导出]
@@ -1712,19 +2354,24 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                          || path.substr(sd2) == L".GIF"));
                         m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
+                        m.author = g_user.nickname;
+                        m.author_key = selfAuthorKey();
+                        m.status = L"online";
                         m.body = path;
                         m.time = localTimeText();
+                        m.client_msg_id = makeClientMsgId();
+                        m.send_state = MsgSendState::Pending;
+                        std::string client_msg_id = m.client_msg_id;
                         appendLocalMessage(std::move(m));
                         sendChatMessage(GetActiveWindow(), path,
-                                        is_g ? "gif" : "sticker");
+                                        is_g ? "gif" : "sticker", client_msg_id);
                         g_picker_open = false;
                         g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                     }, true);
                     hit(xb, [path](){
-                        static std::wstring g_pending_del;
-                        g_pending_del = path;
+                        auto* payload = new std::wstring(path);
                         PostMessageW(GetActiveWindow(), WM_APP + 40,
-                                     (WPARAM)&g_pending_del, 0);
+                                     (WPARAM)payload, 0);
                     }, true);
                 } else {
                     hit(sr, [path](){
@@ -1735,11 +2382,17 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                          || path.substr(sd2) == L".GIF"));
                         m.kind = is_g ? MsgKind::Gif : MsgKind::Sticker;
                         m.from = L"me";
+                        m.author = g_user.nickname;
+                        m.author_key = selfAuthorKey();
+                        m.status = L"online";
                         m.body = path;
                         m.time = localTimeText();
+                        m.client_msg_id = makeClientMsgId();
+                        m.send_state = MsgSendState::Pending;
+                        std::string client_msg_id = m.client_msg_id;
                         appendLocalMessage(std::move(m));
                         sendChatMessage(GetActiveWindow(), path,
-                                        is_g ? "gif" : "sticker");
+                                        is_g ? "gif" : "sticker", client_msg_id);
                         g_picker_open = false;
                         g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
                     }, true);
@@ -1780,10 +2433,9 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                 hit(rb, [pid, pname](){
                     g_picker_open = false;
                     g_picker_t.start(g_picker_t.value(), 0, 0.18f, 0, curve::easeOutCubic);
-                    static std::pair<std::string, std::wstring> g_pending;
-                    g_pending = { pid, pname };
+                    auto* payload = new PackActionPayload{ pid, pname };
                     PostMessageW(GetActiveWindow(), WM_APP + 31,
-                                 (WPARAM)&g_pending.first, (LPARAM)&g_pending.second);
+                                 (WPARAM)payload, 0);
                 }, true);
                 bx2 += 64 + 6;
             }
@@ -1798,14 +2450,13 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                             br.solidA(0xE34B4B, t),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
             hit(db, [pid, pname, is_owner](){
-                static std::pair<std::string, std::wstring> g_pending_del;
-                g_pending_del = { pid, pname };
+                auto* payload = new PackActionPayload{ pid, pname };
                 if (is_owner) {
                     PostMessageW(GetActiveWindow(), WM_APP + 32,
-                                 (WPARAM)&g_pending_del.first, (LPARAM)&g_pending_del.second);
+                                 (WPARAM)payload, 0);
                 } else {
                     PostMessageW(GetActiveWindow(), WM_APP + 51,
-                                 (WPARAM)&g_pending_del.first, (LPARAM)&g_pending_del.second);
+                                 (WPARAM)payload, 0);
                 }
             }, true);
         }
@@ -1850,31 +2501,37 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
 }
 
 bool onMouseRDown(HWND hwnd, POINT dip) {
-    // 优先：消息体右键 → 弹消息菜单（回复 / 复制 / 添加到表情）
+    // 优先：头像右键 → 用户菜单（主页 / @ / 管理）
+    for (auto it = g_avatar_hits.rbegin(); it != g_avatar_hits.rend(); ++it) {
+        if (it->rect.contains(dip)) {
+            std::wstring label = it->peer_key;
+            fetch::PeerProfile peer = fetch::peerProfileCached(it->peer_key);
+            if (peer.loaded && peer.err.empty()) {
+                if (!peer.nickname.empty()) label = peer.nickname;
+                else if (!peer.username.empty()) label = peer.username;
+                else if (!peer.uid.empty()) label = peer.uid;
+            } else if (it->peer_key == selfAuthorKey()) {
+                label = g_user.nickname.empty() ? g_user.username : g_user.nickname;
+            }
+            modal::openUserContextMenu(dip, it->peer_key, label);
+            return true;
+        }
+    }
+    // 其次：消息体右键 → 弹消息菜单（回复 / 复制 / 添加到表情）
     auto& msgs = streamFor(g_active);
     for (auto it = g_msg_hits.rbegin(); it != g_msg_hits.rend(); ++it) {
         if (it->rect.contains(dip)) {
             int idx = it->idx;
-            if (idx < 0 || idx >= (int)msgs.size()) return false;
+            if (idx < 0 || idx >= (int)msgs.size()) return true;
             // 跳过 system / day divider
             const Msg& m = msgs[idx];
-            if (m.kind == MsgKind::System || m.kind == MsgKind::DayDivider) return false;
-            struct Pl { POINT pt; int idx; };
-            static Pl g_pending_msg_menu;
-            g_pending_msg_menu = { dip, idx };
-            PostMessageW(hwnd, WM_APP + 50, (WPARAM)&g_pending_msg_menu, 0);
+            if (m.kind == MsgKind::System || m.kind == MsgKind::DayDivider) return true;
+            auto* payload = new MsgContextPayload{ dip, idx };
+            PostMessageW(hwnd, WM_APP + 50, (WPARAM)payload, 0);
             return true;
         }
     }
-    // 其次：头像右键 → 看主页
-    for (auto it = g_avatar_hits.rbegin(); it != g_avatar_hits.rend(); ++it) {
-        if (it->rect.contains(dip)) {
-            auto* p = new std::wstring(it->peer_key);
-            PostMessageW(hwnd, WM_APP + 37, 0, (LPARAM)p);
-            return true;
-        }
-    }
-    return false;
+    return true;
 }
 
 bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
@@ -1903,12 +2560,6 @@ void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!g_focus_composer) return;
     if (vk == VK_RETURN) {
         if (!g_composer.text.empty()) {
-            Msg m;
-            m.kind = MsgKind::Text;
-            m.from = L"me";
-            m.body = g_composer.text;
-            m.time = localTimeText();
-            appendLocalMessage(std::move(m));
             sendTextMessage(hwnd, g_composer.text);
             g_composer.text.clear();
             g_composer.cursor = 0;
@@ -1942,7 +2593,7 @@ void fetchOfficialChannels(HWND notify) {
         while (true) {
             auto open_brace = resp.body.find('{', p);
             if (open_brace == std::string::npos) break;
-            auto close_brace = resp.body.find('}', open_brace);
+            auto close_brace = net::findJsonObjectEnd(resp.body, open_brace);
             if (close_brace == std::string::npos) break;
             std::string obj = resp.body.substr(open_brace, close_brace - open_brace + 1);
             std::string id = net::jsonStr(obj, "id");

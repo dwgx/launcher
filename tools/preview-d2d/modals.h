@@ -156,10 +156,44 @@ struct MsgContextMenuState {
     std::wstring body;
     std::wstring author;
     std::wstring from;
+    std::wstring profile_key;
+    int64_t server_id = 0;
+    std::wstring reply_author;
+    std::wstring reply_preview;
 };
 extern MsgContextMenuState g_msg_menu;
 void openMsgContextMenu(POINT anchor_dip, int src_idx);
 void paintMsgContextMenu(D2DApp& app, float W, float H);
+
+struct UserContextMenuState {
+    bool open = false;
+    Tween t;
+    POINT anchor{};
+    std::wstring profile_key;
+    std::wstring label;
+};
+extern UserContextMenuState g_user_menu;
+void openUserContextMenu(POINT anchor_dip, const std::wstring& profile_key, const std::wstring& label);
+void paintUserContextMenu(D2DApp& app, float W, float H);
+
+struct MuteUserState {
+    bool open = false;
+    Tween t;
+    InputBox duration;
+    InputBox reason;
+    int unit = 1; // 0 seconds, 1 minutes, 2 hours, 3 days
+    int focus = 1; // 0 duration, 1 reason
+    bool busy = false;
+    std::wstring target_user_id;
+    std::wstring target_label;
+    std::string chat_id;
+    std::wstring error_msg;
+};
+extern MuteUserState g_mute_user;
+void openMuteUser(const std::wstring& target_user_id, const std::wstring& target_label);
+void paintMuteUserModal(D2DApp& app, float W, float H);
+void onMuteUserResult(bool success);
+void onUnmuteUserResult(bool success);
 
 // launcher://pack/<short> 点击 → 这个 modal 显示分享的 pack（缩略图 + 名字 + 创建人 + 添加按钮）
 struct PackPreviewState {

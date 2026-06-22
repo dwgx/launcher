@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -35,6 +36,47 @@ void loginHistory(HWND notify);
 // 头像上传 — 异步 multipart POST /api/profile/avatar → WM_APP+3 (wp = success)
 void uploadAvatar(HWND notify, const std::wstring& path);
 
+struct MediaUploadResult {
+    bool ok = false;
+    DWORD status = 0;
+    int64_t media_id = 0;
+    std::string sha256;
+    std::string mime;
+    std::string url;              // /api/media/<sha>/file.<ext>
+    std::wstring local_path;      // source file path used for upload
+    std::string error;
+};
+
+struct MediaDownloadResult {
+    bool ok = false;
+    DWORD status = 0;
+    std::string sha256;
+    std::string url;              // normalized /api/media URL, without session_token
+    std::wstring path;            // cache path written/read
+    std::string error;
+};
+
+// %LOCALAPPDATA%\Launcher\<scope>\, created if needed. Default scope is generic media.
+std::wstring mediaCacheDir(const wchar_t* scope = L"media");
+
+// Build the cache filename for an /api/media URL without downloading it.
+std::wstring mediaCachePathForUrl(const std::string& media_url,
+                                  const wchar_t* scope = L"media");
+
+// Append session_token to /api/media URLs. Existing session_token is preserved.
+std::string mediaUrlWithSessionToken(const std::string& media_url,
+                                     const std::string& token = "");
+
+// Synchronous helpers for chat/sticker/attachment flows.
+MediaUploadResult uploadMediaFile(const std::wstring& path);
+MediaDownloadResult downloadMediaToPath(const std::string& media_url,
+                                        const std::wstring& local_path);
+MediaDownloadResult downloadMediaToCache(const std::string& media_url,
+                                         const wchar_t* scope = L"media");
+
+// JSON object value for /api/chat/send payload; caller should not wrap this in quotes.
+std::string mediaPayloadJson(const MediaUploadResult& media);
+
 struct Listing {
     std::string  id;
     std::wstring title;
@@ -43,14 +85,18 @@ struct Listing {
     std::wstring summary;
 };
 extern std::vector<Listing> g_market_listings;
+extern bool g_market_loaded;
 extern std::mutex g_market_mtx;
 
 // GET /api/market/listings → 写 g_market_listings + WM_APP+33
 void marketListings(HWND notify);
 
+enum class ProfileUpdateKind { Unknown = 0, StatusText = 1, Bio = 2, Nickname = 3 };
+
 // POST /api/profile/update — 更新 nickname / status_text / bio 任一字段
 // fields = JSON object 片段，e.g. "\"bio\":\"...\""
 void profileUpdate(HWND notify, const std::string& fields);
+void profileUpdate(HWND notify, ProfileUpdateKind kind, const std::string& fields);
 
 // GET ip-api.com/json/ — 异步查 IP 地理位置 → 写 g_geo_country (WM_APP+38)
 void geoIP(HWND notify);
@@ -58,7 +104,8 @@ void geoIP(HWND notify);
 // GET /api/profile — 拿自己最新的 nickname / status / status_text / bio / uid
 // 异步线程，完成后 PostMessage WM_APP+54 让 main 把结果写回 g_user / g_status
 struct MyProfileSnapshot {
-    std::wstring nickname, uid, username, status, status_text, bio;
+    std::wstring nickname, uid, username, status, status_text, bio, role, role_label;
+    bool is_admin = false;
     bool loaded = false;
 };
 extern MyProfileSnapshot g_pending_my_profile;
@@ -66,16 +113,49 @@ extern std::mutex g_my_profile_mtx;
 void myProfile(HWND notify);
 void applyMyProfileResult();
 
-// GET /api/profile/:uid — 拿别人的资料 (nickname/status/bio/avatar)
+// GET /api/profile/peer/:key — 拿别人的资料 (nickname/status/bio/avatar)
+// cache key 使用真实 user_id / uid / username / peer_key；WS status 可通过
+// updatePeerStatus() 先落缓存，后续主线接 ws_user 时不需要知道 UI modal 状态。
 struct PeerProfile {
+    std::wstring cache_key;
     std::wstring uid, username, nickname, status, status_text, bio;
+    std::wstring role, role_label;
+    std::wstring avatar_url;
     std::wstring avatar_path;
     std::vector<std::wstring> tags;     // 个人标签
     bool loaded = false;
+    bool loading = false;
     std::wstring err;
 };
 extern PeerProfile g_peer;
 extern std::mutex g_peer_mtx;
+std::wstring normalizePeerKey(const std::wstring& key);
+PeerProfile peerProfileCached(const std::wstring& key);
+void updatePeerStatus(const std::wstring& key, const std::wstring& status);
 void peerProfile(HWND notify, const std::wstring& uid_or_nickname);
+
+struct ModerationMemberState {
+    std::wstring target_user_id;
+    std::wstring target_label;
+    bool active = false;
+    int64_t mute_id = 0;
+    int64_t muted_until = 0;
+    std::wstring reason;
+    std::wstring muted_by_label;
+    bool can_mute = false;
+    bool can_unmute = false;
+    bool is_super_admin = false;
+    bool loaded = false;
+    bool ok = false;
+    std::wstring error;
+};
+extern ModerationMemberState g_moderation_member;
+extern std::mutex g_moderation_mtx;
+
+void moderationMember(HWND notify, const std::string& chat_id, const std::wstring& target_user_id);
+void muteUser(HWND notify, const std::string& chat_id, const std::wstring& target_user_id,
+              int64_t duration_seconds, const std::wstring& reason);
+void unmuteUser(HWND notify, const std::string& chat_id, const std::wstring& target_user_id,
+                const std::wstring& reason);
 
 }  // namespace launcher::d2d::fetch

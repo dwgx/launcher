@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <winhttp.h>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cwchar>
 #include <functional>
@@ -78,45 +79,203 @@ inline void maybeAllowInsecureTls(HINTERNET req) {
     WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
 }
 
-inline std::string jsonStr(const std::string& body, const char* field) {
-    std::string key = "\""; key += field; key += "\":";
-    auto p = body.find(key);
-    if (p == std::string::npos) return "";
-    p += key.size();
-    while (p < body.size() && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) ++p;
-    if (body.compare(p, 4, "null") == 0) return "";
-    if (p >= body.size() || body[p] != '"') return "";
-    ++p;
-    std::string out;
+inline int jsonHex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+inline void appendUtf8(std::string& out, uint32_t cp) {
+    if (cp <= 0x7Fu) {
+        out.push_back((char)cp);
+    } else if (cp <= 0x7FFu) {
+        out.push_back((char)(0xC0u | (cp >> 6)));
+        out.push_back((char)(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back((char)(0xE0u | (cp >> 12)));
+        out.push_back((char)(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back((char)(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0x10FFFFu) {
+        out.push_back((char)(0xF0u | (cp >> 18)));
+        out.push_back((char)(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back((char)(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back((char)(0x80u | (cp & 0x3Fu)));
+    }
+}
+
+inline bool readJsonU16(const std::string& body, size_t p, uint32_t& out) {
+    if (p + 4 > body.size()) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) {
+        int h = jsonHex(body[p + i]);
+        if (h < 0) return false;
+        v = (v << 4) | (uint32_t)h;
+    }
+    out = v;
+    return true;
+}
+
+inline bool parseJsonStringAt(const std::string& body, size_t quote, std::string& out, size_t* end_pos = nullptr) {
+    out.clear();
+    if (quote >= body.size() || body[quote] != '"') return false;
+    size_t p = quote + 1;
     while (p < body.size()) {
         char c = body[p++];
-        if (c == '"') break;
-        if (c == '\\' && p < body.size()) {
-            char e = body[p++];
-            switch (e) {
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case '"': out.push_back('"'); break;
-                case '\\': out.push_back('\\'); break;
-                case '/': out.push_back('/'); break;
-                case 'b': out.push_back('\b'); break;
-                case 'f': out.push_back('\f'); break;
-                default: out.push_back(e); break;
-            }
-        } else {
+        if (c == '"') {
+            if (end_pos) *end_pos = p;
+            return true;
+        }
+        if (c != '\\') {
             out.push_back(c);
+            continue;
+        }
+        if (p >= body.size()) return false;
+        char e = body[p++];
+        switch (e) {
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'u': {
+                uint32_t cp = 0;
+                if (!readJsonU16(body, p, cp)) return false;
+                p += 4;
+                if (cp >= 0xD800u && cp <= 0xDBFFu
+                    && p + 6 <= body.size()
+                    && body[p] == '\\' && body[p + 1] == 'u') {
+                    uint32_t low = 0;
+                    if (readJsonU16(body, p + 2, low) && low >= 0xDC00u && low <= 0xDFFFu) {
+                        cp = 0x10000u + (((cp - 0xD800u) << 10) | (low - 0xDC00u));
+                        p += 6;
+                    }
+                }
+                appendUtf8(out, cp);
+                break;
+            }
+            default:
+                out.push_back(e);
+                break;
         }
     }
+    return false;
+}
+
+inline size_t findJsonObjectEnd(const std::string& body, size_t open_pos) {
+    if (open_pos >= body.size() || body[open_pos] != '{') return std::string::npos;
+    int depth = 1;
+    bool in_str = false;
+    bool esc = false;
+    for (size_t p = open_pos + 1; p < body.size(); ++p) {
+        char c = body[p];
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') in_str = true;
+        else if (c == '{') ++depth;
+        else if (c == '}') {
+            if (--depth == 0) return p;
+        }
+    }
+    return std::string::npos;
+}
+
+inline size_t findJsonArrayEnd(const std::string& body, size_t open_pos) {
+    if (open_pos >= body.size() || body[open_pos] != '[') return std::string::npos;
+    int depth = 1;
+    bool in_str = false;
+    bool esc = false;
+    for (size_t p = open_pos + 1; p < body.size(); ++p) {
+        char c = body[p];
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') in_str = true;
+        else if (c == '[') ++depth;
+        else if (c == ']') {
+            if (--depth == 0) return p;
+        }
+    }
+    return std::string::npos;
+}
+
+inline bool jsonValueRange(const std::string& body, const char* field, size_t& begin, size_t& end) {
+    std::string key = "\""; key += field; key += "\":";
+    auto p = body.find(key);
+    if (p == std::string::npos) return false;
+    p += key.size();
+    while (p < body.size() && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) ++p;
+    if (p >= body.size()) return false;
+    begin = p;
+    if (body[p] == '"') {
+        std::string ignored;
+        size_t ep = p;
+        if (!parseJsonStringAt(body, p, ignored, &ep)) return false;
+        end = ep;
+        return true;
+    }
+    if (body[p] == '{') {
+        size_t ep = findJsonObjectEnd(body, p);
+        if (ep == std::string::npos) return false;
+        end = ep + 1;
+        return true;
+    }
+    if (body[p] == '[') {
+        size_t ep = findJsonArrayEnd(body, p);
+        if (ep == std::string::npos) return false;
+        end = ep + 1;
+        return true;
+    }
+    size_t ep = p;
+    while (ep < body.size() && body[ep] != ',' && body[ep] != '}' && body[ep] != ']'
+           && body[ep] != '\r' && body[ep] != '\n') {
+        ++ep;
+    }
+    while (ep > p && (body[ep - 1] == ' ' || body[ep - 1] == '\t')) --ep;
+    end = ep;
+    return true;
+}
+
+inline std::string jsonRaw(const std::string& body, const char* field) {
+    size_t b = 0, e = 0;
+    if (!jsonValueRange(body, field, b, e) || e <= b) return "";
+    return body.substr(b, e - b);
+}
+
+inline std::string jsonObject(const std::string& body, const char* field) {
+    size_t b = 0, e = 0;
+    if (!jsonValueRange(body, field, b, e) || e <= b || body[b] != '{') return "";
+    return body.substr(b, e - b);
+}
+
+inline std::string jsonStr(const std::string& body, const char* field) {
+    size_t b = 0, e = 0;
+    if (!jsonValueRange(body, field, b, e) || e <= b) return "";
+    if (body.compare(b, 4, "null") == 0) return "";
+    if (body[b] != '"') return "";
+    std::string out;
+    parseJsonStringAt(body, b, out);
     return out;
 }
 inline long long jsonInt(const std::string& body, const char* field) {
-    std::string key = "\""; key += field; key += "\":";
-    auto p = body.find(key);
-    if (p == std::string::npos) return 0;
-    p += key.size();
-    while (p < body.size() && (body[p] == ' ' || body[p] == '"')) p++;
-    return _atoi64(body.c_str() + p);
+    size_t b = 0, e = 0;
+    if (!jsonValueRange(body, field, b, e) || e <= b) return 0;
+    if (body[b] == '"') {
+        std::string s;
+        if (parseJsonStringAt(body, b, s)) return _atoi64(s.c_str());
+        return 0;
+    }
+    return _atoi64(body.c_str() + b);
 }
 
 inline HINTERNET sharedSession() {

@@ -22,6 +22,7 @@ extern Stage    g_stage;
 extern AuthMode g_auth_mode;
 extern View     g_view;
 extern bool     g_skip_auth_after_loading;
+extern bool     g_auth_validation_pending;
 extern float    g_time_in_stage;
 extern float    g_spin_angle;        // spinner 度数累加
 extern bool     g_auth_succeeded;

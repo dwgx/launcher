@@ -1,6 +1,7 @@
 // Sticker pack 实现 — 1:1 复刻 GDI+ Preview。
 
 #include "sticker.h"
+#include "fetch.h"
 #include "net.h"
 #include "user_state.h"
 
@@ -13,8 +14,8 @@
 namespace launcher::d2d::sticker {
 
 std::vector<Pack> g_packs = {
-    { "", L"系统 emoji", {}, {}, true,  false, false, L"", "", 0 },
-    { "", L"我的表情",   {}, {}, false, false, true,  L"", "", 0 },
+    { "", L"系统 emoji", {}, {}, {}, true,  false, false, L"", "", 0 },
+    { "", L"我的表情",   {}, {}, {}, false, false, true,  L"", "", 0 },
 };
 std::mutex g_packs_mtx;
 
@@ -32,14 +33,82 @@ std::wstring utf8ToW(const std::string& s) {
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
     return w;
 }
+
+std::string jsonStringFieldFrom(const std::string& body, const char* field, size_t start) {
+    return net::jsonStr(body.substr(start), field);
+}
+
+std::string shaFromMediaUrl(const std::string& media_url) {
+    const std::string marker = "/api/media/";
+    auto p = media_url.find(marker);
+    if (p == std::string::npos) return {};
+    p += marker.size();
+    auto e = media_url.find('/', p);
+    if (e == std::string::npos || e <= p) return {};
+    return media_url.substr(p, e - p);
+}
+
+void syncLegacyVectors(Pack& p) {
+    p.stickers.clear();
+    p.sticker_ids.clear();
+    p.stickers.reserve(p.items.size());
+    p.sticker_ids.reserve(p.items.size());
+    for (const auto& item : p.items) {
+        p.stickers.push_back(item.path);
+        p.sticker_ids.push_back(item.sticker_id);
+    }
+}
+
+bool hasItem(const Pack& p, const StickerItem& item) {
+    for (const auto& e : p.items) {
+        if (!item.sticker_id.empty() && e.sticker_id == item.sticker_id) return true;
+        if (!item.media_url.empty() && e.media_url == item.media_url) return true;
+        if (!item.path.empty() && e.path == item.path) return true;
+    }
+    return false;
+}
+
+void addItemToPack(Pack& p, StickerItem item) {
+    if (item.path.empty() || hasItem(p, item)) return;
+    p.items.push_back(std::move(item));
+    syncLegacyVectors(p);
+}
+
+StickerItem stickerItemFromBodyAt(const std::string& body, size_t obj_start) {
+    StickerItem item;
+    item.sticker_id = jsonStringFieldFrom(body, "id", obj_start);
+    item.media_id = net::jsonInt(body.substr(obj_start), "media_id");
+    item.media_url = jsonStringFieldFrom(body, "media_url", obj_start);
+    item.mime = jsonStringFieldFrom(body, "mime", obj_start);
+    item.sha256 = shaFromMediaUrl(item.media_url);
+    if (item.media_url.empty()) return item;
+    auto dl = fetch::downloadMediaToCache(item.media_url, L"stickers");
+    if (dl.ok) {
+        item.path = dl.path;
+        if (item.sha256.empty()) item.sha256 = dl.sha256;
+    }
+    return item;
+}
+
+std::vector<StickerItem> parseAndDownloadStickerItems(const std::string& body) {
+    std::vector<StickerItem> out;
+    size_t pos = 0;
+    while (true) {
+        pos = body.find("\"media_url\":\"", pos);
+        if (pos == std::string::npos) break;
+        size_t obj = body.rfind('{', pos);
+        if (obj == std::string::npos) obj = pos;
+        StickerItem item = stickerItemFromBodyAt(body, obj);
+        if (!item.path.empty()) out.push_back(std::move(item));
+        pos += 13;
+    }
+    return out;
+}
 }
 
 std::wstring cacheDir() {
-    wchar_t base[MAX_PATH] = {0};
-    if (!SHGetSpecialFolderPathW(nullptr, base, CSIDL_LOCAL_APPDATA, FALSE)) return L"";
-    std::wstring dir = std::wstring(base) + L"\\Launcher\\stickers\\";
-    CreateDirectoryW((std::wstring(base) + L"\\Launcher").c_str(), nullptr);
-    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring dir = fetch::mediaCacheDir(L"stickers");
+    if (!dir.empty() && dir.back() != L'\\') dir += L"\\";
     return dir;
 }
 
@@ -97,6 +166,7 @@ void fetchMyPacks(HWND notify) {
                 if (it != by_id.end()) {
                     np.stickers = std::move(it->second.stickers);
                     np.sticker_ids = std::move(it->second.sticker_ids);
+                    np.items = std::move(it->second.items);
                 }
                 if (np.name == L"我的表情") found_mine = true;
                 merged.push_back(std::move(np));
@@ -135,51 +205,14 @@ void fetchMyStickers(HWND notify) {
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
         if (!r.ok()) return 0;
-        std::wstring dir = cacheDir();
-        if (dir.empty()) return 0;
-        // 找每个 media_url 下载到本地，并加进"我的表情"分组
-        std::vector<std::wstring> downloaded;
-        size_t pos = 0;
-        while (true) {
-            pos = r.body.find("\"media_url\":\"", pos);
-            if (pos == std::string::npos) break;
-            pos += 13;
-            size_t e = r.body.find('"', pos);
-            if (e == std::string::npos) break;
-            std::string url_path = r.body.substr(pos, e - pos);
-            pos = e;
-            auto p1 = url_path.find("/api/media/");
-            if (p1 == std::string::npos) continue;
-            p1 += 11;
-            auto p2 = url_path.find('/', p1);
-            if (p2 == std::string::npos) continue;
-            std::string sha = url_path.substr(p1, p2 - p1);
-            auto dot = url_path.find_last_of('.');
-            std::string ext = (dot != std::string::npos) ? url_path.substr(dot + 1) : "bin";
-            std::wstring fname = std::wstring(sha.begin(), sha.end())
-                + L"." + std::wstring(ext.begin(), ext.end());
-            std::wstring local = dir + fname;
-            if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                std::wstring wpath(url_path.begin(), url_path.end());
-                auto dr = net::request(L"GET", wpath.c_str(), {}, L"");
-                if (!dr.ok()) continue;
-                HANDLE f = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
-                                       nullptr, CREATE_ALWAYS, 0, nullptr);
-                if (f == INVALID_HANDLE_VALUE) continue;
-                DWORD wn = 0;
-                WriteFile(f, dr.body.data(), (DWORD)dr.body.size(), &wn, nullptr);
-                CloseHandle(f);
-            }
-            downloaded.push_back(local);
-        }
+        // 找每个 media_url 下载到本地，并加进"我的表情"分组；item 保留远端 id/url。
+        std::vector<StickerItem> downloaded = parseAndDownloadStickerItems(r.body);
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& p : g_packs) {
                 if (p.name == L"我的表情") {
-                    for (auto& s : downloaded) {
-                        bool dup = false;
-                        for (auto& e : p.stickers) if (e == s) { dup = true; break; }
-                        if (!dup) p.stickers.push_back(s);
+                    for (auto& item : downloaded) {
+                        addItemToPack(p, std::move(item));
                     }
                     break;
                 }
@@ -200,50 +233,13 @@ void fetchPackContents(HWND notify, const std::string& pack_id) {
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
         if (!r.ok()) return 0;
-        std::wstring dir = cacheDir();
-        if (dir.empty()) return 0;
-        std::vector<std::wstring> downloaded;
-        size_t pos = 0;
-        while (true) {
-            pos = r.body.find("\"media_url\":\"", pos);
-            if (pos == std::string::npos) break;
-            pos += 13;
-            size_t e = r.body.find('"', pos);
-            if (e == std::string::npos) break;
-            std::string url_path = r.body.substr(pos, e - pos);
-            pos = e;
-            auto p1 = url_path.find("/api/media/");
-            if (p1 == std::string::npos) continue;
-            p1 += 11;
-            auto p2 = url_path.find('/', p1);
-            if (p2 == std::string::npos) continue;
-            std::string sha = url_path.substr(p1, p2 - p1);
-            auto dot = url_path.find_last_of('.');
-            std::string ext = (dot != std::string::npos) ? url_path.substr(dot + 1) : "bin";
-            std::wstring fname = std::wstring(sha.begin(), sha.end())
-                + L"." + std::wstring(ext.begin(), ext.end());
-            std::wstring local = dir + fname;
-            if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                std::wstring wpath(url_path.begin(), url_path.end());
-                auto dr = net::request(L"GET", wpath.c_str(), {}, L"");
-                if (!dr.ok()) continue;
-                HANDLE f = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
-                                       nullptr, CREATE_ALWAYS, 0, nullptr);
-                if (f == INVALID_HANDLE_VALUE) continue;
-                DWORD wn = 0;
-                WriteFile(f, dr.body.data(), (DWORD)dr.body.size(), &wn, nullptr);
-                CloseHandle(f);
-            }
-            downloaded.push_back(local);
-        }
+        std::vector<StickerItem> downloaded = parseAndDownloadStickerItems(r.body);
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& p : g_packs) {
                 if (p.id == a->id) {
-                    for (auto& s : downloaded) {
-                        bool dup = false;
-                        for (auto& e : p.stickers) if (e == s) { dup = true; break; }
-                        if (!dup) p.stickers.push_back(s);
+                    for (auto& item : downloaded) {
+                        addItemToPack(p, std::move(item));
                     }
                     break;
                 }
@@ -264,8 +260,7 @@ void sharePack(HWND notify, const std::string& pack_id, bool is_public) {
                          + "\",\"is_public\":" + (a->pub ? "true" : "false") + "}";
         auto r = net::postJson(L"/api/sticker/pack/share", body);
         // 拿 short_name，写回 g_packs；总是把链接复制到剪贴板（不再开关）
-        static std::string g_pending_sn;
-        g_pending_sn.clear();
+        std::string g_pending_sn;
         if (r.ok()) {
             std::string sn = net::jsonStr(r.body, "short_name");
             if (!sn.empty()) {
@@ -278,8 +273,9 @@ void sharePack(HWND notify, const std::string& pack_id, bool is_public) {
                 g_pending_sn = sn;     // 主线程复制 launcher://pack/sn 到剪贴板
             }
         }
+        auto* payload = g_pending_sn.empty() ? nullptr : new std::string(g_pending_sn);
         PostMessageW(a->h, WM_APP + 26, r.ok() ? 1 : 0,
-                     g_pending_sn.empty() ? 0 : (LPARAM)&g_pending_sn);
+                     (LPARAM)payload);
         return 0;
     }, a, 0, nullptr);
 }
@@ -370,52 +366,23 @@ void previewPackByShort(HWND notify, const std::string& short_name) {
         std::wstring wurl(url.begin(), url.end());
         auto r = net::request(L"GET", wurl.c_str(), {}, L"");
         if (!r.ok()) {
+            bool apply = false;
+            {
             std::lock_guard<std::mutex> lk(g_pack_preview_mtx);
+            if (g_pack_preview.short_name == a->sn) {
             g_pack_preview.err = r.body.empty() ? "无法连接" : r.body.substr(0, 80);
             g_pack_preview.loaded = true;
-            PostMessageW(a->h, WM_APP + 44, 0, 0);
+                apply = true;
+            }
+            }
+            if (apply) PostMessageW(a->h, WM_APP + 44, 0, 0);
             return 0;
         }
 
-        std::wstring dir = cacheDir();
+        std::vector<StickerItem> items = parseAndDownloadStickerItems(r.body);
         std::vector<std::wstring> downloaded;
-        size_t pos = 0;
-        while (true) {
-            pos = r.body.find("\"media_url\":\"", pos);
-            if (pos == std::string::npos) break;
-            pos += 13;
-            size_t e = r.body.find('"', pos);
-            if (e == std::string::npos) break;
-            std::string url_path = r.body.substr(pos, e - pos);
-            pos = e;
-            auto p1 = url_path.find("/api/media/");
-            if (p1 == std::string::npos) continue;
-            p1 += 11;
-            auto p2 = url_path.find('/', p1);
-            if (p2 == std::string::npos) continue;
-            std::string sha = url_path.substr(p1, p2 - p1);
-            auto dot = url_path.find_last_of('.');
-            std::string ext = (dot != std::string::npos) ? url_path.substr(dot + 1) : "bin";
-            std::wstring fname = std::wstring(sha.begin(), sha.end())
-                + L"." + std::wstring(ext.begin(), ext.end());
-            std::wstring local = dir + fname;
-            if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                std::wstring wpath(url_path.begin(), url_path.end());
-                auto dr = net::request(L"GET", wpath.c_str(), {}, L"");
-                if (dr.ok()) {
-                    HANDLE f = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
-                                           nullptr, CREATE_ALWAYS, 0, nullptr);
-                    if (f != INVALID_HANDLE_VALUE) {
-                        DWORD wn = 0;
-                        WriteFile(f, dr.body.data(), (DWORD)dr.body.size(), &wn, nullptr);
-                        CloseHandle(f);
-                    }
-                }
-            }
-            if (GetFileAttributesW(local.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                downloaded.push_back(local);
-            }
-        }
+        downloaded.reserve(items.size());
+        for (const auto& item : items) downloaded.push_back(item.path);
         std::string id = net::jsonStr(r.body, "id");
         std::wstring name = utf8ToW(net::jsonStr(r.body, "name"));
         std::wstring creator = utf8ToW(net::jsonStr(r.body, "creator_name"));
@@ -425,18 +392,23 @@ void previewPackByShort(HWND notify, const std::string& short_name) {
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& p : g_packs) if (p.id == id) { already = true; break; }
         }
+        bool apply = false;
         {
             std::lock_guard<std::mutex> lk(g_pack_preview_mtx);
+            if (g_pack_preview.short_name == a->sn) {
             g_pack_preview.id = id;
             g_pack_preview.name = name;
             g_pack_preview.creator_name = creator;
             g_pack_preview.install_count = (int)install_count;
             g_pack_preview.sticker_paths = downloaded;
+            g_pack_preview.items = std::move(items);
             g_pack_preview.cover_path = downloaded.empty() ? L"" : downloaded.front();
             g_pack_preview.already_installed = already;
             g_pack_preview.loaded = true;
+                apply = true;
+            }
         }
-        PostMessageW(a->h, WM_APP + 44, 1, 0);
+        if (apply) PostMessageW(a->h, WM_APP + 44, 1, 0);
         return 0;
     }, a, 0, nullptr);
 }
@@ -526,48 +498,16 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
             FindClose(h);
         }
 
-        std::wstring cache = cacheDir();
         int success = 0;
-        std::vector<std::wstring> downloaded;
+        std::vector<StickerItem> imported;
         for (const auto& path : files) {
-            // 读文件
-            HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                   nullptr, OPEN_EXISTING, 0, nullptr);
-            if (f == INVALID_HANDLE_VALUE) continue;
-            DWORD sz = GetFileSize(f, nullptr);
-            if (sz == 0 || sz > 8 * 1024 * 1024) { CloseHandle(f); continue; }
-            std::vector<BYTE> bytes(sz);
-            DWORD rd = 0;
-            ReadFile(f, bytes.data(), sz, &rd, nullptr);
-            CloseHandle(f);
-
-            // mime + filename
-            std::string mime = "image/png";
-            std::wstring ext = path.substr(path.find_last_of(L'.'));
-            for (auto& c : ext) c = (wchar_t)towlower(c);
-            if (ext == L".jpg" || ext == L".jpeg") mime = "image/jpeg";
-            else if (ext == L".gif")  mime = "image/gif";
-            else if (ext == L".webp") mime = "image/webp";
-            else if (ext == L".bmp")  mime = "image/bmp";
-
-            auto sl = path.find_last_of(L"\\/");
-            std::wstring fn = (sl != std::wstring::npos) ? path.substr(sl + 1) : path;
-
-            // 1. 上传 media
-            auto mr = net::uploadMultipart(L"/api/media/upload",
-                                            g_session_token, L"file",
-                                            fn, mime, bytes);
-            if (!mr.ok()) continue;
-            std::string media_id = std::to_string(net::jsonInt(mr.body, "media_id"));
-            if (media_id == "0") {
-                std::string mid_str = net::jsonStr(mr.body, "media_id");
-                if (!mid_str.empty()) media_id = mid_str;
-            }
-            std::string sha = net::jsonStr(mr.body, "sha256");
+            // 1. 上传 media。结果保留 media_id/sha256/mime/url，后续 chat payload 不再依赖本地路径。
+            auto media = fetch::uploadMediaFile(path);
+            if (!media.ok) continue;
 
             // 2. 创建 sticker
             std::string body = "{\"session_token\":\"" + g_session_token
-                             + "\",\"media_id\":" + media_id + "}";
+                             + "\",\"media_id\":" + std::to_string(media.media_id) + "}";
             auto sr = net::postJson(L"/api/sticker", body);
             if (!sr.ok()) continue;
             // 3. 加到 pack — 后端 create_sticker 不接 pack_id；要再调一次 add_to_pack
@@ -579,22 +519,17 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
                 net::postJson(L"/api/sticker/pack/add", add_body);
             }
 
-            // 3. 写本地缓存 (sha + ext)
-            if (!sha.empty() && !cache.empty()) {
-                std::wstring local = cache
-                    + std::wstring(sha.begin(), sha.end())
-                    + ext;
-                if (GetFileAttributesW(local.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                    HANDLE wf = CreateFileW(local.c_str(), GENERIC_WRITE, 0,
-                                             nullptr, CREATE_ALWAYS, 0, nullptr);
-                    if (wf != INVALID_HANDLE_VALUE) {
-                        DWORD wn = 0;
-                        WriteFile(wf, bytes.data(), (DWORD)bytes.size(), &wn, nullptr);
-                        CloseHandle(wf);
-                    }
-                }
-                downloaded.push_back(local);
-            }
+            // 4. 写/复用本地缓存，并保存远端元数据。
+            StickerItem item;
+            item.path = path;
+            item.sticker_id = sticker_id;
+            item.media_id = media.media_id;
+            item.media_url = media.url;
+            item.sha256 = media.sha256;
+            item.mime = media.mime;
+            auto dl = fetch::downloadMediaToCache(media.url, L"stickers");
+            if (dl.ok) item.path = dl.path;
+            imported.push_back(std::move(item));
             success++;
         }
 
@@ -603,19 +538,16 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& p : g_packs) {
                 if (p.id == a->pid) {
-                    for (auto& s : downloaded) {
-                        bool dup = false;
-                        for (auto& e : p.stickers) if (e == s) { dup = true; break; }
-                        if (!dup) p.stickers.push_back(s);
+                    for (auto& item : imported) {
+                        addItemToPack(p, std::move(item));
                     }
                     break;
                 }
             }
         }
         // 把 pack_id 透传回主线程，让 picker 切到这个 pack 显示新导入的图
-        static std::string g_pending_imp_pid;
-        g_pending_imp_pid = a->pid;
-        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, (LPARAM)&g_pending_imp_pid);
+        auto* payload = new std::string(a->pid);
+        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, (LPARAM)payload);
         return 0;
     }, a, 0, nullptr);
 }
@@ -639,9 +571,64 @@ int totalUserStickers() {
     int n = 0;
     for (auto& p : g_packs) {
         if (p.is_system) continue;
-        n += (int)p.stickers.size();
+        n += (int)(p.items.empty() ? p.stickers.size() : p.items.size());
     }
     return n;
+}
+
+bool stickerForPath(const std::wstring& path, StickerItem* out) {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    for (const auto& p : g_packs) {
+        for (const auto& item : p.items) {
+            if (item.path == path) {
+                *out = item;
+                return true;
+            }
+        }
+        for (size_t i = 0; i < p.stickers.size(); ++i) {
+            if (p.stickers[i] != path) continue;
+            *out = StickerItem{};
+            out->path = p.stickers[i];
+            if (i < p.sticker_ids.size()) out->sticker_id = p.sticker_ids[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string stickerPayloadJsonForPath(const std::wstring& path) {
+    StickerItem item;
+    if (!stickerForPath(path, &item)) return "{}";
+    std::string json = "{";
+    bool first = true;
+    auto add_str = [&](const char* key, const std::string& value) {
+        if (value.empty()) return;
+        if (!first) json += ",";
+        json += "\"";
+        json += key;
+        json += "\":\"";
+        json += value;
+        json += "\"";
+        first = false;
+    };
+    auto add_i64 = [&](const char* key, int64_t value) {
+        if (value <= 0) return;
+        if (!first) json += ",";
+        json += "\"";
+        json += key;
+        json += "\":";
+        json += std::to_string(value);
+        first = false;
+    };
+    add_str("sticker_id", item.sticker_id);
+    add_i64("media_id", item.media_id);
+    add_str("media_url", item.media_url);
+    add_str("url", item.media_url);
+    add_str("sha256", item.sha256);
+    add_str("mime", item.mime);
+    json += "}";
+    return json;
 }
 
 void ensureMyStickersPack(HWND notify) {
@@ -680,35 +667,52 @@ void ensureMyStickersPack(HWND notify) {
 void deleteSticker(HWND notify, const std::wstring& path) {
     // 1. 立即本地删除（乐观更新）
     std::string sha;
+    std::string sticker_id;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (auto& p : g_packs) {
-            for (auto it = p.stickers.begin(); it != p.stickers.end(); ++it) {
-                if (*it == path) {
-                    // sha 从路径提取 (格式：cache_dir/<sha>.<ext>)
-                    auto sl = path.find_last_of(L"\\/");
-                    auto dot = path.find_last_of(L'.');
-                    if (sl != std::wstring::npos && dot != std::wstring::npos && dot > sl) {
-                        std::wstring s = path.substr(sl + 1, dot - sl - 1);
-                        // sha256 是 ascii hex (0-9 a-f)，直接 wchar→char cast 安全
-                        sha.reserve(s.size());
-                        for (wchar_t c : s) sha.push_back((char)c);
-                    }
-                    p.stickers.erase(it);
+            for (auto it = p.items.begin(); it != p.items.end(); ++it) {
+                if (it->path == path) {
+                    sticker_id = it->sticker_id;
+                    sha = it->sha256;
+                    p.items.erase(it);
+                    syncLegacyVectors(p);
                     goto local_done;
                 }
+            }
+            for (size_t i = 0; i < p.stickers.size(); ++i) {
+                if (p.stickers[i] != path) continue;
+                if (i < p.sticker_ids.size()) sticker_id = p.sticker_ids[i];
+                // sha 从路径提取 (格式：cache_dir/<sha>.<ext>)
+                auto sl = path.find_last_of(L"\\/");
+                auto dot = path.find_last_of(L'.');
+                if (sl != std::wstring::npos && dot != std::wstring::npos && dot > sl) {
+                    std::wstring s = path.substr(sl + 1, dot - sl - 1);
+                    // sha256 是 ascii hex (0-9 a-f)，直接 wchar→char cast 安全
+                    sha.reserve(s.size());
+                    for (wchar_t c : s) sha.push_back((char)c);
+                }
+                p.stickers.erase(p.stickers.begin() + i);
+                if (i < p.sticker_ids.size()) p.sticker_ids.erase(p.sticker_ids.begin() + i);
+                goto local_done;
             }
         }
     local_done:;
     }
     // 2. 后端异步同步（失败 silent）
-    if (sha.empty()) return;
-    struct A { std::string sha; HWND h; };
-    auto* a = new A{ sha, notify };
+    if (sha.empty() && sticker_id.empty()) return;
+    struct A { std::string sha; std::string sid; HWND h; };
+    auto* a = new A{ sha, sticker_id, notify };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<A> a((A*)lp);
         std::string body = "{\"session_token\":\"" + g_session_token
-                         + "\",\"sha256\":\"" + a->sha + "\"}";
+                         + "\"";
+        if (!a->sid.empty()) {
+            body += ",\"sticker_id\":\"" + a->sid + "\"";
+        } else {
+            body += ",\"sha256\":\"" + a->sha + "\"";
+        }
+        body += "}";
         net::postJson(L"/api/sticker/delete", body);
         PostMessageW(a->h, WM_APP + 39, 1, 0);
         return 0;

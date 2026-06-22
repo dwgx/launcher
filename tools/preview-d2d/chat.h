@@ -6,6 +6,7 @@
 
 #include "d2d_app.h"
 #include "inputbox.h"
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -25,6 +26,23 @@ extern std::vector<Channel> g_channels;
 extern std::wstring g_active;        // 当前频道 slug
 extern InputBox     g_composer;
 extern bool         g_focus_composer;
+
+struct PendingReply {
+    bool active = false;
+    int64_t id = 0;
+    std::wstring slug;
+    std::wstring author;
+    std::wstring author_key;
+    std::wstring preview;
+};
+extern PendingReply g_pending_reply;
+
+struct PendingMention {
+    std::wstring user_id;
+    std::wstring label;
+};
+extern std::vector<PendingMention> g_pending_mentions;
+void addMentionToComposer(const std::wstring& user_id, const std::wstring& label);
 
 // Emoji / sticker picker
 extern bool  g_picker_open;
@@ -46,12 +64,25 @@ struct PackDrag {
 };
 extern PackDrag g_pack_drag;
 
+struct PackActionPayload {
+    std::string id;
+    std::wstring name;
+};
+
+struct MsgContextPayload {
+    POINT pt{};
+    int idx = -1;
+};
+
 // per-channel 滚动偏移（从底部往上的像素数；0 = 锁底，新消息自动跟）
 struct ChatScroll {
     float offset_from_bottom = 0;     // 当前实际渲染用值（每帧 lerp 朝 target 平滑）
     float target_offset      = 0;     // 滚轮 / 拖动写这个，offset 跟随
     float total_height       = 0;
     float viewport_h         = 0;
+    size_t rendered_count    = 0;
+    int64_t tail_server_id   = 0;
+    std::string tail_client_msg_id;
     bool  initialized        = false; // false = 首次进入这个频道，会自动 stick to bottom
 };
 extern std::unordered_map<std::wstring, ChatScroll> g_scroll;
@@ -69,21 +100,29 @@ struct ScrollBarDrag {
 extern ScrollBarDrag g_scroll_drag;
 
 enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
+enum class MsgSendState { Sent, Pending, Failed };
 
 struct Msg {
     MsgKind kind = MsgKind::Text;
     std::wstring from;        // "me" 表示自己
     std::wstring peer_key;    // full sender id / profile lookup key for non-me messages
+    std::wstring author_key;  // stable sender key for de-dupe/profile lookup
     std::wstring author;
     std::wstring status;
     std::wstring body;
     std::wstring time;
+    MsgSendState send_state = MsgSendState::Sent;
+    std::wstring error_text;
     std::string  client_msg_id;
     int64_t      server_id = 0;     // 后端 messages.id (软删除时 POST /chat/delete 用)
+    int64_t      reply_to_id = 0;
+    std::wstring reply_author;
+    std::wstring reply_preview;
 };
 
 std::vector<Msg>& streamFor(const std::wstring& slug);
 void switchChannel(const std::wstring& slug);
+std::string activeChatId();
 
 // 顶层 paint — 分两半：list 240 / pane 1fr
 void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah);
@@ -116,7 +155,17 @@ void appendMedia(const std::wstring& path);
 // 公共：把消息追加到当前频道，并且如果此频道用户在底部就自动跟随到底
 void appendLocalMessage(Msg msg);
 
+// 公共：按 server_id/client_msg_id 合并；没有重复时追加到指定频道
+bool appendOrMergeMessage(const std::wstring& slug, Msg msg);
+
+// 搜索/外部导航：按后端 message id 定位已加载消息。
+// 如果历史还没合并，目标会保留到下一帧绘制时再应用。
+void focusMessage(const std::wstring& slug, int64_t server_id);
+
 // 拉某频道历史消息 (GET /api/chat/history?session_token=&chat_id=) → WM_APP+45
+void appendLocalMessage(Msg msg);
+bool appendOrMergeMessage(const std::wstring& slug, Msg msg);
+void focusMessage(const std::wstring& slug, int64_t server_id);
 void fetchHistory(HWND notify, const std::wstring& slug);
 
 // 主线程 WM_APP+45 调 — 把后台拉到的历史 merge 到 streamFor(slug)

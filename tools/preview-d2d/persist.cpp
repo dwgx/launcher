@@ -40,6 +40,16 @@ constexpr int kCount = sizeof(kPaths) / sizeof(kPaths[0]);
 static HKEY g_hk = nullptr;
 static const wchar_t* g_path = nullptr;
 
+static bool disabled() {
+    wchar_t value[16]{};
+    DWORD n = GetEnvironmentVariableW(L"LAUNCHER_DISABLE_PERSIST", value, (DWORD)_countof(value));
+    if (n == 0 || n >= _countof(value)) return false;
+    return wcscmp(value, L"1") == 0
+        || _wcsicmp(value, L"true") == 0
+        || _wcsicmp(value, L"yes") == 0
+        || _wcsicmp(value, L"on") == 0;
+}
+
 static bool readDword(HKEY hk, const wchar_t* name, DWORD& out) {
     DWORD cb = sizeof(out), type = 0;
     return RegQueryValueExW(hk, name, nullptr, &type, (LPBYTE)&out, &cb) == ERROR_SUCCESS
@@ -78,24 +88,29 @@ static void ensure() {
     }
 }
 void saveLang(int v) {
+    if (disabled()) return;
     ensure(); if (!g_hk) return;
     DWORD d = (DWORD)v;
     RegSetValueExW(g_hk, L"_l", 0, REG_DWORD, (LPBYTE)&d, sizeof(d));
 }
 void saveTheme(bool dark) {
+    if (disabled()) return;
     ensure(); if (!g_hk) return;
     DWORD d = dark ? 1 : 0;
     RegSetValueExW(g_hk, L"_t", 0, REG_DWORD, (LPBYTE)&d, sizeof(d));
 }
 int loadLang(int dflt) {
+    if (disabled()) return dflt;
     ensure(); if (!g_hk) return dflt;
     DWORD v; return readDword(g_hk, L"_l", v) ? (int)v : dflt;
 }
 bool loadTheme(bool dflt) {
+    if (disabled()) return dflt;
     ensure(); if (!g_hk) return dflt;
     DWORD v; return readDword(g_hk, L"_t", v) ? (v != 0) : dflt;
 }
 void saveCreds(const std::wstring& u, const std::wstring& p) {
+    if (disabled()) return;
     ensure(); if (!g_hk) return;
     RegSetValueExW(g_hk, L"_u", 0, REG_SZ, (LPBYTE)u.c_str(),
                    (DWORD)((u.size() + 1) * sizeof(wchar_t)));
@@ -108,6 +123,7 @@ void saveCreds(const std::wstring& u, const std::wstring& p) {
     }
 }
 bool loadCreds(std::wstring& u, std::wstring& p) {
+    if (disabled()) return false;
     ensure(); if (!g_hk) return false;
     if (!readString(g_hk, L"_u", u) || u.empty()) return false;
     BYTE buf[4096]; DWORD cb = sizeof(buf), type = 0;
@@ -121,6 +137,7 @@ bool loadCreds(std::wstring& u, std::wstring& p) {
     return true;
 }
 void clearCreds() {
+    if (disabled()) return;
     ensure(); if (!g_hk) return;
     RegDeleteValueW(g_hk, L"_u");
     RegDeleteValueW(g_hk, L"_p");
@@ -128,6 +145,7 @@ void clearCreds() {
     RegDeleteValueW(g_hk, L"_x");
 }
 void saveSession(const std::string& tok, const std::string& uid) {
+    if (disabled()) return;
     ensure(); if (!g_hk) return;
     if (!tok.empty())
         RegSetValueExW(g_hk, L"_s", 0, REG_BINARY, (const BYTE*)tok.data(), (DWORD)tok.size());
@@ -135,6 +153,7 @@ void saveSession(const std::string& tok, const std::string& uid) {
         RegSetValueExW(g_hk, L"_x", 0, REG_BINARY, (const BYTE*)uid.data(), (DWORD)uid.size());
 }
 bool loadSession(std::string& tok, std::string& uid) {
+    if (disabled()) return false;
     ensure(); if (!g_hk) return false;
     BYTE buf[256]; DWORD cb;
     cb = sizeof(buf);
@@ -146,6 +165,12 @@ bool loadSession(std::string& tok, std::string& uid) {
         uid.assign((const char*)buf, cb);
     }
     return !tok.empty();
+}
+void clearSession() {
+    if (disabled()) return;
+    ensure(); if (!g_hk) return;
+    RegDeleteValueW(g_hk, L"_s");
+    RegDeleteValueW(g_hk, L"_x");
 }
 
 }  // namespace launcher::d2d::persist

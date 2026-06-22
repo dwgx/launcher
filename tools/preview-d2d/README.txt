@@ -49,7 +49,6 @@ GDI+ Preview (tools/preview/) 的 1:1 D2D 移植，业务逻辑全部保留。
   Ctrl+A       全选 input
   Ctrl+C/V/X   复制 / 粘贴 / 剪切
   D            切换暗 / 亮主题（持久化）
-  S            Loading 阶段跳过等待
   右键空白     主窗时最小化到托盘
   拖文件进 Chat → 自动发为 image / gif / video bubble
 
