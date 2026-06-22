@@ -20,8 +20,6 @@ use uuid::Uuid;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-const MEDIA_ROOT: &str = "/opt/systembackend/media";
-
 fn max_bytes_for(state: &AppState, category: &str) -> u64 {
     match category {
         "image" => state.cfg.media_image_max_bytes,
@@ -103,7 +101,7 @@ pub async fn upload(
     }
 
     // 写文件 /opt/systembackend/media/<sha[:2]>/<sha>.<ext>
-    let dir = PathBuf::from(MEDIA_ROOT).join(&sha[..2]);
+    let dir = PathBuf::from(&s.cfg.media_root).join(&sha[..2]);
     tokio::fs::create_dir_all(&dir).await.map_err(internal)?;
     let path = dir.join(format!("{}.{}", sha, detected.ext));
     let mut f = tokio::fs::File::create(&path).await.map_err(internal)?;
@@ -153,7 +151,7 @@ pub async fn download(
         Ok(Some(r)) => r,
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    let path = PathBuf::from(MEDIA_ROOT).join(&row.relative_path);
+    let path = PathBuf::from(&s.cfg.media_root).join(&row.relative_path);
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "missing").into_response(),

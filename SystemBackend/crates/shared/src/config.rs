@@ -42,6 +42,10 @@ pub struct AppConfig {
     pub media_video_max_bytes: u64,
     #[serde(default = "default_generic_max")]
     pub media_generic_max_bytes: u64,
+    #[serde(default = "default_media_root")]
+    pub media_root: String,
+    #[serde(default = "default_avatar_root")]
+    pub avatar_root: String,
 
     /// 每用户表情包上限（默认 50；admin 改 config 可放宽）
     #[serde(default = "default_sticker_per_user")]
@@ -54,6 +58,8 @@ fn default_require_invite() -> bool { true }
 fn default_image_max() -> u64 { 8 * 1024 * 1024 }
 fn default_video_max() -> u64 { 32 * 1024 * 1024 }
 fn default_generic_max() -> u64 { 100 * 1024 * 1024 }
+fn default_media_root() -> String { "/opt/systembackend/media".into() }
+fn default_avatar_root() -> String { "/opt/systembackend/avatars".into() }
 fn default_sticker_per_user() -> i64 { 50 }
 
 impl AppConfig {

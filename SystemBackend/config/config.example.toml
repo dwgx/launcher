@@ -16,3 +16,6 @@ cdn_base = "https://cdn.example.com"
 
 # 管理面板登录密码；首次登录后立刻通过 /admin/security 改成强随机
 admin_password = "CHANGE_ME_BEFORE_DEPLOY"
+
+media_root = "/opt/systembackend/media"
+avatar_root = "/opt/systembackend/avatars"

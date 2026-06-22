@@ -32,6 +32,7 @@ chrono      = { version = "0.4", features = ["serde"] }
 uuid        = { version = "1", features = ["v4", "serde"] }
 prost       = "0.13"
 prost-build = "0.13"
+protoc-bin-vendored = "3.2.0"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
 aes-gcm     = "0.10"
 argon2      = "0.5"

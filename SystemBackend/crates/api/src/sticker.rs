@@ -298,7 +298,7 @@ pub async fn get_pack(
              JOIN stickers s    ON s.id = spi.sticker_id
              JOIN media_files m ON m.id = s.media_id
            WHERE spi.pack_id = $1
-           ORDER BY spi.sort_order"#, id)
+           ORDER BY spi.sort_order, s.created_at, s.id"#, id)
         .fetch_all(&s.db).await.map_err(internal)?;
 
     let stickers_out: Vec<StickerOut> = stickers.into_iter().map(|r| {

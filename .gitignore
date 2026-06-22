@@ -87,6 +87,7 @@ coverage/
 *.gcno
 
 # Temp
+tmp/
 *.tmp
 *~
 .playwright-mcp/
