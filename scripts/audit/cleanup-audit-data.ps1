@@ -24,9 +24,35 @@ $knownHosts = Join-Path (Split-Path -Parent $key) 'launcher_deploy_known_hosts'
 $prefixLike = "$Prefix%"
 
 $remoteScript = @"
-set -e
-DBURL=`$(sed -n 's/^database_url *= *"\(.*\)"/\1/p' $RemoteDir/config.toml)
-psql "`$DBURL" -v ON_ERROR_STOP=1 -v prefix_like="$prefixLike" -f - < /tmp/launcher-cleanup-audit-data.sql
+set -euo pipefail
+DBURL=`$(sudo sed -n 's/^database_url *= *"\(.*\)"/\1/p' $RemoteDir/config.toml)
+DB_MODE="system"
+DB_CONTAINER=""
+DB_NAME=""
+if sudo test -f $RemoteDir/db.env; then
+  DB_MODE=`$(sudo sed -n 's/^DB_MODE=//p' $RemoteDir/db.env)
+  DB_CONTAINER=`$(sudo sed -n 's/^DB_CONTAINER=//p' $RemoteDir/db.env)
+  DB_NAME=`$(sudo sed -n 's/^DB_NAME=//p' $RemoteDir/db.env)
+fi
+if [ "`$DB_MODE" = "docker" ]; then
+  if ! sudo docker exec -i "`$DB_CONTAINER" \
+      psql -U postgres -d "`$DB_NAME" -Atqc "SELECT to_regclass('public.users')" | grep -q users; then
+    echo "audit cleanup skipped: users table not present"
+    rm -f /tmp/launcher-cleanup-audit-data.sql
+    exit 0
+  fi
+  sudo docker exec -i "`$DB_CONTAINER" \
+    psql -U postgres -d "`$DB_NAME" -v ON_ERROR_STOP=1 -v prefix_like="$prefixLike" \
+    < /tmp/launcher-cleanup-audit-data.sql
+else
+  if ! psql "`$DBURL" -Atqc "SELECT to_regclass('public.users')" | grep -q users; then
+    echo "audit cleanup skipped: users table not present"
+    rm -f /tmp/launcher-cleanup-audit-data.sql
+    exit 0
+  fi
+  psql "`$DBURL" -v ON_ERROR_STOP=1 -v prefix_like="$prefixLike" -f - < /tmp/launcher-cleanup-audit-data.sql
+fi
+rm -f /tmp/launcher-cleanup-audit-data.sql
 "@
 
 scp -O -P $Port -i $key -o IdentitiesOnly=yes -o PreferredAuthentications=publickey `
