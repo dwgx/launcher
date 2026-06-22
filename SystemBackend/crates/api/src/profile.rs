@@ -56,6 +56,9 @@ pub struct ProfileResp {
     pub status:      String,
     pub status_text: String,
     pub bio:         String,
+    pub role:        String,
+    pub role_label:  Option<String>,
+    pub is_admin:    bool,
 }
 
 pub async fn get_profile(
@@ -69,7 +72,8 @@ pub async fn get_profile(
                   nickname_changed_at, password_changed_at,
                   status,
                   COALESCE(status_text, '') as "status_text!",
-                  COALESCE(bio, '') as "bio!"
+                  COALESCE(bio, '') as "bio!",
+                  role, role_label, is_admin
            FROM users WHERE id = $1"#, uid)
         .fetch_one(&s.db).await.map_err(internal)?;
 
@@ -89,6 +93,9 @@ pub async fn get_profile(
         status:      if row.status.is_empty() { "online".into() } else { row.status },
         status_text: row.status_text,
         bio:         row.bio,
+        role:        row.role,
+        role_label:  row.role_label,
+        is_admin:    row.is_admin,
     }))
 }
 
@@ -223,7 +230,7 @@ pub async fn upload_avatar(
     }
     let detected = media_policy::validate_avatar(&bytes)?;
 
-    let dir = std::path::Path::new("/opt/systembackend/avatars");
+    let dir = std::path::Path::new(&s.cfg.avatar_root);
     std::fs::create_dir_all(dir).map_err(internal)?;
     let path = dir.join(format!("{}.{}", uid, detected.ext));
     std::fs::write(&path, &bytes).map_err(internal)?;

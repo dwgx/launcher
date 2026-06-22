@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use sqlx::{postgres::PgRow, Row};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -36,13 +36,212 @@ async fn can_access_chat(
     Ok(member.is_some())
 }
 
+async fn is_admin_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<bool, (StatusCode, String)> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(is_admin, false) OR role IN ('admin','owner','super_admin') FROM users WHERE id = $1"
+    )
+        .bind(user_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .unwrap_or(false))
+}
+
+async fn is_super_admin_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<bool, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"SELECT username, is_admin, role, role_label
+           FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "user not found".into()))?;
+    let username: Option<String> = row.try_get("username").map_err(internal)?;
+    let is_admin: bool = row.try_get("is_admin").map_err(internal)?;
+    let role: String = row.try_get("role").map_err(internal)?;
+    let role_label: Option<String> = row.try_get("role_label").map_err(internal)?;
+    let label = role_label.unwrap_or_default().to_lowercase();
+    Ok(is_admin && (
+        role == "owner"
+        || role == "super_admin"
+        || username.as_deref() == Some("admin")
+        || label.contains("super")
+        || label.contains("超级")
+    ))
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UserBrief {
+    pub user_id:    String,
+    pub uid:        String,
+    pub username:   String,
+    pub nickname:   Option<String>,
+    pub role:       Option<String>,
+    pub role_label: Option<String>,
+}
+
+async fn user_brief(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Option<UserBrief>, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"SELECT uid, username, nickname, role, role_label
+           FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_optional(&state.db).await.map_err(internal)?;
+    row.map(|r| Ok(UserBrief {
+        user_id: user_id.to_string(),
+        uid: r.try_get::<Option<String>, _>("uid").map_err(internal)?.unwrap_or_default(),
+        username: r.try_get::<Option<String>, _>("username").map_err(internal)?.unwrap_or_default(),
+        nickname: r.try_get("nickname").map_err(internal)?,
+        role: Some(r.try_get::<String, _>("role").map_err(internal)?),
+        role_label: r.try_get("role_label").map_err(internal)?,
+    })).transpose()
+}
+
+#[derive(Clone, Debug)]
+struct ActiveMute {
+    id: i64,
+    target_user_id: Uuid,
+    muted_by: Option<Uuid>,
+    reason: String,
+    muted_until: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+}
+
+async fn active_mute_for_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Option<ActiveMute>, (StatusCode, String)> {
+    let row = sqlx::query(
+        r#"SELECT id, target_user_id, muted_by, reason, muted_until, created_at
+           FROM user_mutes
+           WHERE target_user_id = $1
+             AND revoked_at IS NULL
+             AND muted_until > now()
+           ORDER BY muted_until DESC, id DESC
+           LIMIT 1"#)
+        .bind(user_id)
+        .fetch_optional(&state.db).await.map_err(internal)?;
+    row.map(|r| Ok(ActiveMute {
+        id: r.try_get("id").map_err(internal)?,
+        target_user_id: r.try_get("target_user_id").map_err(internal)?,
+        muted_by: r.try_get("muted_by").map_err(internal)?,
+        reason: r.try_get("reason").map_err(internal)?,
+        muted_until: r.try_get("muted_until").map_err(internal)?,
+        created_at: r.try_get("created_at").map_err(internal)?,
+    })).transpose()
+}
+
+async fn normalize_mentions(
+    state: &AppState,
+    chat_id: Uuid,
+    mut mentions: Vec<Uuid>,
+) -> Result<Vec<Uuid>, (StatusCode, String)> {
+    mentions.sort();
+    mentions.dedup();
+    if mentions.len() > 20 {
+        return Err((StatusCode::BAD_REQUEST, "too many mentions".into()));
+    }
+    for uid in &mentions {
+        let exists = sqlx::query_scalar!(
+            "SELECT 1 as ok FROM users WHERE id = $1",
+            uid
+        )
+            .fetch_optional(&state.db).await.map_err(internal)?
+            .is_some();
+        if !exists {
+            return Err((StatusCode::BAD_REQUEST, "mentioned user not found".into()));
+        }
+        if !can_access_chat(state, *uid, chat_id).await? {
+            return Err((StatusCode::BAD_REQUEST, "mentioned user cannot access chat".into()));
+        }
+    }
+    Ok(mentions)
+}
+
+async fn ensure_can_write_chat(
+    state: &AppState,
+    user_id: Uuid,
+    chat_id: Uuid,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(active) = active_mute_for_user(state, user_id).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "muted until {}: {}",
+                active.muted_until.timestamp(),
+                active.reason
+            )
+        ));
+    }
+
+    let chat_meta = sqlx::query!(
+        r#"SELECT kind, write_role, is_official FROM chats WHERE id = $1"#,
+        chat_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
+
+    let can_access = if chat_meta.kind == "channel" && chat_meta.is_official {
+        true
+    } else {
+        let member = sqlx::query_scalar!(
+            "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2",
+            chat_id,
+            user_id
+        )
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+        member.is_some()
+    };
+    if !can_access {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+
+    if chat_meta.kind == "channel"
+        && chat_meta.write_role == "admin_only"
+        && !is_admin_user(state, user_id).await?
+    {
+        return Err((StatusCode::FORBIDDEN, "channel is admin only".into()));
+    }
+    Ok(())
+}
+
 async fn message_chat(
     state: &AppState,
     message_id: i64,
 ) -> Result<Uuid, (StatusCode, String)> {
-    sqlx::query_scalar!("SELECT chat_id FROM messages WHERE id = $1", message_id)
+    sqlx::query_scalar!(
+        "SELECT chat_id FROM messages WHERE id = $1 AND deleted_at IS NULL",
+        message_id
+    )
         .fetch_optional(&state.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))
+}
+
+async fn broadcast_chat_event(
+    state: &AppState,
+    chat_id: Uuid,
+    payload: &serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    let chat_meta = sqlx::query!(
+        "SELECT kind, is_official FROM chats WHERE id = $1", chat_id)
+        .fetch_optional(&state.db).await.map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
+    if chat_meta.kind == "channel" && chat_meta.is_official {
+        ws::broadcast_all(state, payload);
+    } else {
+        let members = sqlx::query_scalar!(
+            "SELECT user_id FROM chat_members WHERE chat_id = $1", chat_id)
+            .fetch_all(&state.db).await.map_err(internal)?;
+        for uid in members {
+            ws::push_to(state, uid, payload);
+        }
+    }
+    Ok(())
 }
 
 async fn create_event(
@@ -79,24 +278,132 @@ async fn message_event_id(
     row.map(|r| r.try_get("id").map_err(internal)).transpose()
 }
 
-fn message_out_from_row(
+#[derive(Serialize, Clone)]
+pub struct ReplySnapshot {
+    pub id: i64,
+    pub sender_id: Option<String>,
+    pub sender_uid: Option<String>,
+    pub sender_username: Option<String>,
+    pub sender_nickname: Option<String>,
+    pub msg_type: String,
+    pub preview: String,
+    pub deleted: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct MentionOut {
+    pub user_id: String,
+    pub uid: String,
+    pub username: String,
+    pub nickname: Option<String>,
+}
+
+fn message_preview(payload: &serde_json::Value, msg_type: &str) -> String {
+    if let Some(text) = payload.get("text").and_then(|v| v.as_str()) {
+        return text.chars().take(140).collect();
+    }
+    if let Some(s) = payload.as_str() {
+        return s.chars().take(140).collect();
+    }
+    match msg_type {
+        "image" => "[image]".into(),
+        "video" => "[video]".into(),
+        "gif" => "[gif]".into(),
+        "sticker" => "[sticker]".into(),
+        "pack_share" => "[sticker pack]".into(),
+        "system" => "[system]".into(),
+        _ => payload.to_string().chars().take(140).collect(),
+    }
+}
+
+async fn reply_snapshot_for(
+    state: &AppState,
+    reply_to_id: Option<i64>,
+) -> Result<Option<ReplySnapshot>, (StatusCode, String)> {
+    let Some(reply_id) = reply_to_id else { return Ok(None); };
+    let row = sqlx::query(
+        r#"SELECT m.id, m.sender_id, m.msg_type, m.payload, m.deleted_at,
+                  u.uid as sender_uid, u.username as sender_username, u.nickname as sender_nickname
+           FROM messages m
+           LEFT JOIN users u ON u.id = m.sender_id
+           WHERE m.id = $1"#)
+        .bind(reply_id)
+        .fetch_optional(&state.db).await.map_err(internal)?;
+    row.map(|r| {
+        let payload: serde_json::Value = r.try_get("payload").map_err(internal)?;
+        let msg_type: String = r.try_get("msg_type").map_err(internal)?;
+        let deleted = r.try_get::<Option<DateTime<Utc>>, _>("deleted_at").map_err(internal)?.is_some();
+        let preview = if deleted { "[deleted]".into() } else { message_preview(&payload, &msg_type) };
+        Ok(ReplySnapshot {
+            id: r.try_get("id").map_err(internal)?,
+            sender_id: r.try_get::<Option<Uuid>, _>("sender_id").map_err(internal)?.map(|u| u.to_string()),
+            sender_uid: r.try_get::<Option<String>, _>("sender_uid").map_err(internal)?,
+            sender_username: r.try_get::<Option<String>, _>("sender_username").map_err(internal)?,
+            sender_nickname: r.try_get("sender_nickname").map_err(internal)?,
+            msg_type,
+            preview,
+            deleted,
+        })
+    }).transpose()
+}
+
+async fn mentions_for_message(
+    state: &AppState,
+    message_id: i64,
+) -> Result<Vec<MentionOut>, (StatusCode, String)> {
+    let rows = sqlx::query(
+        r#"SELECT u.id, u.uid, u.username, u.nickname
+           FROM message_mentions mm
+           JOIN users u ON u.id = mm.user_id
+           WHERE mm.message_id = $1
+           ORDER BY u.nickname NULLS LAST, u.username"#)
+        .bind(message_id)
+        .fetch_all(&state.db).await.map_err(internal)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let id: Uuid = r.try_get("id").map_err(internal)?;
+        out.push(MentionOut {
+            user_id: id.to_string(),
+            uid: r.try_get::<Option<String>, _>("uid").map_err(internal)?.unwrap_or_default(),
+            username: r.try_get::<Option<String>, _>("username").map_err(internal)?.unwrap_or_default(),
+            nickname: r.try_get("nickname").map_err(internal)?,
+        });
+    }
+    Ok(out)
+}
+
+async fn message_out_from_row(
+    state: &AppState,
     row: &PgRow,
     chat_id: Uuid,
     sender_id: Option<Uuid>,
     event_id: Option<i64>,
 ) -> Result<MessageOut, (StatusCode, String)> {
+    let id: i64 = row.try_get("id").map_err(internal)?;
+    let reply_to_id: Option<i64> = row.try_get("reply_to_id").map_err(internal)?;
+    let sender = match sender_id {
+        Some(uid) => user_brief(state, uid).await?,
+        None => None,
+    };
     Ok(MessageOut {
-        id: row.try_get("id").map_err(internal)?,
+        id,
         chat_id: chat_id.to_string(),
         sender_id: sender_id.map(|u| u.to_string()),
+        sender_uid: sender.as_ref().map(|u| u.uid.clone()),
+        sender_username: sender.as_ref().map(|u| u.username.clone()),
+        sender_nickname: sender.as_ref().and_then(|u| u.nickname.clone()),
+        sender_role: sender.as_ref().and_then(|u| u.role.clone()),
+        sender_role_label: sender.as_ref().and_then(|u| u.role_label.clone()),
         msg_type: row.try_get("msg_type").map_err(internal)?,
         payload: row.try_get("payload").map_err(internal)?,
-        reply_to_id: row.try_get("reply_to_id").map_err(internal)?,
+        reply_to_id,
+        reply_snapshot: reply_snapshot_for(state, reply_to_id).await?,
         created_at: row.try_get::<DateTime<Utc>, _>("created_at").map_err(internal)?.timestamp(),
         edited_at: row.try_get::<Option<DateTime<Utc>>, _>("edited_at").map_err(internal)?.map(|t| t.timestamp()),
         deleted: row.try_get::<Option<DateTime<Utc>>, _>("deleted_at").map_err(internal)?.is_some(),
         client_msg_id: row.try_get::<Option<Uuid>, _>("client_msg_id").map_err(internal)?.map(|v| v.to_string()),
         sender_device_id: row.try_get("sender_device_id").map_err(internal)?,
+        mentions: mentions_for_message(state, id).await?,
         event_id,
     })
 }
@@ -172,9 +479,10 @@ pub async fn create_group(
     if req.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title required".into()));
     }
+    let write_role = if req.kind == "channel" { "user" } else { "admin_only" };
     let chat = sqlx::query!(
-        "INSERT INTO chats (kind, title, created_by) VALUES ($1, $2, $3) RETURNING id",
-        req.kind, req.title, me).fetch_one(&s.db).await.map_err(internal)?;
+        "INSERT INTO chats (kind, title, created_by, write_role) VALUES ($1, $2, $3, $4) RETURNING id",
+        req.kind, req.title, me, write_role).fetch_one(&s.db).await.map_err(internal)?;
 
     // owner = me
     sqlx::query!(
@@ -247,32 +555,39 @@ pub async fn list_chats(
 ) -> Result<Json<Vec<ChatListItem>>, (StatusCode, String)> {
     let me = auth_user(&s, &q.session_token).await?;
     let rows = sqlx::query!(
-        r#"SELECT c.id, c.kind, c.title, c.last_message_at,
+        r#"SELECT c.id, c.kind, c.title,
+                  (SELECT m.created_at
+                   FROM messages m
+                   WHERE m.chat_id = c.id AND m.deleted_at IS NULL
+                   ORDER BY m.id DESC
+                   LIMIT 1) AS last_visible_message_at,
                   cm.last_read_message_id
-           FROM chat_members cm JOIN chats c ON c.id = cm.chat_id
+           FROM chats c
+           LEFT JOIN chat_members cm
+             ON cm.chat_id = c.id AND cm.user_id = $1
            WHERE cm.user_id = $1
-           ORDER BY c.last_message_at DESC NULLS LAST LIMIT 100"#, me)
+              OR (c.kind = 'channel' AND c.is_official = TRUE)
+           ORDER BY last_visible_message_at DESC NULLS LAST, c.title ASC
+           LIMIT 100"#, me)
         .fetch_all(&s.db).await.map_err(internal)?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         // 最后一条消息
-        let last = sqlx::query!(
-            r#"SELECT id, sender_id, msg_type, payload, created_at
+        let last = sqlx::query(
+            r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at,
+                      edited_at, deleted_at, client_msg_id, sender_device_id
                FROM messages WHERE chat_id = $1 AND deleted_at IS NULL
-               ORDER BY id DESC LIMIT 1"#, r.id)
+               ORDER BY id DESC LIMIT 1"#)
+            .bind(r.id)
             .fetch_optional(&s.db).await.map_err(internal)?;
-        let last_out = last.map(|m| MessageOut {
-            id: m.id, chat_id: r.id.to_string(),
-            sender_id: m.sender_id.map(|u| u.to_string()),
-            msg_type: m.msg_type, payload: m.payload,
-            reply_to_id: None,
-            created_at: m.created_at.timestamp(),
-            edited_at: None, deleted: false,
-            client_msg_id: None,
-            sender_device_id: None,
-            event_id: None,
-        });
+        let last_out = match last {
+            Some(m) => {
+                let sender_id = m.try_get::<Option<Uuid>, _>("sender_id").map_err(internal)?;
+                Some(message_out_from_row(&s, &m, r.id, sender_id, None).await?)
+            }
+            None => None,
+        };
         // 未读数
         let unread = if let Some(lr) = r.last_read_message_id {
             sqlx::query_scalar!(
@@ -287,7 +602,7 @@ pub async fn list_chats(
             id: r.id.to_string(), kind: r.kind, title: r.title,
             avatar_url: None,
             last_message: last_out,
-            last_message_at: r.last_message_at.map(|t| t.timestamp()),
+            last_message_at: r.last_visible_message_at.map(|t| t.timestamp()),
             unread_count: unread,
         });
     }
@@ -304,6 +619,8 @@ pub struct SendReq {
     pub reply_to_id:   Option<i64>,
     pub client_msg_id: Option<Uuid>,
     pub device_id:     Option<String>,
+    #[serde(default)]
+    pub mentions:      Vec<Uuid>,
 }
 
 #[derive(Serialize, Clone)]
@@ -311,14 +628,21 @@ pub struct MessageOut {
     pub id:          i64,
     pub chat_id:     String,
     pub sender_id:   Option<String>,
+    pub sender_uid:  Option<String>,
+    pub sender_username: Option<String>,
+    pub sender_nickname: Option<String>,
+    pub sender_role: Option<String>,
+    pub sender_role_label: Option<String>,
     pub msg_type:    String,
     pub payload:     serde_json::Value,
     pub reply_to_id: Option<i64>,
+    pub reply_snapshot: Option<ReplySnapshot>,
     pub created_at:  i64,
     pub edited_at:   Option<i64>,
     pub deleted:     bool,
     pub client_msg_id: Option<String>,
     pub sender_device_id: Option<String>,
+    pub mentions:    Vec<MentionOut>,
     pub event_id:    Option<i64>,
 }
 
@@ -333,6 +657,250 @@ pub struct ChatEventOut {
     pub created_at: i64,
 }
 
+#[derive(Deserialize)]
+pub struct MuteReq {
+    pub session_token: String,
+    pub chat_id: Uuid,
+    pub target_user_id: Uuid,
+    pub duration_seconds: i64,
+    pub reason: String,
+}
+
+#[derive(Deserialize)]
+pub struct UnmuteReq {
+    pub session_token: String,
+    pub chat_id: Uuid,
+    pub target_user_id: Uuid,
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ModerationMemberQ {
+    pub session_token: String,
+    pub chat_id: Uuid,
+    pub target_user_id: Uuid,
+}
+
+#[derive(Serialize)]
+pub struct ModerationMemberResp {
+    pub target: Option<UserBrief>,
+    pub active: bool,
+    pub mute_id: Option<i64>,
+    pub muted_until: Option<i64>,
+    pub reason: Option<String>,
+    pub muted_by: Option<UserBrief>,
+    pub can_mute: bool,
+    pub can_unmute: bool,
+    pub is_super_admin: bool,
+}
+
+fn trim_reason(reason: &str) -> String {
+    let s = reason.trim();
+    if s.is_empty() {
+        "No reason provided".into()
+    } else {
+        s.chars().take(160).collect()
+    }
+}
+
+async fn ensure_moderator(
+    state: &AppState,
+    actor: Uuid,
+) -> Result<bool, (StatusCode, String)> {
+    if !is_admin_user(state, actor).await? {
+        return Err((StatusCode::FORBIDDEN, "admin required".into()));
+    }
+    is_super_admin_user(state, actor).await
+}
+
+fn duration_label(seconds: i64) -> String {
+    if seconds % 86_400 == 0 {
+        format!("{} 天", seconds / 86_400)
+    } else if seconds % 3_600 == 0 {
+        format!("{} 小时", seconds / 3_600)
+    } else if seconds % 60 == 0 {
+        format!("{} 分钟", seconds / 60)
+    } else {
+        format!("{} 秒", seconds)
+    }
+}
+
+pub async fn moderation_member(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<ModerationMemberQ>,
+) -> Result<Json<ModerationMemberResp>, (StatusCode, String)> {
+    let me = auth_user(&s, &q.session_token).await?;
+    if !can_access_chat(&s, me, q.chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+    let is_admin = is_admin_user(&s, me).await?;
+    let is_super = if is_admin { is_super_admin_user(&s, me).await? } else { false };
+    let target_is_admin = is_admin_user(&s, q.target_user_id).await?;
+    let target = user_brief(&s, q.target_user_id).await?;
+    let active = active_mute_for_user(&s, q.target_user_id).await?;
+    let muted_by = match active.as_ref().and_then(|m| m.muted_by) {
+        Some(uid) => user_brief(&s, uid).await?,
+        None => None,
+    };
+    let can_unmute = active.as_ref()
+        .map(|m| is_super || m.muted_by == Some(me))
+        .unwrap_or(false);
+    Ok(Json(ModerationMemberResp {
+        target,
+        active: active.is_some(),
+        mute_id: active.as_ref().map(|m| m.id),
+        muted_until: active.as_ref().map(|m| m.muted_until.timestamp()),
+        reason: active.as_ref().map(|m| m.reason.clone()),
+        muted_by,
+        can_mute: is_admin && me != q.target_user_id && (!target_is_admin || is_super),
+        can_unmute,
+        is_super_admin: is_super,
+    }))
+}
+
+pub async fn mute_user(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<MuteReq>,
+) -> Result<Json<ModerationMemberResp>, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let is_super = ensure_moderator(&s, me).await?;
+    if !can_access_chat(&s, me, req.chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+    if me == req.target_user_id {
+        return Err((StatusCode::BAD_REQUEST, "cannot mute self".into()));
+    }
+    if is_admin_user(&s, req.target_user_id).await? && !is_super {
+        return Err((StatusCode::FORBIDDEN, "only super admin can mute admins".into()));
+    }
+    let duration = req.duration_seconds.clamp(1, 60 * 60 * 24 * 365);
+    let reason = trim_reason(&req.reason);
+    let muted_until = Utc::now() + Duration::seconds(duration);
+    sqlx::query!(
+        r#"UPDATE user_mutes
+           SET revoked_at = now(), revoked_by = $1, revoke_reason = 'superseded'
+           WHERE target_user_id = $2 AND revoked_at IS NULL"#,
+        me,
+        req.target_user_id
+    )
+        .execute(&s.db).await.map_err(internal)?;
+    let row = sqlx::query!(
+        r#"INSERT INTO user_mutes (target_user_id, muted_by, reason, muted_until)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id"#,
+        req.target_user_id,
+        me,
+        &reason,
+        muted_until
+    )
+        .fetch_one(&s.db).await.map_err(internal)?;
+    let target = user_brief(&s, req.target_user_id).await?;
+    let moderator = user_brief(&s, me).await?;
+    let event_payload = serde_json::json!({
+        "mute_id": row.id,
+        "scope": "global",
+        "target": target,
+        "moderator": moderator,
+        "reason": reason,
+        "duration_seconds": duration,
+        "duration_label": duration_label(duration),
+        "muted_until": muted_until.timestamp()
+    });
+    let event_id = create_event(
+        &s,
+        Some(req.chat_id),
+        "member_muted",
+        None,
+        Some(me),
+        event_payload.clone(),
+    ).await?;
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "member_muted",
+        "chat_id": req.chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": event_payload,
+        "legacy_type": "member_muted"
+    });
+    broadcast_chat_event(&s, req.chat_id, &payload).await?;
+
+    moderation_member(
+        State(s),
+        Query(ModerationMemberQ {
+            session_token: req.session_token,
+            chat_id: req.chat_id,
+            target_user_id: req.target_user_id,
+        }),
+    ).await
+}
+
+pub async fn unmute_user(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<UnmuteReq>,
+) -> Result<Json<ModerationMemberResp>, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    let is_super = ensure_moderator(&s, me).await?;
+    if !can_access_chat(&s, me, req.chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+    let active = active_mute_for_user(&s, req.target_user_id).await?
+        .ok_or((StatusCode::NOT_FOUND, "active mute not found".into()))?;
+    if active.muted_by != Some(me) && !is_super {
+        return Err((StatusCode::FORBIDDEN, "only original moderator or super admin can unmute".into()));
+    }
+    let reason = req.reason.as_deref().map(trim_reason);
+    let revoke_reason = reason.clone();
+    let updated = sqlx::query!(
+        r#"UPDATE user_mutes
+           SET revoked_at = now(), revoked_by = $1, revoke_reason = $2
+           WHERE id = $3 AND revoked_at IS NULL"#,
+        me,
+        revoke_reason,
+        active.id
+    )
+        .execute(&s.db).await.map_err(internal)?;
+    if updated.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "active mute not found".into()));
+    }
+    let target = user_brief(&s, req.target_user_id).await?;
+    let moderator = user_brief(&s, me).await?;
+    let event_payload = serde_json::json!({
+        "mute_id": active.id,
+        "scope": "global",
+        "target": target,
+        "moderator": moderator,
+        "reason": reason.unwrap_or_else(|| "Unmuted".into())
+    });
+    let event_id = create_event(
+        &s,
+        Some(req.chat_id),
+        "member_unmuted",
+        None,
+        Some(me),
+        event_payload.clone(),
+    ).await?;
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "member_unmuted",
+        "chat_id": req.chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": event_payload,
+        "legacy_type": "member_unmuted"
+    });
+    broadcast_chat_event(&s, req.chat_id, &payload).await?;
+
+    moderation_member(
+        State(s),
+        Query(ModerationMemberQ {
+            session_token: req.session_token,
+            chat_id: req.chat_id,
+            target_user_id: req.target_user_id,
+        }),
+    ).await
+}
+
 pub async fn send(
     State(s): State<Arc<AppState>>,
     Json(req): Json<SendReq>,
@@ -342,35 +910,8 @@ pub async fn send(
     if !allowed_types.contains(&req.msg_type.as_str()) {
         return Err((StatusCode::BAD_REQUEST, "bad msg_type".into()));
     }
-    // 拿 chat 元信息（kind / write_role / is_official）
-    let chat_meta = sqlx::query!(
-        r#"SELECT kind, write_role, is_official FROM chats WHERE id = $1"#,
-        req.chat_id)
-        .fetch_optional(&s.db).await.map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "chat not found".into()))?;
-    // 拿当前用户角色
-    let user_admin = sqlx::query_scalar!(
-        "SELECT is_admin FROM users WHERE id = $1", me)
-        .fetch_optional(&s.db).await.map_err(internal)?
-        .unwrap_or(false);
-
-    if chat_meta.kind == "channel" && chat_meta.is_official {
-        // 官方频道按 write_role 控权
-        if chat_meta.write_role == "admin_only" && !user_admin {
-            return Err((StatusCode::FORBIDDEN,
-                "此频道只允许管理员发言".into()));
-        }
-        // user 频道：所有登录用户可发，无需 chat_members
-    } else {
-        // dm / group / 非官方 channel — 仍需 member 关系
-        let member = sqlx::query_scalar!(
-            "SELECT 1 as ok FROM chat_members WHERE chat_id=$1 AND user_id=$2",
-            req.chat_id, me)
-            .fetch_optional(&s.db).await.map_err(internal)?;
-        if member.is_none() {
-            return Err((StatusCode::FORBIDDEN, "not a member".into()));
-        }
-    }
+    ensure_can_write_chat(&s, me, req.chat_id).await?;
+    let mentions = normalize_mentions(&s, req.chat_id, req.mentions).await?;
 
     let device_id = req.device_id
         .as_deref()
@@ -378,8 +919,7 @@ pub async fn send(
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(128).collect::<String>());
 
-    let mut inserted = true;
-    let row = if let Some(client_msg_id) = req.client_msg_id {
+    if let Some(client_msg_id) = req.client_msg_id {
         if let Some(existing) = sqlx::query(
             r#"SELECT id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
                       client_msg_id, sender_device_id
@@ -390,10 +930,27 @@ pub async fn send(
             .bind(client_msg_id)
             .fetch_optional(&s.db).await.map_err(internal)?
         {
-            inserted = false;
-            existing
-        } else {
-            sqlx::query(
+            let message_id: i64 = existing.try_get("id").map_err(internal)?;
+            let existing_event_id = message_event_id(&s, message_id).await?;
+            let out = message_out_from_row(&s, &existing, req.chat_id, Some(me), existing_event_id).await?;
+            return Ok(Json(out));
+        }
+    }
+
+    if let Some(reply_to_id) = req.reply_to_id {
+        let reply_exists = sqlx::query_scalar!(
+            "SELECT 1 as ok FROM messages WHERE id = $1 AND chat_id = $2 AND deleted_at IS NULL",
+            reply_to_id,
+            req.chat_id)
+            .fetch_optional(&s.db).await.map_err(internal)?
+            .is_some();
+        if !reply_exists {
+            return Err((StatusCode::BAD_REQUEST, "reply target is not available".into()));
+        }
+    }
+
+    let row = if let Some(client_msg_id) = req.client_msg_id {
+        sqlx::query(
             r#"INSERT INTO messages
                   (chat_id, sender_id, msg_type, payload, reply_to_id, client_msg_id, sender_device_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -407,7 +964,6 @@ pub async fn send(
             .bind(client_msg_id)
             .bind(&device_id)
             .fetch_one(&s.db).await.map_err(internal)?
-        }
     } else {
         sqlx::query(
             r#"INSERT INTO messages
@@ -425,12 +981,18 @@ pub async fn send(
     };
 
     let message_id: i64 = row.try_get("id").map_err(internal)?;
-    let existing_event_id = message_event_id(&s, message_id).await?;
-    let out_without_event = message_out_from_row(&row, req.chat_id, Some(me), existing_event_id)?;
-
-    if !inserted {
-        return Ok(Json(out_without_event));
+    for mentioned_user_id in &mentions {
+        sqlx::query!(
+            r#"INSERT INTO message_mentions (message_id, user_id)
+               VALUES ($1, $2)
+               ON CONFLICT DO NOTHING"#,
+            message_id,
+            mentioned_user_id
+        )
+            .execute(&s.db).await.map_err(internal)?;
     }
+    let existing_event_id = message_event_id(&s, message_id).await?;
+    let out_without_event = message_out_from_row(&s, &row, req.chat_id, Some(me), existing_event_id).await?;
 
     let event_id = create_event(
         &s,
@@ -454,16 +1016,7 @@ pub async fn send(
         "data": &out,
         "legacy_type": "message"
     });
-    if chat_meta.kind == "channel" && chat_meta.is_official {
-        ws::broadcast_all(&s, &payload);
-    } else {
-        let members = sqlx::query_scalar!(
-            "SELECT user_id FROM chat_members WHERE chat_id = $1", req.chat_id)
-            .fetch_all(&s.db).await.map_err(internal)?;
-        for uid in members {
-            ws::push_to(&s, uid, &payload);
-        }
-    }
+    broadcast_chat_event(&s, req.chat_id, &payload).await?;
     Ok(Json(out))
 }
 
@@ -499,7 +1052,7 @@ pub async fn history(
     let rows = sqlx::query(
         r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at, edited_at, deleted_at,
                   client_msg_id, sender_device_id
-           FROM messages WHERE chat_id = $1 AND id < $2
+           FROM messages WHERE chat_id = $1 AND id < $2 AND deleted_at IS NULL
            ORDER BY id DESC LIMIT $3"#)
         .bind(q.chat_id)
         .bind(before)
@@ -509,7 +1062,7 @@ pub async fn history(
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let sender_id = r.try_get::<Option<Uuid>, _>("sender_id").map_err(internal)?;
-        out.push(message_out_from_row(&r, q.chat_id, sender_id, None)?);
+        out.push(message_out_from_row(&s, &r, q.chat_id, sender_id, None).await?);
     }
     Ok(Json(out))
 }
@@ -534,6 +1087,13 @@ pub async fn sync_events(
            FROM chat_events e
            LEFT JOIN chats c ON c.id = e.chat_id
            WHERE e.id > $1
+             AND (
+                e.event_type <> 'message'
+                OR EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.id = e.message_id AND m.deleted_at IS NULL
+                )
+             )
              AND (
                 e.chat_id IS NULL
                 OR (c.kind = 'channel' AND c.is_official = TRUE)
@@ -576,18 +1136,39 @@ pub async fn mark_read(
     if !can_access_chat(&s, me, req.chat_id).await? {
         return Err((StatusCode::FORBIDDEN, "not a member".into()));
     }
+    let target_chat = message_chat(&s, req.up_to_message_id).await?;
+    if target_chat != req.chat_id {
+        return Err((StatusCode::BAD_REQUEST, "read target is in another chat".into()));
+    }
     sqlx::query!(
-        "UPDATE chat_members SET last_read_message_id = $1 WHERE chat_id = $2 AND user_id = $3",
-        req.up_to_message_id, req.chat_id, me)
+        r#"INSERT INTO chat_members (chat_id, user_id, last_read_message_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (chat_id, user_id) DO UPDATE
+           SET last_read_message_id = GREATEST(
+               COALESCE(chat_members.last_read_message_id, 0),
+               EXCLUDED.last_read_message_id
+           )"#,
+        req.chat_id, me, req.up_to_message_id)
         .execute(&s.db).await.map_err(internal)?;
-    let _ = create_event(
+    let event_id = create_event(
         &s,
         Some(req.chat_id),
         "read",
         Some(req.up_to_message_id),
         Some(me),
         serde_json::json!({ "up_to_message_id": req.up_to_message_id }),
-    ).await;
+    ).await?;
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "read",
+        "message_id": req.up_to_message_id,
+        "chat_id": req.chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": { "up_to_message_id": req.up_to_message_id },
+        "legacy_type": "read"
+    });
+    broadcast_chat_event(&s, req.chat_id, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -623,14 +1204,25 @@ pub async fn react(
                VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
             req.message_id, me, emoji).execute(&s.db).await.map_err(internal)?;
     }
-    let _ = create_event(
+    let event_id = create_event(
         &s,
         Some(chat_id),
         "reaction",
         Some(req.message_id),
         Some(me),
         serde_json::json!({ "emoji": emoji, "remove": req.remove }),
-    ).await;
+    ).await?;
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "reaction",
+        "message_id": req.message_id,
+        "chat_id": chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": { "emoji": emoji, "remove": req.remove },
+        "legacy_type": "reaction"
+    });
+    broadcast_chat_event(&s, chat_id, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -644,7 +1236,8 @@ pub async fn delete_msg(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
     let row = sqlx::query!(
-        "SELECT sender_id, chat_id FROM messages WHERE id = $1", req.message_id)
+        "SELECT sender_id, chat_id FROM messages WHERE id = $1 AND deleted_at IS NULL",
+        req.message_id)
         .fetch_optional(&s.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))?;
     if !can_access_chat(&s, me, row.chat_id).await? {
@@ -653,8 +1246,13 @@ pub async fn delete_msg(
     if row.sender_id != Some(me) {
         return Err((StatusCode::FORBIDDEN, "not your message".into()));
     }
-    sqlx::query!("UPDATE messages SET deleted_at = now() WHERE id = $1", req.message_id)
+    let updated = sqlx::query!(
+        "UPDATE messages SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+        req.message_id)
         .execute(&s.db).await.map_err(internal)?;
+    if updated.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "msg not found".into()));
+    }
     let event_id = create_event(
         &s,
         Some(row.chat_id),
@@ -669,18 +1267,11 @@ pub async fn delete_msg(
         "event_type": "message_deleted",
         "message_id": req.message_id,
         "chat_id": row.chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": { "message_id": req.message_id },
         "legacy_type": "message_deleted"
     });
-    let members = sqlx::query_scalar!(
-        "SELECT user_id FROM chat_members WHERE chat_id = $1", row.chat_id)
-        .fetch_all(&s.db).await.map_err(internal)?;
-    if members.is_empty() {
-        ws::broadcast_all(&s, &payload);
-    } else {
-        for uid in members {
-            ws::push_to(&s, uid, &payload);
-        }
-    }
+    broadcast_chat_event(&s, row.chat_id, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -700,8 +1291,14 @@ pub struct SearchHit {
     pub chat_id:    String,
     pub chat_slug:  Option<String>,
     pub sender_id:  Option<String>,
+    pub sender_uid: Option<String>,
+    pub sender_username: Option<String>,
+    pub sender_nickname: Option<String>,
     pub msg_type:   String,
     pub payload:    String,
+    pub reply_to_id: Option<i64>,
+    pub reply_snapshot: Option<ReplySnapshot>,
+    pub mentions: Vec<MentionOut>,
     pub created_at: i64,
 }
 
@@ -717,7 +1314,7 @@ pub async fn search(
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let pattern = format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
     let rows = sqlx::query!(
-        r#"SELECT m.id, m.chat_id, m.sender_id, m.msg_type,
+        r#"SELECT m.id, m.chat_id, m.sender_id, m.msg_type, m.reply_to_id,
                   m.payload::text as "payload!",
                   m.created_at, c.slug
            FROM messages m JOIN chats c ON c.id = m.chat_id
@@ -732,20 +1329,34 @@ pub async fn search(
            LIMIT $3"#,
         me, pattern, limit)
         .fetch_all(&s.db).await.map_err(internal)?;
-    Ok(Json(rows.into_iter().map(|r| {
-        // payload::text 会带引号 — 简单 trim
-        let mut p = r.payload;
-        if p.len() >= 2 && p.starts_with('"') && p.ends_with('"') {
-            p = p[1..p.len()-1].to_string();
-        }
-        SearchHit {
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let p = serde_json::from_str::<serde_json::Value>(&r.payload)
+            .ok()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            })
+            .unwrap_or(r.payload);
+        let sender = match r.sender_id {
+            Some(uid) => user_brief(&s, uid).await?,
+            None => None,
+        };
+        out.push(SearchHit {
             id: r.id,
             chat_id: r.chat_id.to_string(),
             chat_slug: r.slug,
             sender_id: r.sender_id.map(|u| u.to_string()),
+            sender_uid: sender.as_ref().map(|u| u.uid.clone()),
+            sender_username: sender.as_ref().map(|u| u.username.clone()),
+            sender_nickname: sender.as_ref().and_then(|u| u.nickname.clone()),
             msg_type: r.msg_type,
             payload: p,
+            reply_to_id: r.reply_to_id,
+            reply_snapshot: reply_snapshot_for(&s, r.reply_to_id).await?,
+            mentions: mentions_for_message(&s, r.id).await?,
             created_at: r.created_at.timestamp(),
-        }
-    }).collect()))
+        });
+    }
+    Ok(Json(out))
 }

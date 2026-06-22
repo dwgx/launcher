@@ -115,6 +115,9 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/chat/read",             post(chat::mark_read))
         .route("/chat/react",            post(chat::react))
         .route("/chat/delete",           post(chat::delete_msg))
+        .route("/chat/moderation/member", get(chat::moderation_member))
+        .route("/chat/moderation/mute",  post(chat::mute_user))
+        .route("/chat/moderation/unmute", post(chat::unmute_user))
         // desktop settings sync
         .route("/client/settings",       get(client_settings::get_settings).post(client_settings::upsert_settings))
         // sticker

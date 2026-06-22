@@ -39,6 +39,9 @@ pub struct UserSummary {
     pub username:  Option<String>,
     pub nickname:  Option<String>,
     pub tier:      Option<String>,
+    pub role:      String,
+    pub role_label: Option<String>,
+    pub is_admin:  bool,
     pub created_at: i64,
     pub last_login_at: Option<i64>,
 }
@@ -49,7 +52,7 @@ pub async fn list_users(
 ) -> Result<Json<Vec<UserSummary>>, (StatusCode, String)> {
     check(&s, &auth)?;
     let rows = sqlx::query!(
-        r#"SELECT id, uid, username, nickname, subscription_tier,
+        r#"SELECT id, uid, username, nickname, subscription_tier, role, role_label, is_admin,
                   created_at, last_login_at
            FROM users ORDER BY created_at DESC LIMIT 200"#)
         .fetch_all(&s.db).await.map_err(internal)?;
@@ -59,6 +62,9 @@ pub async fn list_users(
         username: r.username,
         nickname: r.nickname,
         tier: r.subscription_tier,
+        role: r.role,
+        role_label: r.role_label,
+        is_admin: r.is_admin,
         created_at: r.created_at.timestamp(),
         last_login_at: r.last_login_at.map(|t| t.timestamp()),
     }).collect()))
@@ -72,6 +78,9 @@ pub struct PatchUser {
     pub nickname:  Option<String>,
     pub tier:      Option<String>,
     pub tier_expires_at: Option<i64>,
+    pub role:      Option<String>,
+    pub role_label: Option<String>,
+    pub is_admin:  Option<bool>,
 }
 
 pub async fn patch_user(
@@ -93,9 +102,13 @@ pub async fn patch_user(
             subscription_tier = COALESCE($5, subscription_tier),
             subscription_expires_at = COALESCE(
                 CASE WHEN $6::BIGINT IS NULL THEN NULL ELSE to_timestamp($6) END,
-                subscription_expires_at)
+                subscription_expires_at),
+            role = COALESCE($7, role),
+            role_label = COALESCE($8, role_label),
+            is_admin = COALESCE($9, CASE WHEN $7 IN ('admin','owner','super_admin') THEN TRUE ELSE is_admin END)
            WHERE id=$1"#,
-        id, req.uid, req.username, req.nickname, req.tier, req.tier_expires_at)
+        id, req.uid, req.username, req.nickname, req.tier, req.tier_expires_at,
+        req.role, req.role_label, req.is_admin)
         .execute(&s.db).await.map_err(internal)?;
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.patch_user', $2, NULL)",
@@ -239,7 +252,7 @@ async fn user_edit_submit(
             subscription_tier = COALESCE(NULLIF($5,''), subscription_tier),
             role = COALESCE(NULLIF($6,''), role),
             role_label = COALESCE(NULLIF($7,''), role_label),
-            is_admin = CASE WHEN $6 = 'admin' THEN TRUE
+            is_admin = CASE WHEN $6 IN ('admin','owner','super_admin') THEN TRUE
                             WHEN $6 IS NOT NULL AND $6 != '' THEN FALSE
                             ELSE is_admin END
            WHERE id=$1"#,
@@ -322,29 +335,34 @@ async fn user_delete_submit(
         return Redirect::to("/admin/users?err=delete_confirm_mismatch").into_response();
     }
 
-    // 解除引用 (SET NULL) — 保留内容但去除作者
-    let _ = sqlx::query!("UPDATE messages SET sender_id=NULL WHERE sender_id=$1", id)
-        .execute(&s.db).await;
-    let _ = sqlx::query!("UPDATE stickers SET creator_id=NULL WHERE creator_id=$1", id)
-        .execute(&s.db).await;
-    let _ = sqlx::query!("UPDATE sticker_packs SET creator_id=NULL WHERE creator_id=$1", id)
-        .execute(&s.db).await;
-    let _ = sqlx::query!("UPDATE media_files SET uploader_id=NULL WHERE uploader_id=$1", id)
-        .execute(&s.db).await;
+    let res = async {
+        let mut tx = s.db.begin().await?;
 
-    // 删除引用了该用户的强关联表（FK 多数 CASCADE，仍显式 DELETE 防 schema 漂移）
-    let _ = sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id).execute(&s.db).await;
-    let _ = sqlx::query!("DELETE FROM user_tags WHERE user_id=$1", id).execute(&s.db).await;
-    let _ = sqlx::query!("DELETE FROM user_sticker_packs WHERE user_id=$1", id).execute(&s.db).await;
+        // 解除引用 (SET NULL) — 保留内容但去除作者
+        sqlx::query!("UPDATE messages SET sender_id=NULL WHERE sender_id=$1", id)
+            .execute(&mut *tx).await?;
+        sqlx::query!("UPDATE stickers SET creator_id=NULL WHERE creator_id=$1", id)
+            .execute(&mut *tx).await?;
+        sqlx::query!("UPDATE sticker_packs SET creator_id=NULL WHERE creator_id=$1", id)
+            .execute(&mut *tx).await?;
+        sqlx::query!("UPDATE media_files SET uploader_id=NULL WHERE uploader_id=$1", id)
+            .execute(&mut *tx).await?;
 
-    // 写审计日志（用户已经要被删，这里 actor=admin / target=被删 user 的 id+username）
-    let _ = sqlx::query!(
-        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.delete_user',$1,$2)",
-        id.to_string(), serde_json::json!({"username": &actual}))
-        .execute(&s.db).await;
+        // 删除引用了该用户的强关联表（FK 多数 CASCADE，仍显式 DELETE 防 schema 漂移）
+        sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM user_tags WHERE user_id=$1", id).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM user_sticker_packs WHERE user_id=$1", id).execute(&mut *tx).await?;
 
-    // 真删
-    let res = sqlx::query!("DELETE FROM users WHERE id=$1", id).execute(&s.db).await;
+        // 写审计日志（用户已经要被删，这里 actor=admin / target=被删 user 的 id+username）
+        sqlx::query!(
+            "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.delete_user',$1,$2)",
+            id.to_string(), serde_json::json!({"username": &actual}))
+            .execute(&mut *tx).await?;
+
+        // 真删
+        sqlx::query!("DELETE FROM users WHERE id=$1", id).execute(&mut *tx).await?;
+        tx.commit().await
+    }.await;
     if let Err(e) = res {
         tracing::error!("delete user failed: {}", e);
         return Redirect::to("/admin/users?err=delete_failed").into_response();
