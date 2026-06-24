@@ -73,6 +73,14 @@ private_keys/
 *.log
 logs/
 
+# Local smoke / browser evidence
+output/
+.playwright-cli/
+.playwright-mcp/
+playwright-report/
+test-results/
+*.trace.zip
+
 # Crash dumps
 *.dmp
 
@@ -90,4 +98,3 @@ coverage/
 tmp/
 *.tmp
 *~
-.playwright-mcp/

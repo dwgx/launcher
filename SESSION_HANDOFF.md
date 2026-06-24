@@ -382,17 +382,16 @@ ssh -i ~/.ssh/launcher_deploy root@154.40.36.22
 # 直接在服务器改 + 编译（避免 scp 整包）：
 ssh -i ~/.ssh/launcher_deploy root@154.40.36.22 \
   "cd /opt/systembackend/build_src/SystemBackend && \
-   DATABASE_URL='postgres://helix:wlimhnMg21lFsFITS7wfsEFK7GcKYx7S@127.0.0.1:5432/helix' \
-   cargo build --release -p launcher-api && \
+   DBURL=\$(sed -n 's/^database_url *= *\"\(.*\)\"/\1/p' /opt/systembackend/config.toml) && \
+   DATABASE_URL=\"\$DBURL\" cargo build --release -p launcher-api && \
    install -m 755 target/release/systembackend /opt/systembackend/systembackend && \
    systemctl restart systembackend"
 
 # 改 migration 时：
 # 1. 写 .sql 到 migrations/00XX_xxx.sql
-# 2. PGPASSWORD=wlimhnMg21lFsFITS7wfsEFK7GcKYx7S psql -U helix -h 127.0.0.1 -d helix -f 文件
-# 3. cargo build → 启动如果 "migration N was modified"：
-#      psql DELETE FROM _sqlx_migrations WHERE version=N;
-#    然后 systemctl restart，sqlx 会自动重 INSERT 正确 checksum
+# 2. 从 /opt/systembackend/config.toml 读取 DBURL 到环境变量，不要打印 DB URL 或密码
+# 3. 不要修改已经应用过的 migration；需要补丁时新增下一号 migration
+#    然后正常重启服务并观察日志
 ```
 
 服务器侧每次必写 CHANGELOG（AGENTS.md 守则）：

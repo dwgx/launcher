@@ -19,7 +19,7 @@ $local = Join-Path $root '.deploy.local'
 if (-not (Test-Path $local)) {
     Write-Host 'Create .deploy.local in the repository root first:'
     Write-Host @'
-host       = "154.40.36.22"
+host       = "<homecloud-host-or-ip>"
 port       = "22"
 user       = "root"
 password   = ""
@@ -131,12 +131,66 @@ Invoke-Remote "rm -rf $remoteSrc && mkdir -p $remoteSrc && tar -xzf /tmp/launche
 if (-not $SkipMigrations) {
     Write-Host '== apply migrations ==' -ForegroundColor Cyan
     $migrateScript = @'
-set -e
+set -euo pipefail
 DBURL=$(sed -n 's/^database_url *= *"\(.*\)"/\1/p' __REMOTE_DIR__/config.toml)
+if [ -z "$DBURL" ]; then
+  echo "database_url was not found in __REMOTE_DIR__/config.toml" >&2
+  exit 20
+fi
 cd __REMOTE_SRC__/SystemBackend
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+fi
+
+find_bin() {
+  name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+  for p in "/usr/local/bin/$name" "/usr/bin/$name" "/bin/$name"; do
+    if [ -x "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PSQL_BIN=$(find_bin psql || true)
+DB_NAME=$(printf '%s' "$DBURL" | sed -E 's#^.*@[^/]+/([^?]+).*$#\1#')
+DB_PORT=$(printf '%s' "$DBURL" | sed -nE 's#^.*@[^/:]+:([0-9]+)/.*$#\1#p')
+DB_CONTAINER=""
+if [ -z "$PSQL_BIN" ] && [ -n "$DB_PORT" ] && command -v docker >/dev/null 2>&1; then
+  DB_CONTAINER=$($SUDO docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null \
+    | awk -v port="$DB_PORT" '
+        $0 ~ "127\\.0\\.0\\.1:" port "->5432" { print $1; exit }
+        $0 ~ "0\\.0\\.0\\.0:" port "->5432" { print $1; exit }
+        $0 ~ ":::" port "->5432" { print $1; exit }
+      ')
+fi
+
+run_migration() {
+  f="$1"
+  if [ -n "$PSQL_BIN" ]; then
+    "$PSQL_BIN" "$DBURL" -v ON_ERROR_STOP=1 -f "$f" >/tmp/launcher-migrate.log 2>&1 \
+      || { cat /tmp/launcher-migrate.log; exit 1; }
+    return
+  fi
+  if [ -n "$DB_CONTAINER" ] && [ -n "$DB_NAME" ]; then
+    $SUDO docker exec -i "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+      < "$f" >/tmp/launcher-migrate.log 2>&1 || { cat /tmp/launcher-migrate.log; exit 1; }
+    return
+  fi
+  echo "No usable psql client found. Install postgresql-client, or run the PostgreSQL database in a Docker container with a port matching database_url." >&2
+  exit 21
+}
+
 for f in migrations/*.sql; do
   echo "applying $f"
-  psql "$DBURL" -v ON_ERROR_STOP=1 -f "$f" >/tmp/launcher-migrate.log 2>&1 || { cat /tmp/launcher-migrate.log; exit 1; }
+  run_migration "$f"
 done
 '@.Replace('__REMOTE_DIR__', $remoteDir).Replace('__REMOTE_SRC__', $remoteSrc)
     Invoke-RemoteScript $migrateScript
@@ -145,11 +199,26 @@ done
 if (-not $SkipBuild) {
     Write-Host '== cargo build --release on server ==' -ForegroundColor Cyan
     $buildScript = @'
-set -e
-. "$HOME/.cargo/env"
+set -euo pipefail
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+fi
+CARGO_BIN=$(command -v cargo || true)
+if [ -z "$CARGO_BIN" ]; then
+  for p in "$HOME/.cargo/bin/cargo" "/usr/local/bin/cargo" "/usr/bin/cargo"; do
+    if [ -x "$p" ]; then
+      CARGO_BIN="$p"
+      break
+    fi
+  done
+fi
+if [ -z "$CARGO_BIN" ]; then
+  echo "cargo was not found. Install Rust/Cargo or make cargo available in PATH." >&2
+  exit 22
+fi
 DBURL=$(sed -n 's/^database_url *= *"\(.*\)"/\1/p' __REMOTE_DIR__/config.toml)
 cd __REMOTE_SRC__/SystemBackend
-DATABASE_URL="$DBURL" cargo build --release -p launcher-api -p launcher-signer
+DATABASE_URL="$DBURL" "$CARGO_BIN" build --release -p launcher-api -p launcher-signer
 install -m 755 target/release/systembackend __REMOTE_DIR__/systembackend
 install -d __REMOTE_DIR__/migrations
 rsync -a --delete migrations/ __REMOTE_DIR__/migrations/
@@ -159,4 +228,4 @@ chown -R systembackend:systembackend __REMOTE_DIR__
 }
 
 Write-Host '== restart service ==' -ForegroundColor Cyan
-Invoke-Remote "systemctl restart $svc && sleep 3 && systemctl status $svc --no-pager -l && curl -k --max-time 10 https://154.40.36.22:1337/api/market/categories >/dev/null"
+Invoke-Remote "systemctl restart $svc && sleep 3 && systemctl status $svc --no-pager -l && curl -k --max-time 10 https://$($h):1337/api/market/categories >/dev/null"

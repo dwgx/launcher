@@ -9,7 +9,7 @@
 # remote_dir = 二进制 + 配置部署路径
 # service    = systemd unit 名
 
-host       = "154.40.36.22"
+host       = "<homecloud-host-or-ip>"
 port       = "22"
 user       = "root"
 password   = ""
