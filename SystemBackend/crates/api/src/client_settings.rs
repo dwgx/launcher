@@ -16,7 +16,9 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
 fn valid_key(key: &str) -> bool {
     let len = key.chars().count();
     (1..=64).contains(&len)
-        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 #[derive(Deserialize)]
@@ -66,17 +68,23 @@ pub async fn get_settings(
         r#"SELECT scope, key, value, updated_at
            FROM user_client_settings
            WHERE user_id = $1 AND scope = $2
-           ORDER BY key"#)
-        .bind(me)
-        .bind(scope)
-        .fetch_all(&s.db).await.map_err(internal)?;
+           ORDER BY key"#,
+    )
+    .bind(me)
+    .bind(scope)
+    .fetch_all(&s.db)
+    .await
+    .map_err(internal)?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(ClientSettingOut {
             scope: r.try_get("scope").map_err(internal)?,
             key: r.try_get("key").map_err(internal)?,
             value: r.try_get("value").map_err(internal)?,
-            updated_at: r.try_get::<DateTime<Utc>, _>("updated_at").map_err(internal)?.timestamp(),
+            updated_at: r
+                .try_get::<DateTime<Utc>, _>("updated_at")
+                .map_err(internal)?
+                .timestamp(),
         });
     }
     Ok(Json(out))
@@ -104,16 +112,23 @@ pub async fn upsert_settings(
             r#"INSERT INTO user_client_settings (user_id, scope, key, value, updated_at)
                VALUES ($1, $2, $3, $4, now())
                ON CONFLICT (user_id, scope, key)
-               DO UPDATE SET value = EXCLUDED.value, updated_at = now()"#)
-            .bind(me)
-            .bind(&scope)
-            .bind(item.key)
-            .bind(item.value)
-            .execute(&s.db).await.map_err(internal)?;
+               DO UPDATE SET value = EXCLUDED.value, updated_at = now()"#,
+        )
+        .bind(me)
+        .bind(&scope)
+        .bind(item.key)
+        .bind(item.value)
+        .execute(&s.db)
+        .await
+        .map_err(internal)?;
     }
 
-    get_settings(State(s), Query(SettingsQ {
-        session_token: req.session_token,
-        scope: Some(scope),
-    })).await
+    get_settings(
+        State(s),
+        Query(SettingsQ {
+            session_token: req.session_token,
+            scope: Some(scope),
+        }),
+    )
+    .await
 }

@@ -8,23 +8,23 @@
 use crate::media_policy;
 use crate::state::AppState;
 use axum::{
-    extract::{State, Multipart, Path, Query},
-    http::{StatusCode, header},
+    extract::{Multipart, Path, Query, State},
+    http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::path::PathBuf;
-use uuid::Uuid;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 fn max_bytes_for(state: &AppState, category: &str) -> u64 {
     match category {
         "image" => state.cfg.media_image_max_bytes,
         "video" => state.cfg.media_video_max_bytes,
-        _       => state.cfg.media_generic_max_bytes,
+        _ => state.cfg.media_generic_max_bytes,
     }
 }
 
@@ -34,19 +34,22 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
 
 pub async fn auth_user(state: &AppState, token: &str) -> Result<Uuid, (StatusCode, String)> {
     sqlx::query_scalar!(
-        "SELECT user_id FROM sessions WHERE token = $1 AND expires_at > now()", token)
-        .fetch_optional(&state.db).await
-        .map_err(internal)?
-        .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))
+        "SELECT user_id FROM sessions WHERE token = $1 AND expires_at > now()",
+        token
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?
+    .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))
 }
 
 #[derive(Serialize)]
 pub struct UploadResp {
     pub media_id: i64,
-    pub sha256:   String,
-    pub mime:     String,
-    pub size:     i64,
-    pub url:      String,
+    pub sha256: String,
+    pub mime: String,
+    pub size: i64,
+    pub url: String,
 }
 
 pub async fn upload(
@@ -56,8 +59,11 @@ pub async fn upload(
     let mut token: Option<String> = None;
     let mut file_bytes: Option<bytes::Bytes> = None;
 
-    while let Some(field) = mp.next_field().await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "session_token" => token = field.text().await.ok(),
@@ -77,8 +83,10 @@ pub async fn upload(
     let detected = media_policy::validate_upload(&bytes)?;
     let limit = max_bytes_for(&s, detected.category);
     if (bytes.len() as u64) > limit {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("{} max {} bytes", detected.category, limit)));
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("{} max {} bytes", detected.category, limit),
+        ));
     }
 
     // 计算 sha256
@@ -89,14 +97,19 @@ pub async fn upload(
 
     // 检查是否已存在 (同样 sha256)
     if let Some(row) = sqlx::query!(
-        "SELECT id, mime, size_bytes FROM media_files WHERE sha256 = $1", sha)
-        .fetch_optional(&s.db).await.map_err(internal)? {
+        "SELECT id, mime, size_bytes FROM media_files WHERE sha256 = $1",
+        sha
+    )
+    .fetch_optional(&s.db)
+    .await
+    .map_err(internal)?
+    {
         return Ok(Json(UploadResp {
             media_id: row.id,
-            sha256:   sha.clone(),
-            mime:     row.mime,
-            size:     row.size_bytes,
-            url:      format!("/api/media/{}/file.{}", sha, detected.ext),
+            sha256: sha.clone(),
+            mime: row.mime,
+            size: row.size_bytes,
+            url: format!("/api/media/{}/file.{}", sha, detected.ext),
         }));
     }
 
@@ -111,20 +124,29 @@ pub async fn upload(
     let row = sqlx::query!(
         r#"INSERT INTO media_files (sha256, mime, size_bytes, relative_path, uploader_id)
            VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
-        sha, detected.mime, bytes.len() as i64, rel_path, uid)
-        .fetch_one(&s.db).await.map_err(internal)?;
+        sha,
+        detected.mime,
+        bytes.len() as i64,
+        rel_path,
+        uid
+    )
+    .fetch_one(&s.db)
+    .await
+    .map_err(internal)?;
 
     Ok(Json(UploadResp {
         media_id: row.id,
-        sha256:   sha.clone(),
-        mime:     detected.mime.into(),
-        size:     bytes.len() as i64,
-        url:      format!("/api/media/{}/file.{}", sha, detected.ext),
+        sha256: sha.clone(),
+        mime: detected.mime.into(),
+        size: bytes.len() as i64,
+        url: format!("/api/media/{}/file.{}", sha, detected.ext),
     }))
 }
 
 #[derive(Deserialize)]
-pub struct DlQuery { pub session_token: Option<String> }
+pub struct DlQuery {
+    pub session_token: Option<String>,
+}
 
 // GET /api/media/:sha256/:filename   公开下载（要 session, 防爬）
 pub async fn download(
@@ -146,8 +168,12 @@ pub async fn download(
     }
 
     let row = match sqlx::query!(
-        "SELECT relative_path, mime FROM media_files WHERE sha256 = $1", sha)
-        .fetch_optional(&s.db).await {
+        "SELECT relative_path, mime FROM media_files WHERE sha256 = $1",
+        sha
+    )
+    .fetch_optional(&s.db)
+    .await
+    {
         Ok(Some(r)) => r,
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
@@ -156,7 +182,12 @@ pub async fn download(
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "missing").into_response(),
     };
-    ([(header::CONTENT_TYPE, row.mime),
-      (header::CACHE_CONTROL, "public, max-age=2592000".into())],
-      bytes).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, row.mime),
+            (header::CACHE_CONTROL, "public, max-age=2592000".into()),
+        ],
+        bytes,
+    )
+        .into_response()
 }

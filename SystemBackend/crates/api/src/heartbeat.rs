@@ -1,8 +1,8 @@
 use crate::state::AppState;
-use axum::{extract::State, Json, http::StatusCode};
+use axum::{extract::State, http::StatusCode, Json};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use chrono::Utc;
 
 #[derive(Deserialize)]
 pub struct HeartbeatReq {
@@ -26,10 +26,12 @@ pub async fn heartbeat(
                   u.subscription_expires_at, u.hwid_bound
            FROM sessions s JOIN users u ON u.id = s.user_id
            WHERE s.token = $1"#,
-        req.session_token)
-        .fetch_optional(&s.db).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))?;
+        req.session_token
+    )
+    .fetch_optional(&s.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))?;
 
     if row.expires_at < Utc::now() {
         return Err((StatusCode::UNAUTHORIZED, "session expired".into()));
@@ -43,8 +45,13 @@ pub async fn heartbeat(
     }
 
     // 心跳即"在线"信号 — 刷 last_seen，离线判定靠 (now() - last_seen)
-    sqlx::query!("UPDATE users SET last_seen = now() WHERE id = $1", row.user_id)
-        .execute(&s.db).await.ok();
+    sqlx::query!(
+        "UPDATE users SET last_seen = now() WHERE id = $1",
+        row.user_id
+    )
+    .execute(&s.db)
+    .await
+    .ok();
 
     Ok(Json(HeartbeatResp {
         server_time: Utc::now().timestamp(),

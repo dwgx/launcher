@@ -7,7 +7,9 @@ pub fn init() {
 
     let registry = tracing_subscriber::registry().with(filter);
     if json {
-        registry.with(tracing_subscriber::fmt::layer().json()).init();
+        registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
     } else {
         registry.with(tracing_subscriber::fmt::layer()).init();
     }

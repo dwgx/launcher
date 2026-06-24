@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid gap-4 lg:grid-cols-[360px_1fr]">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title text-base">发布公告</h2>
+      <form method="post" action="/admin/announcements" class="space-y-3">
+        <label class="form-control">
+          <span class="label-text text-xs">标题</span>
+          <input name="title" class="input input-bordered input-sm" maxlength="96" required>
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">正文</span>
+          <textarea name="body" class="textarea textarea-bordered min-h-28" maxlength="4000" required></textarea>
+        </label>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="form-control">
+            <span class="label-text text-xs">级别</span>
+            <select name="severity" class="select select-bordered select-sm">
+              <option value="normal">普通</option>
+              <option value="important">重要</option>
+              <option value="critical">关键</option>
+            </select>
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">最低等级</span>
+            <input name="min_level" type="number" min="1" max="100" value="1" class="input input-bordered input-sm">
+          </label>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="form-control">
+            <span class="label-text text-xs">目标角色</span>
+            <input name="audience_role" class="input input-bordered input-sm" placeholder="全部">
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">有效天数</span>
+            <input name="expires_days" type="number" min="1" max="365" class="input input-bordered input-sm" placeholder="永不过期">
+          </label>
+        </div>
+        <div class="flex gap-4 text-sm">
+          <label class="label cursor-pointer gap-2">
+            <input name="red_dot" type="checkbox" class="checkbox checkbox-sm" checked>
+            <span class="label-text">显示红点</span>
+          </label>
+          <label class="label cursor-pointer gap-2">
+            <input name="force_popup" type="checkbox" class="checkbox checkbox-sm">
+            <span class="label-text">强制弹窗</span>
+          </label>
+        </div>
+        <button class="btn btn-primary btn-sm w-full">发布</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="card-title text-base">公告列表</h2>
+        <span class="badge badge-outline">{{ items.len() }}</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="table table-zebra table-sm">
+          <thead>
+            <tr>
+              <th>标题</th>
+              <th>级别</th>
+              <th>目标</th>
+              <th>标记</th>
+              <th>已读/确认</th>
+              <th>开始</th>
+              <th>过期</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in items %}
+            <tr>
+              <td>
+                <div class="font-medium">{{ a.title }}</div>
+                <div class="text-xs opacity-50 max-w-xl truncate">{{ a.body }}</div>
+              </td>
+              <td><span class="badge badge-outline badge-sm">{{ a.severity_label }}</span></td>
+              <td class="text-xs">
+                <span class="font-mono">{{ a.audience_role }}</span>
+                <span class="opacity-50">lv{{ a.min_level }}+</span>
+              </td>
+              <td class="text-xs">
+                {% if a.red_dot %}<span class="badge badge-sm">红点</span>{% endif %}
+                {% if a.force_popup %}<span class="badge badge-error badge-sm">弹窗</span>{% endif %}
+              </td>
+              <td class="font-mono text-xs opacity-70">{{ a.read_count }} / {{ a.ack_count }}</td>
+              <td class="font-mono text-xs opacity-60">{{ a.starts_at }}</td>
+              <td class="font-mono text-xs opacity-60">{{ a.expires_at }}</td>
+            </tr>
+            {% endfor %}
+            {% if items.is_empty() %}
+            <tr><td colspan="7" class="text-center opacity-40 py-6">暂无公告</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

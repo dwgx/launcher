@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid gap-4 xl:grid-cols-[380px_1fr]">
+  <div class="space-y-4">
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-base">工单分类</h2>
+        <form method="post" action="/admin/ticket-categories" class="space-y-3">
+          <label class="form-control">
+            <span class="label-text text-xs">名称</span>
+            <input name="name" class="input input-bordered input-sm" maxlength="64" required>
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">标识</span>
+            <input name="slug" class="input input-bordered input-sm" maxlength="48" placeholder="自动生成">
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">说明</span>
+            <textarea name="description" class="textarea textarea-bordered min-h-20" maxlength="240"></textarea>
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">排序</span>
+            <input name="sort_order" type="number" value="100" class="input input-bordered input-sm">
+          </label>
+          <button class="btn btn-primary btn-sm w-full">创建分类</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="card-title text-base">分类列表</h2>
+          <span class="badge badge-outline">{{ categories.len() }}</span>
+        </div>
+        <div class="space-y-3">
+          {% for c in categories %}
+          <form method="post" action="/admin/ticket-categories/{{ c.id }}" class="rounded-lg border border-base-300/60 p-3 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <div>
+                <div class="font-medium">{{ c.name }}</div>
+                <div class="font-mono text-[11px] opacity-50">{{ c.slug }}</div>
+              </div>
+              <div class="flex gap-1">
+                {% if c.is_builtin %}<span class="badge badge-sm">内置</span>{% endif %}
+                {% if c.is_enabled %}<span class="badge badge-outline badge-sm">启用</span>{% else %}<span class="badge badge-error badge-sm">停用</span>{% endif %}
+              </div>
+            </div>
+            <input name="name" value="{{ c.name }}" class="input input-bordered input-xs w-full">
+            <textarea name="description" class="textarea textarea-bordered textarea-xs min-h-14">{{ c.description }}</textarea>
+            <div class="grid grid-cols-[1fr_auto] gap-2 items-center">
+              <input name="sort_order" type="number" value="{{ c.sort_order }}" class="input input-bordered input-xs">
+              <label class="label cursor-pointer gap-2">
+                <input name="is_enabled" type="checkbox" class="checkbox checkbox-xs" {% if c.is_enabled %}checked{% endif %}>
+                <span class="label-text text-xs">启用</span>
+              </label>
+            </div>
+            <button class="btn btn-xs w-full">保存分类</button>
+          </form>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="card-title text-base">工单</h2>
+        <span class="badge badge-outline">{{ tickets.len() }}</span>
+      </div>
+      <div class="text-xs opacity-60 mb-3">
+        受最高管理员保护的工单不会在这里显示；保护状态仍通过客户端/API 的认证路径管理。
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="table table-zebra table-sm">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>标题</th>
+              <th>分类</th>
+              <th>创建者</th>
+              <th>状态</th>
+              <th>可见性</th>
+              <th>更新时间</th>
+              <th class="w-64"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in tickets %}
+            <tr class="hover">
+              <td class="font-mono text-orange-300">{{ t.number }}</td>
+              <td>
+                <a href="/admin/tickets/{{ t.id }}" class="font-medium link link-hover">{{ t.title }}</a>
+                <div class="text-xs opacity-40 font-mono">{{ t.chat_id }}</div>
+              </td>
+              <td>{{ t.category_name }}</td>
+              <td>{{ t.creator }}</td>
+              <td><span class="badge badge-outline badge-sm">{{ t.status_label }}</span></td>
+              <td><span class="badge badge-outline badge-sm">{{ t.visibility_label }}</span></td>
+              <td class="text-xs opacity-60 font-mono">{{ t.updated_at }}</td>
+              <td>
+                <div class="flex flex-col gap-1">
+                  <form method="post" action="/admin/tickets/{{ t.id }}/status" class="join">
+                    <select name="status" class="select select-bordered select-xs join-item">
+                      <option value="open" {% if t.status == "open" %}selected{% endif %}>处理中</option>
+                      <option value="pending" {% if t.status == "pending" %}selected{% endif %}>待处理</option>
+                      <option value="resolved" {% if t.status == "resolved" %}selected{% endif %}>已解决</option>
+                      <option value="closed" {% if t.status == "closed" %}selected{% endif %}>已关闭</option>
+                    </select>
+                    <button class="btn btn-xs join-item">设置</button>
+                  </form>
+                  <form method="post" action="/admin/tickets/{{ t.id }}/visibility" class="join">
+                    <select name="visibility" class="select select-bordered select-xs join-item">
+                      <option value="private" {% if t.visibility == "private" %}selected{% endif %}>私密</option>
+                      <option value="public" {% if t.visibility == "public" %}selected{% endif %}>公开</option>
+                    </select>
+                    <button class="btn btn-xs join-item">保存</button>
+                  </form>
+                  <a href="/admin/tickets/{{ t.id }}" class="btn btn-xs btn-outline">查看内容</a>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+            {% if tickets.is_empty() %}
+            <tr><td colspan="8" class="text-center opacity-40 py-6">暂无工单</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

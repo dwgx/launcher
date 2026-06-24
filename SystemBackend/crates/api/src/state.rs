@@ -13,7 +13,7 @@ pub struct LoginAttemptEntry {
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: AppConfig,
-    pub db:  PgPool,
+    pub db: PgPool,
     pub login_attempts: std::sync::Arc<Mutex<HashMap<String, LoginAttemptEntry>>>,
 }
 

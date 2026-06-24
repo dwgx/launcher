@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="card-title text-base">最近 200 条</h2>
+      <span class="badge badge-outline">{{ rows.len() }}</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>时间</th>
+            <th>动作</th>
+            <th>操作者</th>
+            <th>对象</th>
+            <th>元数据</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td class="font-mono text-xs opacity-60">{{ r.id }}</td>
+            <td class="font-mono text-xs">{{ r.time }}</td>
+            <td><span class="badge badge-ghost badge-sm">{{ r.action }}</span></td>
+            <td class="font-mono text-xs">{{ r.actor }}</td>
+            <td class="font-mono text-xs text-orange-300">{{ r.target }}</td>
+            <td class="font-mono text-xs max-w-xl truncate opacity-70">{{ r.metadata }}</td>
+          </tr>
+          {% endfor %}
+          {% if rows.is_empty() %}
+          <tr><td colspan="6" class="text-center opacity-40 py-8">暂无审计记录</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

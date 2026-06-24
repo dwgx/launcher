@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid gap-4 xl:grid-cols-[320px_1fr]">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="card-title text-base">频道列表</h2>
+        <span class="badge badge-outline">{{ channels.len() }}</span>
+      </div>
+      <div class="space-y-2">
+        {% for c in channels %}
+        <a href="/admin/chat?chat_id={{ c.id }}"
+           class="block rounded-lg border border-base-300/60 p-3 hover:bg-orange-500/10 {% if c.active %}nav-active{% endif %}">
+          <div class="flex items-center justify-between gap-2">
+            <div class="font-medium">{{ c.display_title }}</div>
+            {% if c.is_official %}
+              <span class="badge badge-active badge-sm">官方</span>
+            {% else %}
+              <span class="badge badge-outline badge-sm">自建</span>
+            {% endif %}
+          </div>
+          <div class="mt-1 flex flex-wrap gap-2 text-xs opacity-70">
+            <span>{{ c.group_label_zh }}</span>
+            <span>{{ c.message_count }} 条</span>
+          </div>
+          <div class="mt-1 text-[11px] opacity-60">
+            权限 {{ c.write_policy_label }} · 最后活跃 {{ c.last_at }}
+          </div>
+        </a>
+        {% endfor %}
+        {% if channels.is_empty() %}
+        <div class="text-center opacity-40 py-6">暂无频道</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="space-y-4">
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            {% if selected.is_some() %}
+              {% let c = selected.as_ref().unwrap() %}
+              <h2 class="card-title text-base">{{ c.display_title }}</h2>
+              <div class="text-xs opacity-60 font-mono">频道 ID {{ c.id }}</div>
+            {% else %}
+              <h2 class="card-title text-base">未选择频道</h2>
+              <div class="text-xs opacity-60">请先从左侧选择一个频道</div>
+            {% endif %}
+          </div>
+          <div class="text-right text-xs opacity-70">
+            <div>发送身份：<span class="font-semibold text-orange-300">SuperAdmin</span></div>
+            <div class="font-mono">UID {{ superadmin_uid }} · {{ superadmin_id }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% if selected.is_some() %}
+    {% let c = selected.as_ref().unwrap() %}
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-base">发送消息</h2>
+        <form method="post" action="/admin/chat/send" class="grid gap-3 lg:grid-cols-[160px_120px_1fr_auto]">
+          <input type="hidden" name="chat_id" value="{{ c.id }}">
+          <label class="form-control">
+            <span class="label-text text-xs">消息类型</span>
+            <select name="msg_type" class="select select-bordered select-sm">
+              <option value="text">普通文本</option>
+              <option value="system">系统消息</option>
+            </select>
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">回复消息 ID</span>
+            <input name="reply_to_id" class="input input-bordered input-sm" inputmode="numeric" placeholder="可选">
+          </label>
+          <label class="form-control">
+            <span class="label-text text-xs">内容</span>
+            <textarea name="text" class="textarea textarea-bordered min-h-24" maxlength="4000" required placeholder="输入要发送到当前频道的内容"></textarea>
+          </label>
+          <div class="flex items-end">
+            <button class="btn btn-primary btn-sm w-full lg:w-28">发送</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="card-title text-base">最近消息</h2>
+          <span class="badge badge-outline">{{ messages.len() }}</span>
+        </div>
+        <div class="space-y-3 max-h-[56vh] overflow-y-auto pr-1">
+          {% for m in messages %}
+          <div class="rounded-lg border border-base-300/60 p-3 {% if m.deleted %}opacity-60{% endif %}">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-semibold">{{ m.sender }}</span>
+                {% if m.role_label != "" %}<span class="badge badge-sm">{{ m.role_label }}</span>{% endif %}
+                <span class="badge badge-outline badge-xs">{{ m.msg_type_label }}</span>
+                {% if m.edited %}<span class="badge badge-xs">已编辑</span>{% endif %}
+                {% if m.deleted %}<span class="badge badge-error badge-xs">已删除</span>{% endif %}
+              </div>
+              <div class="font-mono text-xs opacity-60">#{{ m.id }} · {{ m.created_at }}</div>
+            </div>
+            {% if m.reply_to != "-" %}
+            <div class="text-xs opacity-60 mb-1">回复 {{ m.reply_to }}</div>
+            {% endif %}
+            <div class="whitespace-pre-wrap text-sm leading-6">{{ m.text }}</div>
+          </div>
+          {% endfor %}
+          {% if messages.is_empty() %}
+          <div class="text-center opacity-40 py-8">当前频道暂无消息</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

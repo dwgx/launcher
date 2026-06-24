@@ -52,15 +52,33 @@ pub struct AppConfig {
     pub sticker_per_user_limit: i64,
 }
 
-fn default_argon_mem() -> u32 { 128 * 1024 }
-fn default_argon_iters() -> u32 { 10 }
-fn default_require_invite() -> bool { true }
-fn default_image_max() -> u64 { 8 * 1024 * 1024 }
-fn default_video_max() -> u64 { 32 * 1024 * 1024 }
-fn default_generic_max() -> u64 { 100 * 1024 * 1024 }
-fn default_media_root() -> String { "/opt/systembackend/media".into() }
-fn default_avatar_root() -> String { "/opt/systembackend/avatars".into() }
-fn default_sticker_per_user() -> i64 { 50 }
+fn default_argon_mem() -> u32 {
+    128 * 1024
+}
+fn default_argon_iters() -> u32 {
+    10
+}
+fn default_require_invite() -> bool {
+    true
+}
+fn default_image_max() -> u64 {
+    8 * 1024 * 1024
+}
+fn default_video_max() -> u64 {
+    32 * 1024 * 1024
+}
+fn default_generic_max() -> u64 {
+    100 * 1024 * 1024
+}
+fn default_media_root() -> String {
+    "/opt/systembackend/media".into()
+}
+fn default_avatar_root() -> String {
+    "/opt/systembackend/avatars".into()
+}
+fn default_sticker_per_user() -> i64 {
+    50
+}
 
 impl AppConfig {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {

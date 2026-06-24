@@ -1446,6 +1446,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "hmac",
  "launcher-proto",
  "launcher-shared",
  "once_cell",

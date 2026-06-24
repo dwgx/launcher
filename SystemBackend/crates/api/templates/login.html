@@ -2,34 +2,49 @@
 <html lang="zh-CN" data-theme="launcher">
 <head>
 <meta charset="utf-8">
-<title>登录 · Launcher Admin</title>
+<title>登录 · Launcher 后台</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
 <style>
   [data-theme="launcher"] {
     color-scheme: dark;
-    --b1: 26 14% 11%; --b2: 26 13% 14%; --b3: 26 12% 19%;
-    --bc: 36 28% 92%; --p: 18 56% 53%; --pf: 18 56% 47%; --pc: 0 0% 100%;
+    --b1: 20.3% 0.012 67.3; --b2: 25.2% 0.014 67.0; --b3: 34.4% 0.017 65.6;
+    --bc: 93.6% 0.025 84.6; --p: 62.7% 0.149 43.0; --pf: 56.6% 0.145 43.0; --pc: 98% 0 0;
     --rounded-box: 0.85rem; --rounded-btn: 0.55rem;
+  }
+  html, body {
+    color: #F2EBDD;
+    background: #1F1B17;
   }
   body {
     font-family: 'Source Han Sans CN', 'Segoe UI', system-ui, sans-serif;
     background:
       radial-gradient(900px 500px at 80% -10%, rgba(217,119,87,.10), transparent 60%),
       radial-gradient(700px 400px at -10% 110%, rgba(217,119,87,.06), transparent 50%),
-      hsl(var(--b1));
+      #1F1B17;
     background-attachment: fixed;
   }
   .card.bg-base-100 {
-    background: hsl(var(--b2) / 0.85);
-    border: 1px solid hsl(var(--b3) / 0.6);
+    background: rgba(41, 35, 31, 0.96) !important;
+    color: #F2EBDD;
+    border: 1px solid rgba(104, 91, 80, 0.68);
     backdrop-filter: blur(8px);
     box-shadow: 0 1px 0 hsl(36 30% 100% / 0.04) inset, 0 24px 60px -28px rgba(0,0,0,.7);
   }
-  .input { background: hsl(var(--b1) / 0.7); }
+  .input {
+    background: rgba(31, 27, 23, 0.92) !important;
+    color: #F8EFE2 !important;
+    border-color: rgba(139, 121, 104, 0.8) !important;
+  }
+  .input::placeholder { color: #AFA193; }
   .input:focus {
-    outline: none; border-color: hsl(var(--p));
-    box-shadow: 0 0 0 3px hsl(var(--p) / 0.18);
+    outline: none; border-color: #D97757 !important;
+    box-shadow: 0 0 0 3px rgba(217,119,87,.22);
+  }
+  .label-text, h1 { color: #F8EFE2 !important; }
+  .opacity-40, .opacity-50, .opacity-70 {
+    color: #B8AB9D;
+    opacity: 1 !important;
   }
   .btn-primary {
     background: linear-gradient(180deg, #D97757, #C96442);
@@ -44,15 +59,20 @@
     <div class="flex items-center gap-3 mb-1">
       <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-orange-500 to-orange-700 grid place-items-center text-white text-2xl font-bold shadow-lg shadow-orange-900/40">L</div>
       <div>
-        <h1 class="text-xl font-semibold tracking-tight">Launcher Admin</h1>
-        <p class="text-xs opacity-50">private launcher control panel</p>
+        <h1 class="text-xl font-semibold tracking-tight">Launcher 后台</h1>
+        <p class="text-xs opacity-50">私有启动器控制面板</p>
       </div>
     </div>
     <form method="post" action="/admin/login" class="space-y-3 mt-6">
       <label class="form-control">
-        <span class="label-text text-xs opacity-70 mb-1">管理员密码</span>
+        <span class="label-text text-xs opacity-70 mb-1">操作者账号</span>
+        <input name="username" type="text" placeholder="留空使用 bootstrap admin 密码"
+               autocomplete="username" class="input input-bordered w-full" autofocus>
+      </label>
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70 mb-1">密码</span>
         <input name="password" type="password" placeholder="••••••••"
-               class="input input-bordered w-full" autofocus>
+               autocomplete="current-password" class="input input-bordered w-full">
       </label>
       {% if error %}
       <div class="text-xs text-rose-400 px-1">⚠ {{ error_msg }}</div>

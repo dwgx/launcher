@@ -30,7 +30,7 @@
             <td class="font-medium">{{ u.username }}</td>
             <td>{{ u.nickname }}</td>
             <td>
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center gap-1.5 min-w-max whitespace-nowrap">
                 {% if u.role == "admin" %}
                   <span class="badge badge-sm" style="background:#B14444;color:#fff">管理员</span>
                 {% else if u.role == "oldhand" %}
@@ -41,7 +41,7 @@
                   <span class="badge badge-ghost badge-sm">{{ u.role }}</span>
                 {% endif %}
                 {% if u.role_label != "—" && u.role_label != "" %}
-                <span class="text-xs opacity-60">· {{ u.role_label }}</span>
+                <span class="text-xs opacity-60 whitespace-nowrap">· {{ u.role_label }}</span>
                 {% endif %}
               </div>
             </td>

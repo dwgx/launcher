@@ -14,7 +14,7 @@
   <div class="stats shadow bg-base-100">
     <div class="stat">
       <div class="stat-figure text-emerald-500 text-3xl">●</div>
-      <div class="stat-title text-xs">活跃 session</div>
+      <div class="stat-title text-xs">活跃会话</div>
       <div class="stat-value text-2xl">{{ active_sessions }}</div>
       <div class="stat-desc">未过期</div>
     </div>
@@ -38,6 +38,43 @@
     </div>
   </div>
 
+</div>
+
+<div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_24rem] gap-4 mb-6">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <h2 class="card-title text-base">生态运营总览</h2>
+        <span class="badge badge-outline">真实数据</span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        {% for m in ecosystem %}
+        <a href="{{ m.href }}" class="rounded-lg border border-base-300/60 border-l-4 {{ m.tone }} bg-base-200/30 p-3 hover:bg-base-200/60 transition-colors">
+          <div class="text-xs opacity-60">{{ m.label }}</div>
+          <div class="mt-1 text-2xl font-semibold font-mono">{{ m.value }}</div>
+          <div class="mt-1 text-[11px] opacity-60 cell-wrap">{{ m.detail }}</div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title text-base">后台能力入口</h2>
+      <div class="space-y-2">
+        {% for link in ops_links %}
+        <a href="{{ link.href }}" class="block rounded-lg border border-base-300/60 p-3 hover:bg-base-200/60 transition-colors">
+          <div class="flex items-center justify-between gap-3">
+            <span class="font-medium">{{ link.title }}</span>
+            <span class="badge badge-outline badge-sm">{{ link.badge }}</span>
+          </div>
+          <div class="mt-1 text-xs opacity-60 cell-wrap">{{ link.detail }}</div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -74,9 +111,9 @@
     <div class="card-body">
       <h2 class="card-title text-base">系统</h2>
       <ul class="text-sm space-y-2">
-        <li class="flex justify-between"><span class="opacity-60">Bind</span><span class="font-mono">{{ bind_addr }}</span></li>
-        <li class="flex justify-between"><span class="opacity-60">TLS</span><span>{% if tls_on %}<span class="badge badge-success badge-sm">on</span>{% else %}<span class="badge badge-warning badge-sm">off</span>{% endif %}</span></li>
-        <li class="flex justify-between"><span class="opacity-60">邀请制</span><span>{% if require_invite %}<span class="badge badge-success badge-sm">strict</span>{% else %}<span class="badge badge-ghost badge-sm">open</span>{% endif %}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">监听</span><span class="font-mono">{{ bind_addr }}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">TLS</span><span>{% if tls_on %}<span class="badge badge-success badge-sm">开启</span>{% else %}<span class="badge badge-warning badge-sm">关闭</span>{% endif %}</span></li>
+        <li class="flex justify-between"><span class="opacity-60">邀请制</span><span>{% if require_invite %}<span class="badge badge-success badge-sm">严格</span>{% else %}<span class="badge badge-ghost badge-sm">开放</span>{% endif %}</span></li>
         <li class="flex justify-between"><span class="opacity-60">CDN</span><span class="font-mono text-xs truncate max-w-[10rem]">{{ cdn_base }}</span></li>
         <li class="flex justify-between"><span class="opacity-60">总订阅</span><span>{{ sub_count }}</span></li>
       </ul>

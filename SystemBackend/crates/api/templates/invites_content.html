@@ -9,7 +9,7 @@
       <form method="post" action="/admin/invites" class="space-y-3 mt-2">
         <label class="form-control">
           <span class="label-text text-xs">备注（可选）</span>
-          <input name="note" placeholder="alpha test / friend xxx" class="input input-sm input-bordered">
+          <input name="note" placeholder="内测 / 好友备注" class="input input-sm input-bordered">
         </label>
         <div class="grid grid-cols-3 gap-2">
           <label class="form-control">
@@ -40,22 +40,22 @@
       <div class="overflow-x-auto">
         <table class="table table-zebra table-sm">
           <thead>
-            <tr><th>Code</th><th>用量</th><th>状态</th><th>备注</th><th>创建</th><th></th></tr>
+            <tr><th>邀请码</th><th>用量</th><th>状态</th><th>备注</th><th>创建</th><th></th></tr>
           </thead>
           <tbody>
             {% for it in items %}
             <tr class="hover">
               <td><code class="font-mono text-orange-400 text-base">{{ it.code }}</code></td>
               <td class="font-mono">{{ it.uses }}</td>
-              <td>
+              <td class="whitespace-nowrap">
                 {% if it.status == "active" %}<span class="badge badge-active badge-sm">可用</span>
                 {% else if it.status == "revoked" %}<span class="badge badge-revoked badge-sm">已撤销</span>
                 {% else if it.status == "expired" %}<span class="badge badge-expired badge-sm">已过期</span>
                 {% else %}<span class="badge badge-exhausted badge-sm">用完</span>
                 {% endif %}
               </td>
-              <td class="text-xs opacity-70">{{ it.note }}</td>
-              <td class="text-xs opacity-60 font-mono">{{ it.created }}</td>
+              <td class="text-xs opacity-70 max-w-xs truncate">{{ it.note }}</td>
+              <td class="text-xs opacity-60 font-mono whitespace-nowrap">{{ it.created }}</td>
               <td>
                 {% if it.status == "active" %}
                 <form method="post" action="/admin/invites/{{ it.code }}/revoke">

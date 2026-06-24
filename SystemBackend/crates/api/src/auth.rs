@@ -1,10 +1,10 @@
 use crate::state::AppState;
-use axum::{extract::State, Json, http::StatusCode};
+use axum::{extract::State, http::StatusCode, Json};
+use chrono::{Duration, Utc};
 use launcher_shared::{error::AppError, hashing, tier::Tier, uid as shared_uid};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time;
-use chrono::{Utc, Duration};
 use uuid::Uuid;
 
 // =====================================================================
@@ -12,29 +12,32 @@ use uuid::Uuid;
 // =====================================================================
 #[derive(Deserialize)]
 pub struct RegisterReq {
-    pub username:  String,         // 注册时定，永远不可改
-    pub password:  String,         // ≥8 chars
-    pub email:     Option<String>, // 可选，未来用作密保
-    pub hwid_hex:  String,         // HWID 注册即绑
+    pub username: String,      // 注册时定，永远不可改
+    pub password: String,      // ≥8 chars
+    pub email: Option<String>, // 可选，未来用作密保
+    pub hwid_hex: String,      // HWID 注册即绑
     pub client_ver: Option<String>,
     pub invite_code: Option<String>, // 邀请制时校验，目前不强制
 }
 
 #[derive(Serialize)]
 pub struct RegisterResp {
-    pub user_id:       String,
-    pub uid:           String,     // 公开 8 位短码 K8RX2QZP
-    pub username:      String,
-    pub nickname:      String,
+    pub user_id: String,
+    pub uid: String, // 公开 8 位短码 K8RX2QZP
+    pub username: String,
+    pub nickname: String,
     pub session_token: String,
-    pub expires_at:    i64,
+    pub expires_at: i64,
 }
 
 fn validate_username(u: &str) -> Result<(), &'static str> {
     if u.len() < 3 || u.len() > 32 {
         return Err("username 3-32 chars");
     }
-    if !u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') {
+    if !u
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    {
         return Err("username allow [a-zA-Z0-9_.-] only");
     }
     if u.starts_with('.') || u.starts_with('-') {
@@ -53,31 +56,44 @@ pub async fn register(
         return Err((StatusCode::BAD_REQUEST, "password ≥ 8 chars".into()));
     }
     if req.hwid_hex.len() != 64 {
-        return Err((StatusCode::BAD_REQUEST, "hwid_hex must be 64 hex chars".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "hwid_hex must be 64 hex chars".into(),
+        ));
     }
 
     // 2. username 是否已占用？username_hash 用于 login lookup
     let uname_hash = hashing::salt_hwid(&req.username, b"launcher.user.salt.v1");
     let exists = sqlx::query_scalar!(
         "SELECT 1 as exists FROM users WHERE username_hash = $1 OR username = $2",
-        uname_hash, req.username)
-        .fetch_optional(&s.db).await.map_err(internal)?;
+        uname_hash,
+        req.username
+    )
+    .fetch_optional(&s.db)
+    .await
+    .map_err(internal)?;
     if exists.is_some() {
         return Err((StatusCode::CONFLICT, "username taken".into()));
     }
 
     // 2.5 邀请码强制校验（config.require_invite_code = true 时）
     let used_invite_code: Option<String> = if s.cfg.require_invite_code {
-        let code = req.invite_code.as_ref()
+        let code = req
+            .invite_code
+            .as_ref()
             .map(|c| c.trim().to_ascii_uppercase())
             .filter(|c| !c.is_empty())
             .ok_or((StatusCode::BAD_REQUEST, "invite_code required".into()))?;
         // SELECT FOR UPDATE 防并发抢码
         let row = sqlx::query!(
             r#"SELECT max_uses, use_count, revoked_at, expires_at
-               FROM invite_codes WHERE code = $1 FOR UPDATE"#, code)
-            .fetch_optional(&s.db).await.map_err(internal)?
-            .ok_or((StatusCode::FORBIDDEN, "invite_code invalid".into()))?;
+               FROM invite_codes WHERE code = $1 FOR UPDATE"#,
+            code
+        )
+        .fetch_optional(&s.db)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::FORBIDDEN, "invite_code invalid".into()))?;
         if row.revoked_at.is_some() {
             return Err((StatusCode::FORBIDDEN, "invite_code revoked".into()));
         }
@@ -91,7 +107,9 @@ pub async fn register(
         }
         Some(code)
     } else {
-        req.invite_code.as_ref().map(|c| c.trim().to_ascii_uppercase())
+        req.invite_code
+            .as_ref()
+            .map(|c| c.trim().to_ascii_uppercase())
     };
 
     // 3. 生成唯一 UID（最多重试 5 次）
@@ -99,10 +117,14 @@ pub async fn register(
         let mut tries = 0;
         loop {
             let candidate = shared_uid::generate();
-            let dup = sqlx::query_scalar!(
-                "SELECT 1 as exists FROM users WHERE uid = $1", candidate)
-                .fetch_optional(&s.db).await.map_err(internal)?;
-            if dup.is_none() { break candidate; }
+            let dup =
+                sqlx::query_scalar!("SELECT 1 as exists FROM users WHERE uid = $1", candidate)
+                    .fetch_optional(&s.db)
+                    .await
+                    .map_err(internal)?;
+            if dup.is_none() {
+                break candidate;
+            }
             tries += 1;
             if tries >= 5 {
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, "UID gen failed".into()));
@@ -111,10 +133,14 @@ pub async fn register(
     };
 
     // 4. argon2id hash 密码
-    let pw_hash = hashing::hash_password(&req.password,
-        s.cfg.argon_memory_kib, s.cfg.argon_iterations).map_err(internal)?;
+    let pw_hash = hashing::hash_password(
+        &req.password,
+        s.cfg.argon_memory_kib,
+        s.cfg.argon_iterations,
+    )
+    .map_err(internal)?;
     let hwid_salted = hashing::salt_hwid(&req.hwid_hex, b"launcher.hwid.salt.v1");
-    let nickname    = req.username.clone();   // 默认 nickname = username
+    let nickname = req.username.clone(); // 默认 nickname = username
 
     // 5. INSERT
     let row = sqlx::query!(
@@ -123,9 +149,17 @@ pub async fn register(
              invite_code_used, password_changed_at, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
            RETURNING id"#,
-        uname_hash, pw_hash, hwid_salted,
-        uid, req.username, nickname, used_invite_code.clone())
-        .fetch_one(&s.db).await.map_err(internal)?;
+        uname_hash,
+        pw_hash,
+        hwid_salted,
+        uid,
+        req.username,
+        nickname,
+        used_invite_code.clone()
+    )
+    .fetch_one(&s.db)
+    .await
+    .map_err(internal)?;
 
     // 5.5 消费邀请码：use_count++ + 写 invite_code_uses
     if let Some(code) = &used_invite_code {
@@ -135,12 +169,20 @@ pub async fn register(
                       used_at   = now(),
                       used_by   = $2
                   WHERE code = $1"#,
-            code, row.id)
-            .execute(&s.db).await.map_err(internal)?;
+            code,
+            row.id
+        )
+        .execute(&s.db)
+        .await
+        .map_err(internal)?;
         sqlx::query!(
             "INSERT INTO invite_code_uses (code, user_id) VALUES ($1, $2)",
-            code, row.id)
-            .execute(&s.db).await.ok();
+            code,
+            row.id
+        )
+        .execute(&s.db)
+        .await
+        .ok();
     }
 
     // 6. 自动登录（发 session token）
@@ -149,8 +191,14 @@ pub async fn register(
     let expires = now + Duration::seconds(s.cfg.session_ttl_seconds);
     sqlx::query!(
         "INSERT INTO sessions (token, user_id, expires_at, created_at) VALUES ($1, $2, $3, $4)",
-        token, row.id, expires, now)
-        .execute(&s.db).await.map_err(internal)?;
+        token,
+        row.id,
+        expires,
+        now
+    )
+    .execute(&s.db)
+    .await
+    .map_err(internal)?;
 
     // 7. 记 audit + login_history
     sqlx::query!(
@@ -161,8 +209,13 @@ pub async fn register(
     sqlx::query!(
         r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
            VALUES ($1, true, $2, $3, NULL)"#,
-        row.id, &req.hwid_hex[..16.min(req.hwid_hex.len())], req.client_ver)
-        .execute(&s.db).await.ok();
+        row.id,
+        &req.hwid_hex[..16.min(req.hwid_hex.len())],
+        req.client_ver
+    )
+    .execute(&s.db)
+    .await
+    .ok();
 
     Ok(Json(RegisterResp {
         user_id: row.id.to_string(),
@@ -176,19 +229,19 @@ pub async fn register(
 
 #[derive(Deserialize)]
 pub struct LoginReq {
-    pub username:  String,
-    pub password:  String,
-    pub hwid_hex:  String,        // 客户端拼接 + sha256 后的 hex
+    pub username: String,
+    pub password: String,
+    pub hwid_hex: String, // 客户端拼接 + sha256 后的 hex
     pub client_ver: String,
 }
 
 #[derive(Serialize)]
 pub struct LoginResp {
-    pub session_token:        String,
-    pub expires_at:           i64,
-    pub subscription_tier:    Option<String>,
+    pub session_token: String,
+    pub expires_at: i64,
+    pub subscription_tier: Option<String>,
     pub subscription_expires: Option<i64>,
-    pub user_id:              String,
+    pub user_id: String,
 }
 
 pub async fn login(
@@ -198,9 +251,12 @@ pub async fn login(
     // Brute-force lockout: 5 failures within 15 min triggers 15 min cooldown
     {
         let mut map = s.login_attempts.lock().unwrap();
-        let entry = map.entry(req.username.clone()).or_insert_with(||
-            crate::state::LoginAttemptEntry { count: 0, first_at: time::Instant::now() }
-        );
+        let entry =
+            map.entry(req.username.clone())
+                .or_insert_with(|| crate::state::LoginAttemptEntry {
+                    count: 0,
+                    first_at: time::Instant::now(),
+                });
         let window = time::Duration::from_secs(15 * 60);
         let cooldown = time::Duration::from_secs(15 * 60);
         if entry.first_at.elapsed() > window {
@@ -221,7 +277,8 @@ pub async fn login(
            FROM users WHERE username_hash = $1"#,
         hashing::salt_hwid(&req.username, b"launcher.user.salt.v1"),
     )
-    .fetch_optional(&s.db).await
+    .fetch_optional(&s.db)
+    .await
     .map_err(internal)?
     .ok_or_else(|| {
         // Count failed attempts even for unknown users (prevents user enumeration via timing)
@@ -255,9 +312,14 @@ pub async fn login(
             return Err((StatusCode::FORBIDDEN, "hwid mismatch".into()));
         }
         None => {
-            sqlx::query!("UPDATE users SET hwid_bound = $1 WHERE id = $2",
-                hwid_salted, row.id)
-                .execute(&s.db).await.map_err(internal)?;
+            sqlx::query!(
+                "UPDATE users SET hwid_bound = $1 WHERE id = $2",
+                hwid_salted,
+                row.id
+            )
+            .execute(&s.db)
+            .await
+            .map_err(internal)?;
         }
         _ => {}
     }
@@ -269,8 +331,14 @@ pub async fn login(
     sqlx::query!(
         r#"INSERT INTO sessions (token, user_id, expires_at, created_at)
            VALUES ($1, $2, $3, $4)"#,
-        token, row.id, expires, now)
-        .execute(&s.db).await.map_err(internal)?;
+        token,
+        row.id,
+        expires,
+        now
+    )
+    .execute(&s.db)
+    .await
+    .map_err(internal)?;
 
     let tier_str = row.subscription_tier.clone();
     let exp_unix = row.subscription_expires_at.map(|t| t.timestamp());
@@ -285,14 +353,18 @@ pub async fn login(
 }
 
 #[derive(Deserialize)]
-pub struct LogoutReq { pub session_token: String }
+pub struct LogoutReq {
+    pub session_token: String,
+}
 
 pub async fn logout(
     State(s): State<Arc<AppState>>,
     Json(req): Json<LogoutReq>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     sqlx::query!("DELETE FROM sessions WHERE token = $1", req.session_token)
-        .execute(&s.db).await.map_err(internal)?;
+        .execute(&s.db)
+        .await
+        .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

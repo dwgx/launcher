@@ -5,16 +5,38 @@
   .channel-actions { position: relative; overflow: visible; }
   .channel-actions .dropdown[open] { z-index: 50; }
   .channel-actions .dropdown-content { z-index: 50; }
+  .channel-policy-stack { min-width: 10rem; }
 </style>
 <div class="card bg-base-100 shadow">
   <div class="card-body">
     <div class="flex items-center justify-between mb-3">
-      <h2 class="card-title text-base">官方频道</h2>
+      <h2 class="card-title text-base">频道列表</h2>
       <span class="badge badge-outline">{{ channels.len() }}</span>
     </div>
     <div class="text-xs opacity-60 mb-3">
-      客户端 chat list 写死按 slug 加载这些频道。改名只改显示标题，slug 不变 ⇒ 客户端不受影响。
-      清空 = 软删 (deleted_at) 该频道全部消息。
+      频道策略控制客户端是否能发言：所有人、仅管理员、指定角色、最低等级、订阅用户、只读、锁定和慢速模式。
+    </div>
+
+    <form method="get" action="/admin/channels" class="mb-4 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
+      <label class="form-control">
+        <span class="label-text text-xs">按真实用户校验客户端频道权限</span>
+        <select name="view_user_id" class="select select-bordered select-sm">
+          {% for u in users %}
+          <option value="{{ u.id }}" {% if selected_user_id == u.id %}selected{% endif %}>{{ u.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="btn btn-primary btn-sm">应用校验</button>
+    </form>
+    <div class="admin-notice admin-notice-info mb-4">
+      <span class="admin-notice-dot"></span>
+      <span>
+        {% if access_check_enabled %}
+        当前校验用户：{{ selected_user_label }}。表格中的“用户视角”按服务端真实发言规则计算。
+        {% else %}
+        暂无可校验用户。创建用户后这里会显示客户端可见性和发言权限。
+        {% endif %}
+      </span>
     </div>
 
     <div class="overflow-x-auto channel-table-wrap">
@@ -22,84 +44,170 @@
         <thead>
           <tr>
             <th>分组</th>
-            <th>Slug</th>
-            <th>显示标题</th>
+            <th>标识</th>
+            <th>名称</th>
             <th>消息数</th>
-            <th>最后活动</th>
+            <th>最后活跃</th>
             <th>类型</th>
+            <th>策略</th>
+            <th>用户视角</th>
             <th class="w-24"></th>
           </tr>
         </thead>
         <tbody>
           {% for c in channels %}
           <tr class="hover">
-            <td><span class="badge badge-outline badge-sm uppercase">{{ c.group_label }}</span></td>
+            <td><span class="badge badge-outline badge-sm">{{ c.group_label_zh }}</span></td>
             <td><code class="font-mono text-orange-300 text-sm">{{ c.slug }}</code></td>
-            <td class="font-medium">{{ c.title }}</td>
+            <td class="font-medium">{{ c.display_title }}</td>
             <td class="font-mono opacity-80">{{ c.message_count }}</td>
             <td class="text-xs opacity-60 font-mono">{{ c.last_at }}</td>
             <td>
               {% if c.is_official %}
                 <span class="badge badge-active badge-sm">官方</span>
               {% else %}
-                <span class="badge badge-outline badge-sm">普通</span>
+                <span class="badge badge-outline badge-sm">自建</span>
+              {% endif %}
+            </td>
+            <td>
+              <div class="channel-policy-stack flex flex-col gap-1 text-xs">
+                <span class="badge badge-outline badge-sm">{{ c.write_policy_label }}</span>
+                <span class="opacity-60">lv{{ c.min_level }}+ / {{ c.slowmode_seconds }}s</span>
+                {% if c.allowed_role != "" %}<span class="opacity-60">角色 {{ c.allowed_role }}</span>{% endif %}
+                <div class="flex flex-wrap gap-1">
+                  {% if c.requires_subscription %}<span class="badge badge-sm">订阅</span>{% endif %}
+                  {% if c.is_readonly %}<span class="badge badge-sm">只读</span>{% endif %}
+                  {% if c.is_locked %}<span class="badge badge-error badge-sm">锁定</span>{% endif %}
+                </div>
+              </div>
+            </td>
+            <td>
+              {% if access_check_enabled %}
+              <div class="flex flex-col gap-1 text-xs">
+                <div class="flex flex-wrap gap-1">
+                  {% if c.access_visible %}
+                  <span class="badge badge-sm badge-outline">客户端可见</span>
+                  {% else %}
+                  <span class="badge badge-sm badge-warning">客户端隐藏</span>
+                  {% endif %}
+                  {% if c.access_write_allowed %}
+                  <span class="badge badge-sm badge-success">可发言</span>
+                  {% else %}
+                  <span class="badge badge-sm badge-error">不可发言</span>
+                  {% endif %}
+                </div>
+                <span class="cell-wrap opacity-70 max-w-xs">{{ c.access_reason }}</span>
+              </div>
+              {% else %}
+              <span class="opacity-40 text-xs">未选择用户</span>
               {% endif %}
             </td>
             <td class="channel-actions">
               <details class="dropdown dropdown-end">
-                <summary class="btn btn-xs btn-ghost">操作 ▾</summary>
+                <summary class="btn btn-xs btn-ghost">操作</summary>
                 <ul class="dropdown-content menu bg-base-200 rounded-box w-44 p-1 shadow border border-base-300/60 z-50">
-                  <li>
-                    <a onclick="document.getElementById('rename-{{ c.id }}').showModal()">
-                      <span>✎</span> 改名
-                    </a>
-                  </li>
-                  <li>
-                    <a class="text-rose-400" onclick="document.getElementById('clear-{{ c.id }}').showModal()">
-                      <span>⌫</span> 清空消息
-                    </a>
-                  </li>
+                  <li><button type="button" onclick="this.closest('details').removeAttribute('open'); document.getElementById('rename-{{ c.id }}').showModal()">改名</button></li>
+                  <li><button type="button" onclick="this.closest('details').removeAttribute('open'); document.getElementById('policy-{{ c.id }}').showModal()">策略</button></li>
+                  <li><button type="button" class="text-rose-400" onclick="this.closest('details').removeAttribute('open'); document.getElementById('clear-{{ c.id }}').showModal()">清空消息</button></li>
                 </ul>
               </details>
-
-              <dialog id="rename-{{ c.id }}" class="modal">
-                <div class="modal-box max-w-md">
-                  <h3 class="font-semibold text-base mb-1">重命名频道</h3>
-                  <p class="text-xs opacity-60 mb-4">slug <code class="font-mono">{{ c.slug }}</code> 不变；只改显示标题。</p>
-                  <form method="post" action="/admin/channels/{{ c.id }}/rename" class="space-y-3">
-                    <label class="form-control">
-                      <span class="label-text text-xs">新标题</span>
-                      <input name="title" value="{{ c.title }}" class="input input-bordered input-sm" required maxlength="64">
-                    </label>
-                    <div class="flex justify-end gap-2 mt-4">
-                      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('rename-{{ c.id }}').close()">取消</button>
-                      <button class="btn btn-primary btn-sm">保存</button>
-                    </div>
-                  </form>
-                </div>
-                <form method="dialog" class="modal-backdrop"><button>close</button></form>
-              </dialog>
-
-              <dialog id="clear-{{ c.id }}" class="modal">
-                <div class="modal-box max-w-md">
-                  <h3 class="font-semibold text-base mb-1">清空 #{{ c.title }} 全部消息？</h3>
-                  <p class="text-xs opacity-60 mb-4">软删除（deleted_at = now()），可在 audit_log 看记录。当前共 <span class="font-mono text-orange-300">{{ c.message_count }}</span> 条。</p>
-                  <form method="post" action="/admin/channels/{{ c.id }}/clear" class="flex justify-end gap-2">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('clear-{{ c.id }}').close()">取消</button>
-                    <button class="btn btn-sm" style="background:#B14444;color:#fff;border:0;">确认清空</button>
-                  </form>
-                </div>
-                <form method="dialog" class="modal-backdrop"><button>close</button></form>
-              </dialog>
             </td>
           </tr>
           {% endfor %}
           {% if channels.is_empty() %}
-          <tr><td colspan="7" class="text-center opacity-40 py-6">没有频道</td></tr>
+          <tr><td colspan="9" class="text-center opacity-40 py-6">暂无频道</td></tr>
           {% endif %}
         </tbody>
       </table>
     </div>
   </div>
 </div>
+
+{% for c in channels %}
+<dialog id="rename-{{ c.id }}" class="modal">
+  <div class="modal-box max-w-md">
+    <h3 class="font-semibold text-base mb-1">频道改名</h3>
+    <p class="text-xs opacity-60 mb-4">标识 <code class="font-mono">{{ c.slug }}</code> 不会改变。</p>
+    <form method="post" action="/admin/channels/{{ c.id }}/rename" class="space-y-3">
+      <label class="form-control">
+        <span class="label-text text-xs">名称</span>
+        <input name="title" value="{{ c.title }}" class="input input-bordered input-sm" required maxlength="64">
+      </label>
+      <div class="flex justify-end gap-2 mt-4">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('rename-{{ c.id }}').close()">取消</button>
+        <button class="btn btn-primary btn-sm">保存</button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog id="policy-{{ c.id }}" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-base mb-1">频道策略</h3>
+    <p class="text-xs opacity-60 mb-4">标识 <code class="font-mono">{{ c.slug }}</code></p>
+    <form method="post" action="/admin/channels/{{ c.id }}/policy" class="space-y-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <label class="form-control">
+          <span class="label-text text-xs">发言策略</span>
+          <select name="write_policy" class="select select-bordered select-sm">
+            <option value="everyone" {% if c.write_policy == "everyone" %}selected{% endif %}>所有人</option>
+            <option value="admin_only" {% if c.write_policy == "admin_only" %}selected{% endif %}>仅管理员</option>
+            <option value="role_only" {% if c.write_policy == "role_only" %}selected{% endif %}>指定角色</option>
+            <option value="min_level" {% if c.write_policy == "min_level" %}selected{% endif %}>最低等级</option>
+            <option value="subscriber_only" {% if c.write_policy == "subscriber_only" %}selected{% endif %}>订阅用户</option>
+            <option value="readonly" {% if c.write_policy == "readonly" %}selected{% endif %}>只读</option>
+            <option value="locked" {% if c.write_policy == "locked" %}selected{% endif %}>锁定</option>
+          </select>
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">允许角色</span>
+          <input name="allowed_role" value="{{ c.allowed_role }}" class="input input-bordered input-sm" placeholder="admin">
+        </label>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <label class="form-control">
+          <span class="label-text text-xs">最低等级</span>
+          <input name="min_level" type="number" min="1" max="100" value="{{ c.min_level }}" class="input input-bordered input-sm">
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">慢速秒数</span>
+          <input name="slowmode_seconds" type="number" min="0" max="86400" value="{{ c.slowmode_seconds }}" class="input input-bordered input-sm">
+        </label>
+      </div>
+      <div class="flex flex-wrap gap-4 text-sm">
+        <label class="label cursor-pointer gap-2">
+          <input name="requires_subscription" type="checkbox" class="checkbox checkbox-sm" {% if c.requires_subscription %}checked{% endif %}>
+          <span class="label-text">订阅用户</span>
+        </label>
+        <label class="label cursor-pointer gap-2">
+          <input name="is_readonly" type="checkbox" class="checkbox checkbox-sm" {% if c.is_readonly %}checked{% endif %}>
+          <span class="label-text">只读</span>
+        </label>
+        <label class="label cursor-pointer gap-2">
+          <input name="is_locked" type="checkbox" class="checkbox checkbox-sm" {% if c.is_locked %}checked{% endif %}>
+          <span class="label-text">锁定</span>
+        </label>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('policy-{{ c.id }}').close()">取消</button>
+        <button class="btn btn-primary btn-sm">保存</button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog id="clear-{{ c.id }}" class="modal">
+  <div class="modal-box max-w-md">
+    <h3 class="font-semibold text-base mb-1">清空 {{ c.display_title }} 的消息？</h3>
+    <p class="text-xs opacity-60 mb-4">这里只做软删除，会把当前消息标记为 <code>deleted_at = now()</code>。数量：<span class="font-mono text-orange-300">{{ c.message_count }}</span>。</p>
+    <form method="post" action="/admin/channels/{{ c.id }}/clear" class="flex justify-end gap-2">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('clear-{{ c.id }}').close()">取消</button>
+      <button class="btn btn-sm" style="background:#B14444;color:#fff;border:0;">确认清空</button>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+{% endfor %}
 {% endblock %}

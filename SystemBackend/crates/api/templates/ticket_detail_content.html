@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="space-y-4">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="card-title text-base">{{ ticket.title }}</h2>
+          <div class="text-xs opacity-50 font-mono">{{ ticket.chat_id }}</div>
+        </div>
+        <div class="flex flex-wrap gap-2 text-xs">
+          <span class="badge badge-outline">#{{ ticket.number }}</span>
+          <span class="badge badge-outline">{{ ticket.category_name }}</span>
+          <span class="badge badge-outline">{{ ticket.status_label }}</span>
+          <span class="badge badge-outline">{{ ticket.visibility_label }}</span>
+        </div>
+      </div>
+      <div class="grid gap-2 mt-3 text-xs opacity-70 md:grid-cols-4">
+        <div>创建者：{{ ticket.creator }}</div>
+        <div>指派：{{ ticket.assigned_admin }}</div>
+        <div>创建：{{ ticket.created_at }}</div>
+        <div>更新：{{ ticket.updated_at }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="card-title text-base">消息</h2>
+        <a href="/admin/tickets" class="btn btn-xs btn-outline">返回</a>
+      </div>
+      <div class="space-y-3">
+        {% for m in messages %}
+        <div class="rounded-lg border border-base-300/60 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div class="flex items-center gap-2">
+              <span class="font-medium">{{ m.sender }}</span>
+              <span class="badge badge-outline badge-xs">{{ m.msg_type_label }}</span>
+              {% if m.edited %}<span class="badge badge-xs">已编辑</span>{% endif %}
+              {% if m.deleted %}<span class="badge badge-error badge-xs">已删除</span>{% endif %}
+            </div>
+            <div class="font-mono text-xs opacity-50">#{{ m.id }} · {{ m.created_at }}</div>
+          </div>
+          <form method="post" action="/admin/tickets/{{ ticket.id }}/messages/{{ m.id }}/edit" class="grid gap-2 lg:grid-cols-[1fr_280px]">
+            <div>
+              <textarea name="text" class="textarea textarea-bordered w-full min-h-24 text-sm">{{ m.text }}</textarea>
+              <details class="mt-2">
+                <summary class="text-xs opacity-60 cursor-pointer">原始 payload</summary>
+                <pre class="text-[11px] whitespace-pre-wrap bg-base-200 rounded-md p-2 mt-1">{{ m.payload_json }}</pre>
+              </details>
+            </div>
+            <div class="space-y-2">
+              <textarea name="reason" class="textarea textarea-bordered textarea-sm w-full min-h-16" placeholder="编辑/打码原因"></textarea>
+              <label class="label cursor-pointer justify-start gap-2">
+                <input name="redact" type="checkbox" class="checkbox checkbox-sm">
+                <span class="label-text text-xs">打码消息</span>
+              </label>
+              <button class="btn btn-primary btn-sm w-full">保存审计编辑</button>
+              {% if !m.edits.is_empty() %}
+              <div class="rounded-md bg-base-200/60 p-2">
+                <div class="text-xs font-medium mb-1">审计</div>
+                <div class="space-y-1">
+                  {% for e in m.edits %}
+                  <div class="text-[11px] opacity-75">
+                    <span class="badge badge-xs">{{ e.edit_kind_label }}</span>
+                    <span>{{ e.editor }}</span>
+                    <span class="font-mono opacity-60">{{ e.created_at }}</span>
+                    <div class="opacity-60">{{ e.reason }}</div>
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endif %}
+            </div>
+          </form>
+        </div>
+        {% endfor %}
+        {% if messages.is_empty() %}
+        <div class="text-center opacity-40 py-8">暂无消息</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

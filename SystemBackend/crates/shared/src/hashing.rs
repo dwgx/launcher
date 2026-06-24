@@ -1,6 +1,6 @@
-use argon2::{Argon2, Algorithm, Version, Params, PasswordHash, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{SaltString, rand_core::OsRng};
 use crate::error::AppError;
+use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 
 pub fn hash_password(password: &str, mem_kib: u32, iters: u32) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
@@ -13,7 +13,9 @@ pub fn hash_password(password: &str, mem_kib: u32, iters: u32) -> Result<String,
 
 pub fn verify_password(password: &str, encoded: &str) -> Result<bool, AppError> {
     let parsed = PasswordHash::new(encoded)?;
-    Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
 /// 对客户端 HWID hex 做服务端二次盐化，避免 DB dump 即得明文 HWID

@@ -7,18 +7,21 @@
 //
 // 服务端：每个连接持有 mpsc receiver；chat::send 时 push_to(uid, json) 入对应 receiver。
 
-use crate::state::AppState;
 use crate::media::auth_user;
+use crate::state::AppState;
 use axum::{
-    extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}, Query},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
     response::IntoResponse,
 };
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use once_cell::sync::Lazy;
 
 type Tx = mpsc::UnboundedSender<String>;
 
@@ -26,7 +29,10 @@ type Tx = mpsc::UnboundedSender<String>;
 static HUB: Lazy<Mutex<HashMap<Uuid, Vec<Tx>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn push_to(_state: &AppState, user_id: Uuid, payload: &serde_json::Value) {
-    let body = match serde_json::to_string(payload) { Ok(s) => s, Err(_) => return };
+    let body = match serde_json::to_string(payload) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
     let h = HUB.lock().unwrap();
     if let Some(senders) = h.get(&user_id) {
         for s in senders {
@@ -37,7 +43,10 @@ pub fn push_to(_state: &AppState, user_id: Uuid, payload: &serde_json::Value) {
 
 // 广播给所有在线用户（用于状态变化等全局事件）
 pub fn broadcast_all(_state: &AppState, payload: &serde_json::Value) {
-    let body = match serde_json::to_string(payload) { Ok(s) => s, Err(_) => return };
+    let body = match serde_json::to_string(payload) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
     let h = HUB.lock().unwrap();
     for (_uid, senders) in h.iter() {
         for s in senders {
@@ -47,7 +56,9 @@ pub fn broadcast_all(_state: &AppState, payload: &serde_json::Value) {
 }
 
 #[derive(Deserialize)]
-pub struct WsQ { pub session_token: String }
+pub struct WsQ {
+    pub session_token: String,
+}
 
 pub async fn ws_handler(
     State(s): State<Arc<AppState>>,
@@ -59,7 +70,9 @@ pub async fn ws_handler(
         Ok(u) => u,
         Err((code, msg)) => return (code, msg).into_response(),
     };
-    upgrade.on_upgrade(move |socket| handle(socket, uid)).into_response()
+    upgrade
+        .on_upgrade(move |socket| handle(socket, uid))
+        .into_response()
 }
 
 async fn handle(mut socket: WebSocket, uid: Uuid) {
@@ -69,7 +82,9 @@ async fn handle(mut socket: WebSocket, uid: Uuid) {
         h.entry(uid).or_default().push(tx.clone());
     }
     tracing::info!("ws connected: user={}", uid);
-    let _ = socket.send(Message::Text(r#"{"type":"ready"}"#.into())).await;
+    let _ = socket
+        .send(Message::Text(r#"{"type":"ready"}"#.into()))
+        .await;
 
     // 读 + 写并行
     loop {
@@ -99,7 +114,9 @@ async fn handle(mut socket: WebSocket, uid: Uuid) {
     let mut h = HUB.lock().unwrap();
     if let Some(v) = h.get_mut(&uid) {
         v.retain(|s| !s.same_channel(&tx));
-        if v.is_empty() { h.remove(&uid); }
+        if v.is_empty() {
+            h.remove(&uid);
+        }
     }
     tracing::info!("ws disconnected: user={}", uid);
 }

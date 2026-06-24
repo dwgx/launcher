@@ -3,28 +3,23 @@
 
 use crate::state::AppState;
 use crate::ui;
+use askama::Template;
 use axum::{
-    extract::{State, Query, Path, Json, Form},
+    extract::{Form, Json, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    Router,
     routing::{get, post},
+    Router,
 };
+use launcher_shared::{hashing, uid as shared_uid};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use launcher_shared::{hashing, uid as shared_uid};
-use askama::Template;
 
 // ---------------- gate ----------------
 #[derive(Deserialize)]
-pub struct AdminAuth { pub key: Option<String> }
-
-fn check(state: &AppState, auth: &AdminAuth) -> Result<(), (StatusCode, String)> {
-    match &auth.key {
-        Some(k) if k == &state.cfg.admin_password => Ok(()),
-        _ => Err((StatusCode::UNAUTHORIZED, "admin key invalid".into())),
-    }
+pub struct AdminAuth {
+    pub key: Option<String>,
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
@@ -34,64 +29,88 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
 // ---------------- JSON API ----------------
 #[derive(Serialize)]
 pub struct UserSummary {
-    pub id:        String,
-    pub uid:       Option<String>,
-    pub username:  Option<String>,
-    pub nickname:  Option<String>,
-    pub tier:      Option<String>,
-    pub role:      String,
+    pub id: String,
+    pub uid: Option<String>,
+    pub username: Option<String>,
+    pub nickname: Option<String>,
+    pub tier: Option<String>,
+    pub role: String,
     pub role_label: Option<String>,
-    pub is_admin:  bool,
+    pub is_admin: bool,
     pub created_at: i64,
     pub last_login_at: Option<i64>,
 }
 
 pub async fn list_users(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(auth): Query<AdminAuth>,
 ) -> Result<Json<Vec<UserSummary>>, (StatusCode, String)> {
-    check(&s, &auth)?;
+    let _actor = crate::admin_customization::require_actor_or_admin_key(
+        &headers,
+        &s,
+        auth.key.as_deref(),
+        "admin.users.read",
+    )
+    .await?;
     let rows = sqlx::query!(
         r#"SELECT id, uid, username, nickname, subscription_tier, role, role_label, is_admin,
                   created_at, last_login_at
-           FROM users ORDER BY created_at DESC LIMIT 200"#)
-        .fetch_all(&s.db).await.map_err(internal)?;
-    Ok(Json(rows.into_iter().map(|r| UserSummary {
-        id: r.id.to_string(),
-        uid: r.uid,
-        username: r.username,
-        nickname: r.nickname,
-        tier: r.subscription_tier,
-        role: r.role,
-        role_label: r.role_label,
-        is_admin: r.is_admin,
-        created_at: r.created_at.timestamp(),
-        last_login_at: r.last_login_at.map(|t| t.timestamp()),
-    }).collect()))
+           FROM users ORDER BY created_at DESC LIMIT 200"#
+    )
+    .fetch_all(&s.db)
+    .await
+    .map_err(internal)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| UserSummary {
+                id: r.id.to_string(),
+                uid: r.uid,
+                username: r.username,
+                nickname: r.nickname,
+                tier: r.subscription_tier,
+                role: r.role,
+                role_label: r.role_label,
+                is_admin: r.is_admin,
+                created_at: r.created_at.timestamp(),
+                last_login_at: r.last_login_at.map(|t| t.timestamp()),
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
 pub struct PatchUser {
-    pub key:       String,
-    pub uid:       Option<String>,
-    pub username:  Option<String>,
-    pub nickname:  Option<String>,
-    pub tier:      Option<String>,
+    pub key: Option<String>,
+    pub uid: Option<String>,
+    pub username: Option<String>,
+    pub nickname: Option<String>,
+    pub tier: Option<String>,
     pub tier_expires_at: Option<i64>,
-    pub role:      Option<String>,
+    pub role: Option<String>,
     pub role_label: Option<String>,
-    pub is_admin:  Option<bool>,
+    pub is_admin: Option<bool>,
 }
 
 pub async fn patch_user(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<PatchUser>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    check(&s, &AdminAuth { key: Some(req.key) })?;
+    let actor = crate::admin_customization::require_actor_or_admin_key(
+        &headers,
+        &s,
+        req.key.as_deref(),
+        "admin.users.manage",
+    )
+    .await?;
     if let Some(ref u) = req.uid {
         if !shared_uid::is_valid(u) {
-            return Err((StatusCode::BAD_REQUEST, "UID 必须是 7 位数字（不前导 0）".into()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "UID 必须是 7 位数字（不前导 0）".into(),
+            ));
         }
     }
     sqlx::query!(
@@ -112,56 +131,84 @@ pub async fn patch_user(
         .execute(&s.db).await.map_err(internal)?;
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.patch_user', $2, NULL)",
-        "admin", id.to_string())
+        &actor.name, id.to_string())
         .execute(&s.db).await.ok();
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
-pub struct ResetPwReq { pub key: String, pub new_password: String }
+pub struct ResetPwReq {
+    pub key: Option<String>,
+    pub new_password: String,
+}
 
 pub async fn admin_reset_password(
     State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<ResetPwReq>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    check(&s, &AdminAuth { key: Some(req.key) })?;
+    let actor = crate::admin_customization::require_actor_or_admin_key(
+        &headers,
+        &s,
+        req.key.as_deref(),
+        "admin.users.manage",
+    )
+    .await?;
     if req.new_password.len() < 8 {
         return Err((StatusCode::BAD_REQUEST, "password >= 8".into()));
     }
-    let h = hashing::hash_password(&req.new_password,
-        s.cfg.argon_memory_kib, s.cfg.argon_iterations).map_err(internal)?;
+    let h = hashing::hash_password(
+        &req.new_password,
+        s.cfg.argon_memory_kib,
+        s.cfg.argon_iterations,
+    )
+    .map_err(internal)?;
     sqlx::query!(
         "UPDATE users SET password_hash=$1, password_changed_at=now() WHERE id=$2",
-        h, id).execute(&s.db).await.map_err(internal)?;
+        h,
+        id
+    )
+    .execute(&s.db)
+    .await
+    .map_err(internal)?;
     sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id)
-        .execute(&s.db).await.ok();
+        .execute(&s.db)
+        .await
+        .ok();
     sqlx::query!(
-        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin', 'admin.reset_password', $1, NULL)",
-        id.to_string()).execute(&s.db).await.ok();
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.reset_password', $2, NULL)",
+        &actor.name, id.to_string()).execute(&s.db).await.ok();
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------- SSR ----------------
 pub struct UserVm {
-    pub id: String, pub uid: String, pub username: String, pub nickname: String,
-    pub tier: String, pub created: String, pub invite_code: String,
-    pub role: String, pub role_label: String,   // 0009 加的字段
+    pub id: String,
+    pub uid: String,
+    pub username: String,
+    pub nickname: String,
+    pub tier: String,
+    pub created: String,
+    pub invite_code: String,
+    pub role: String,
+    pub role_label: String, // 0009 加的字段
 }
 pub struct RoleVm {
-    pub role: String, pub label_zh: String,
+    pub role: String,
+    pub label_zh: String,
 }
 
 #[derive(Template)]
 #[template(path = "users_content.html")]
 pub struct UsersPage {
-    pub title:    String,
+    pub title: String,
     pub subtitle: Option<String>,
-    pub notice:   Option<ui::AdminNotice>,
-    pub host:     &'static str,
-    pub route:    &'static str,
-    pub users:    Vec<UserVm>,
-    pub roles:    Vec<RoleVm>,
+    pub notice: Option<ui::AdminNotice>,
+    pub host: &'static str,
+    pub route: &'static str,
+    pub users: Vec<UserVm>,
+    pub roles: Vec<RoleVm>,
 }
 
 #[derive(Deserialize, Default)]
@@ -173,12 +220,16 @@ pub struct UsersNoticeQuery {
 
 fn users_notice(q: &UsersNoticeQuery) -> Option<ui::AdminNotice> {
     match (q.reset.as_deref(), q.delete.as_deref(), q.err.as_deref()) {
-        (Some("ok"), _, _) => Some(ui::AdminNotice::success("密码已重置，用户所有 session 已失效")),
+        (Some("ok"), _, _) => Some(ui::AdminNotice::success(
+            "密码已重置，用户所有 session 已失效",
+        )),
         (_, Some("ok"), _) => Some(ui::AdminNotice::success("用户已删除")),
         (_, _, Some("pw_too_short")) => Some(ui::AdminNotice::error("新密码至少需要 8 个字符")),
         (_, _, Some("hash_failed")) => Some(ui::AdminNotice::error("密码哈希失败，请重试")),
         (_, _, Some("user_not_found")) => Some(ui::AdminNotice::error("用户不存在或已被删除")),
-        (_, _, Some("delete_confirm_mismatch")) => Some(ui::AdminNotice::warning("删除确认用户名不一致，操作已取消")),
+        (_, _, Some("delete_confirm_mismatch")) => {
+            Some(ui::AdminNotice::warning("删除确认用户名不一致，操作已取消"))
+        }
         (_, _, Some("delete_failed")) => Some(ui::AdminNotice::error("删除失败，请查看服务日志")),
         _ => None,
     }
@@ -189,39 +240,52 @@ async fn users_page(
     headers: HeaderMap,
     Query(q): Query<UsersNoticeQuery>,
 ) -> Response {
-    if !crate::admin::has_admin_session(&headers, &s) {
-        return crate::admin::admin_login_redirect();
+    if let Err(resp) =
+        crate::admin_customization::require_actor(&headers, &s, "admin.users.read").await
+    {
+        return resp;
     }
 
     let rows = sqlx::query!(
         r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used, role, role_label
            FROM users ORDER BY created_at DESC LIMIT 200"#)
         .fetch_all(&s.db).await.unwrap_or_default();
-    let users = rows.into_iter().map(|r| UserVm {
-        id: r.id.to_string(),
-        uid: r.uid.unwrap_or("—".into()),
-        username: r.username.unwrap_or("—".into()),
-        nickname: r.nickname.unwrap_or("—".into()),
-        tier: r.subscription_tier.unwrap_or("—".into()),
-        created: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
-        invite_code: r.invite_code_used.unwrap_or("—".into()),
-        role: r.role,
-        role_label: r.role_label.unwrap_or("—".into()),
-    }).collect();
-    let role_rows = sqlx::query!(
-        r#"SELECT role, label_zh FROM user_roles_catalog ORDER BY sort_order"#)
-        .fetch_all(&s.db).await.unwrap_or_default();
-    let roles = role_rows.into_iter().map(|r| RoleVm {
-        role: r.role, label_zh: r.label_zh,
-    }).collect();
+    let users = rows
+        .into_iter()
+        .map(|r| UserVm {
+            id: r.id.to_string(),
+            uid: r.uid.unwrap_or("—".into()),
+            username: r.username.unwrap_or("—".into()),
+            nickname: r.nickname.unwrap_or("—".into()),
+            tier: r.subscription_tier.unwrap_or("—".into()),
+            created: r.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            invite_code: r.invite_code_used.unwrap_or("—".into()),
+            role: r.role,
+            role_label: r.role_label.unwrap_or("—".into()),
+        })
+        .collect();
+    let role_rows =
+        sqlx::query!(r#"SELECT role, label_zh FROM user_roles_catalog ORDER BY sort_order"#)
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    let roles = role_rows
+        .into_iter()
+        .map(|r| RoleVm {
+            role: r.role,
+            label_zh: r.label_zh,
+        })
+        .collect();
     ui::render(&UsersPage {
         title: "用户".into(),
         subtitle: None,
         notice: users_notice(&q),
         host: ui::host(),
         route: ui::ROUTE_USERS,
-        users, roles,
-    }).into_response()
+        users,
+        roles,
+    })
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -240,9 +304,11 @@ async fn user_edit_submit(
     Path(id): Path<Uuid>,
     Form(form): Form<EditForm>,
 ) -> Response {
-    if !crate::admin::has_admin_session(&headers, &s) {
-        return crate::admin::admin_login_redirect();
-    }
+    let actor =
+        match crate::admin_customization::require_actor(&headers, &s, "admin.users.manage").await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     let _ = sqlx::query!(
         r#"UPDATE users SET
@@ -256,18 +322,27 @@ async fn user_edit_submit(
                             WHEN $6 IS NOT NULL AND $6 != '' THEN FALSE
                             ELSE is_admin END
            WHERE id=$1"#,
-        id, form.uid, form.username, form.nickname, form.tier,
-        form.role, form.role_label)
-        .execute(&s.db).await;
+        id,
+        form.uid,
+        form.username,
+        form.nickname,
+        form.tier,
+        form.role,
+        form.role_label
+    )
+    .execute(&s.db)
+    .await;
     let _ = sqlx::query!(
-        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.edit_user',$1,NULL)",
-        id.to_string()).execute(&s.db).await;
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.edit_user',$2,NULL)",
+        &actor.name, id.to_string()).execute(&s.db).await;
     Redirect::to("/admin/users").into_response()
 }
 
 // SSR 重置密码：表单 POST，强制断开该用户所有 session
 #[derive(Deserialize)]
-pub struct ResetPwForm { pub new_password: String }
+pub struct ResetPwForm {
+    pub new_password: String,
+}
 
 async fn user_reset_pw_form(
     State(s): State<Arc<AppState>>,
@@ -275,26 +350,36 @@ async fn user_reset_pw_form(
     Path(id): Path<Uuid>,
     Form(form): Form<ResetPwForm>,
 ) -> Response {
-    if !crate::admin::has_admin_session(&headers, &s) {
-        return crate::admin::admin_login_redirect();
-    }
+    let actor =
+        match crate::admin_customization::require_actor(&headers, &s, "admin.users.manage").await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     if form.new_password.len() < 8 {
         return Redirect::to("/admin/users?err=pw_too_short").into_response();
     }
-    let h = match hashing::hash_password(&form.new_password,
-        s.cfg.argon_memory_kib, s.cfg.argon_iterations) {
+    let h = match hashing::hash_password(
+        &form.new_password,
+        s.cfg.argon_memory_kib,
+        s.cfg.argon_iterations,
+    ) {
         Ok(v) => v,
         Err(_) => return Redirect::to("/admin/users?err=hash_failed").into_response(),
     };
     let _ = sqlx::query!(
         "UPDATE users SET password_hash=$1, password_changed_at=now() WHERE id=$2",
-        h, id).execute(&s.db).await;
+        h,
+        id
+    )
+    .execute(&s.db)
+    .await;
     let _ = sqlx::query!("DELETE FROM sessions WHERE user_id=$1", id)
-        .execute(&s.db).await;
+        .execute(&s.db)
+        .await;
     let _ = sqlx::query!(
-        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.reset_password_form',$1,NULL)",
-        id.to_string()).execute(&s.db).await;
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.reset_password_form',$2,NULL)",
+        &actor.name, id.to_string()).execute(&s.db).await;
     Redirect::to("/admin/users?reset=ok").into_response()
 }
 
@@ -312,7 +397,9 @@ async fn user_reset_pw_form(
 //   5. 最后 DELETE FROM users
 // =====================================================================
 #[derive(Deserialize)]
-pub struct DeleteForm { pub confirm_username: String }
+pub struct DeleteForm {
+    pub confirm_username: String,
+}
 
 async fn user_delete_submit(
     State(s): State<Arc<AppState>>,
@@ -320,13 +407,19 @@ async fn user_delete_submit(
     Path(id): Path<Uuid>,
     Form(form): Form<DeleteForm>,
 ) -> Response {
-    if !crate::admin::has_admin_session(&headers, &s) {
-        return crate::admin::admin_login_redirect();
-    }
+    let actor =
+        match crate::admin_customization::require_actor(&headers, &s, "admin.users.manage").await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     // 第一道：拿真 username 跟客户端输入比对（防误删）
     let actual = sqlx::query_scalar!("SELECT username FROM users WHERE id=$1", id)
-        .fetch_optional(&s.db).await.ok().flatten().flatten();
+        .fetch_optional(&s.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
     let actual = match actual {
         Some(u) => u,
         None => return Redirect::to("/admin/users?err=user_not_found").into_response(),
@@ -355,8 +448,8 @@ async fn user_delete_submit(
 
         // 写审计日志（用户已经要被删，这里 actor=admin / target=被删 user 的 id+username）
         sqlx::query!(
-            "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('admin','admin.delete_user',$1,$2)",
-            id.to_string(), serde_json::json!({"username": &actual}))
+            "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.delete_user',$2,$3)",
+            &actor.name, id.to_string(), serde_json::json!({"username": &actual}))
             .execute(&mut *tx).await?;
 
         // 真删
@@ -372,11 +465,11 @@ async fn user_delete_submit(
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/admin/users",                  get(users_page))
-        .route("/admin/users/:id/edit",         post(user_edit_submit))
-        .route("/admin/users/:id/reset-pw",     post(user_reset_pw_form))
-        .route("/admin/users/:id/delete",       post(user_delete_submit))
-        .route("/api/admin/users",              get(list_users))
-        .route("/api/admin/users/:id",          post(patch_user))
+        .route("/admin/users", get(users_page))
+        .route("/admin/users/:id/edit", post(user_edit_submit))
+        .route("/admin/users/:id/reset-pw", post(user_reset_pw_form))
+        .route("/admin/users/:id/delete", post(user_delete_submit))
+        .route("/api/admin/users", get(list_users))
+        .route("/api/admin/users/:id", post(patch_user))
         .route("/api/admin/users/:id/reset-pw", post(admin_reset_password))
 }
