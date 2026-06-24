@@ -233,6 +233,12 @@ void paintSidebar(D2DApp& app, float H) {
         prim::drawText_(ctx, lbl, item_fmt,
                         item.x + 44.0f, item.y + 11.0f, item.w - 50.0f, 18.0f,
                         br.solid(tc));
+        if (m.view == stages::View::Chat && chat::hasUnreadAnnouncements()) {
+            prim::fillCircle(ctx, item.x + item.w - 16.0f, item.y + 19.0f, 4.0f,
+                             br.solid(pal.primary));
+            prim::strokeCircle(ctx, item.x + item.w - 16.0f, item.y + 19.0f, 4.0f,
+                               br.solid(pal.sidebar_bg), 1.5f);
+        }
 
         stages::View target = m.view;
         hit(item, [target]() { switchView(target); }, true);
@@ -1090,6 +1096,8 @@ void paintMain(D2DApp& app, float W, float H) {
     // 消息右键菜单 — 在所有 modal 之上、toast 之下
     modal::paintMsgContextMenu(app, W, H);
     modal::paintUserContextMenu(app, W, H);
+
+    chat::paintAnnouncementModal(app, W, H);
 
     // toast 在最最顶层
     toast::paint(app, W, H);

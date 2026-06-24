@@ -209,7 +209,93 @@ inline size_t findJsonArrayEnd(const std::string& body, size_t open_pos) {
     return std::string::npos;
 }
 
+inline bool jsonFinishValueRange(const std::string& body, size_t value_begin, size_t& end) {
+    if (value_begin >= body.size()) return false;
+    if (body[value_begin] == '"') {
+        std::string ignored;
+        size_t ep = value_begin;
+        if (!parseJsonStringAt(body, value_begin, ignored, &ep)) return false;
+        end = ep;
+        return true;
+    }
+    if (body[value_begin] == '{') {
+        size_t ep = findJsonObjectEnd(body, value_begin);
+        if (ep == std::string::npos) return false;
+        end = ep + 1;
+        return true;
+    }
+    if (body[value_begin] == '[') {
+        size_t ep = findJsonArrayEnd(body, value_begin);
+        if (ep == std::string::npos) return false;
+        end = ep + 1;
+        return true;
+    }
+    size_t ep = value_begin;
+    while (ep < body.size() && body[ep] != ',' && body[ep] != '}' && body[ep] != ']'
+           && body[ep] != '\r' && body[ep] != '\n') {
+        ++ep;
+    }
+    while (ep > value_begin && (body[ep - 1] == ' ' || body[ep - 1] == '\t')) --ep;
+    end = ep;
+    return true;
+}
+
 inline bool jsonValueRange(const std::string& body, const char* field, size_t& begin, size_t& end) {
+    begin = 0;
+    end = 0;
+    if (!field || !*field) return false;
+    size_t root = 0;
+    while (root < body.size()
+           && (body[root] == ' ' || body[root] == '\t' || body[root] == '\r' || body[root] == '\n')) {
+        ++root;
+    }
+    if (root < body.size() && body[root] == '{') {
+        size_t p = root + 1;
+        while (p < body.size()) {
+            while (p < body.size()
+                   && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) {
+                ++p;
+            }
+            if (p >= body.size() || body[p] == '}') return false;
+            if (body[p] != '"') return false;
+
+            std::string key;
+            size_t key_end = p;
+            if (!parseJsonStringAt(body, p, key, &key_end)) return false;
+            p = key_end;
+            while (p < body.size()
+                   && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) {
+                ++p;
+            }
+            if (p >= body.size() || body[p] != ':') return false;
+            ++p;
+            while (p < body.size()
+                   && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) {
+                ++p;
+            }
+            size_t value_begin = p;
+            size_t value_end = p;
+            if (!jsonFinishValueRange(body, value_begin, value_end)) return false;
+            if (key == field) {
+                begin = value_begin;
+                end = value_end;
+                return true;
+            }
+            p = value_end;
+            while (p < body.size()
+                   && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) {
+                ++p;
+            }
+            if (p < body.size() && body[p] == ',') {
+                ++p;
+                continue;
+            }
+            if (p < body.size() && body[p] == '}') return false;
+            return false;
+        }
+        return false;
+    }
+
     std::string key = "\""; key += field; key += "\":";
     auto p = body.find(key);
     if (p == std::string::npos) return false;
@@ -217,33 +303,7 @@ inline bool jsonValueRange(const std::string& body, const char* field, size_t& b
     while (p < body.size() && (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' || body[p] == '\n')) ++p;
     if (p >= body.size()) return false;
     begin = p;
-    if (body[p] == '"') {
-        std::string ignored;
-        size_t ep = p;
-        if (!parseJsonStringAt(body, p, ignored, &ep)) return false;
-        end = ep;
-        return true;
-    }
-    if (body[p] == '{') {
-        size_t ep = findJsonObjectEnd(body, p);
-        if (ep == std::string::npos) return false;
-        end = ep + 1;
-        return true;
-    }
-    if (body[p] == '[') {
-        size_t ep = findJsonArrayEnd(body, p);
-        if (ep == std::string::npos) return false;
-        end = ep + 1;
-        return true;
-    }
-    size_t ep = p;
-    while (ep < body.size() && body[ep] != ',' && body[ep] != '}' && body[ep] != ']'
-           && body[ep] != '\r' && body[ep] != '\n') {
-        ++ep;
-    }
-    while (ep > p && (body[ep - 1] == ' ' || body[ep - 1] == '\t')) --ep;
-    end = ep;
-    return true;
+    return jsonFinishValueRange(body, p, end);
 }
 
 inline std::string jsonRaw(const std::string& body, const char* field) {

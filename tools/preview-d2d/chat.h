@@ -20,6 +20,14 @@ struct Channel {
     bool is_market;
     std::string   id;          // backend uuid (启动后 GET /api/chat/official 填)
     int           write_role;  // 0 = user, 1 = admin_only
+    bool          notice = false; // bootstrap announcement red dot
+    std::string   write_policy;
+    std::string   allowed_role;
+    int           min_level = 1;
+    int           slowmode_seconds = 0;
+    bool          requires_subscription = false;
+    bool          is_readonly = false;
+    bool          is_locked = false;
 };
 
 extern std::vector<Channel> g_channels;
@@ -157,6 +165,9 @@ void fetchOfficialChannels(HWND notify);
 
 // main thread WM_APP+5 调
 void applyOfficialResult();
+
+bool hasUnreadAnnouncements();
+void paintAnnouncementModal(D2DApp& app, float W, float H);
 
 // 拖拽文件进 chat → 添加 image bubble + 上传后端
 void appendMedia(const std::wstring& path);

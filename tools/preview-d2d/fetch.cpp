@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <cwctype>
 #include <unordered_map>
 
@@ -612,7 +613,11 @@ void myProfile(HWND notify) {
         next.bio         = utf8ToW(net::jsonStr(r.body, "bio"));
         next.role        = utf8ToW(net::jsonStr(r.body, "role"));
         next.role_label  = utf8ToW(net::jsonStr(r.body, "role_label"));
+        next.tier        = utf8ToW(net::jsonStr(r.body, "tier"));
+        next.tier_expires_at = net::jsonInt(r.body, "tier_expires_at");
         next.is_admin    = net::jsonRaw(r.body, "is_admin") == "true";
+        next.subscribed  = !next.tier.empty()
+                         && (next.tier_expires_at <= 0 || next.tier_expires_at > (int64_t)time(nullptr));
         next.loaded      = true;
         {
             std::lock_guard<std::mutex> lk(g_my_profile_mtx);
@@ -639,6 +644,8 @@ void applyMyProfileResult() {
     g_user.role = next.role;
     g_user.role_label = next.role_label;
     g_user.is_admin = next.is_admin;
+    g_user.subscribed = next.subscribed;
+    if (!next.tier.empty()) g_user.expires = next.tier;
     g_status = statusFromKey(next.status);
 }
 

@@ -22,6 +22,8 @@ struct UserInfo {
     std::wstring role      = L"user";
     std::wstring role_label;
     bool is_admin = false;
+    int level = 1;
+    bool subscribed = false;
     std::wstring status_text;          // 自定义状态消息（48 字以内）
     std::wstring bio;                   // 个人签名（240 字以内）
 };

@@ -51,6 +51,8 @@ bool isMediaKind(chat::MsgKind kind) {
 }
 
 std::string bodyFromPayloadObject(const std::string& payload_obj) {
+    std::string text = net::jsonStr(payload_obj, "text");
+    if (!text.empty()) return text;
     std::string media_url = net::jsonStr(payload_obj, "url");
     if (media_url.empty()) media_url = net::jsonStr(payload_obj, "media_url");
     if (!media_url.empty()) return media_url;

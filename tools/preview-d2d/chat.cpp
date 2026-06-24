@@ -11,6 +11,7 @@
 #include "sticker.h"
 #include "modals.h"
 #include "render/primitives.h"
+#include "toast.h"
 
 #include <algorithm>
 #include <array>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <objbase.h>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -48,6 +50,9 @@ inline uint32_t fadeArgb(uint32_t argb, float op) {
 }
 }
 
+static void markAnnouncementsReadLocal(bool ack_popup, const std::string& only_id = {});
+static void rebuildAnnouncementStream();
+
 // 8 官方频道（不要 touhou/vrchat — 跟 GDI+ 那边一致）
 std::vector<Channel> g_channels = {
     { L"announcements", L"announcements", L"IMPORTANT", false, "", 1 },
@@ -60,6 +65,7 @@ std::vector<Channel> g_channels = {
     { L"trades",        L"trades",        L"SHOP",      false, "", 1 },
 };
 const wchar_t* kGroups[] = { L"IMPORTANT", L"GENERAL", L"GAMES", L"SHOP" };
+static std::vector<std::wstring> g_channel_string_pool;
 
 std::wstring g_active = L"general";
 InputBox     g_composer;
@@ -123,8 +129,27 @@ static std::vector<PackTabRect> g_pack_tab_rects;
 static float g_picker_origin_x = 0, g_picker_origin_y = 0;
 static LayoutRect g_picker_rect{};
 static LayoutRect g_picker_content_rect{};
+static LayoutRect g_emoji_button_rect{};
 static Tween g_picker_content_t;
 static int g_picker_content_tab = 0;
+struct AnnouncementItem {
+    std::string id;
+    std::wstring title;
+    std::wstring body;
+    std::string severity;
+    bool force_popup = false;
+    bool red_dot = false;
+    bool unread = false;
+    bool acknowledged = false;
+};
+static std::vector<AnnouncementItem> g_announcements;
+static std::mutex g_announcements_mtx;
+static std::wstring g_bootstrap_role;
+static bool g_bootstrap_is_admin = false;
+static AnnouncementItem g_popup_announcement;
+static bool g_popup_open = false;
+static Tween g_popup_t;
+static bool g_announcements_stream_dirty = true;
 struct PickerScrollDrag {
     bool active = false;
     int mode = 0; // 0 = emoji grid, 1 = sticker grid
@@ -175,9 +200,15 @@ static std::unordered_map<std::wstring, HistoryLoadState> g_history_state;
 void switchChannel(const std::wstring& slug) {
     g_active = slug;
     g_focus_composer = false;
+    g_composer_drag = ComposerDrag{};
+    if (g_picker_open) setPickerOpen(false);
     if (g_pending_reply.active && g_pending_reply.slug != slug) {
         g_pending_reply = PendingReply{};
         g_pending_mentions.clear();
+    }
+    if (slug == L"announcements") {
+        rebuildAnnouncementStream();
+        markAnnouncementsReadLocal(false);
     }
     std::string chat_id;
     for (auto& c : g_channels) {
@@ -262,6 +293,112 @@ void retargetPackTab() {
         g_pack_tab_w.start(g_pack_tab_w.value(), tr.w, 0.10f, 0, curve::easeOutCubic);
 }
 
+static void syncAnnouncementNoticeOnChannels() {
+    bool notice = false;
+    {
+        std::lock_guard<std::mutex> lk(g_announcements_mtx);
+        for (const auto& a : g_announcements) {
+            if (a.red_dot && a.unread) {
+                notice = true;
+                break;
+            }
+        }
+    }
+    for (auto& c : g_channels) {
+        if (wcscmp(c.slug, L"announcements") == 0) c.notice = notice;
+    }
+}
+
+static std::wstring announcementSeverityLabel(const std::string& severity) {
+    if (severity == "critical") return L"重要公告";
+    if (severity == "important") return L"公告";
+    return L"公告";
+}
+
+static void rebuildAnnouncementStream() {
+    std::vector<AnnouncementItem> anns;
+    {
+        std::lock_guard<std::mutex> lk(g_announcements_mtx);
+        anns = g_announcements;
+    }
+
+    auto& stream = streamFor(L"announcements");
+    stream.clear();
+    if (anns.empty()) {
+        Msg empty;
+        empty.kind = MsgKind::System;
+        empty.body = L"暂无公告";
+        stream.push_back(std::move(empty));
+        g_announcements_stream_dirty = false;
+        return;
+    }
+
+    for (const auto& a : anns) {
+        Msg header;
+        header.kind = MsgKind::System;
+        header.body = announcementSeverityLabel(a.severity);
+        if (a.unread && a.red_dot) header.body += L" · 未读";
+        stream.push_back(std::move(header));
+
+        Msg msg;
+        msg.kind = MsgKind::Text;
+        msg.from = L"system";
+        msg.author = L"Launcher Server";
+        msg.author_key = L"announcements";
+        msg.peer_key = L"announcements";
+        msg.status = L"official";
+        msg.time = localTimeText();
+        msg.body = a.title.empty() ? L"公告" : a.title;
+        if (!a.body.empty()) {
+            msg.body += L"\n";
+            msg.body += a.body;
+        }
+        stream.push_back(std::move(msg));
+    }
+    g_announcements_stream_dirty = false;
+}
+
+bool hasUnreadAnnouncements() {
+    std::lock_guard<std::mutex> lk(g_announcements_mtx);
+    for (const auto& a : g_announcements) {
+        if (a.red_dot && a.unread) return true;
+    }
+    return false;
+}
+
+static void postAnnouncementMark(const std::string& id, bool ack) {
+    if (id.empty() || g_session_token.empty()) return;
+    struct Arg { std::string id; bool ack; };
+    auto* a = new Arg{ id, ack };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<Arg> a((Arg*)lp);
+        std::wstring path = L"/api/announcements/";
+        for (char c : a->id) path.push_back((wchar_t)c);
+        path += a->ack ? L"/ack" : L"/read";
+        std::string body = "{\"session_token\":\"" + g_session_token + "\"}";
+        net::postJson(path.c_str(), body);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+static void markAnnouncementsReadLocal(bool ack_popup, const std::string& only_id) {
+    std::vector<std::string> ids_to_post;
+    {
+        std::lock_guard<std::mutex> lk(g_announcements_mtx);
+        for (auto& a : g_announcements) {
+            if (!only_id.empty() && a.id != only_id) continue;
+            if (a.unread || (ack_popup && !a.acknowledged)) {
+                ids_to_post.push_back(a.id);
+            }
+            a.unread = false;
+            if (ack_popup) a.acknowledged = true;
+        }
+    }
+    if (!ids_to_post.empty()) g_announcements_stream_dirty = true;
+    for (const auto& id : ids_to_post) postAnnouncementMark(id, ack_popup);
+    syncAnnouncementNoticeOnChannels();
+}
+
 static void setPickerTabSmooth(int tab) {
     if (tab < 0) tab = 0;
     if (g_picker_tab == tab) return;
@@ -304,6 +441,8 @@ std::wstring mediaLocalPathFromUrl(const std::string& media_url) {
 }
 
 std::wstring bodyFromPayloadObject(const std::string& payload_obj) {
+    std::string text = net::jsonStr(payload_obj, "text");
+    if (!text.empty()) return utf8wHist(text);
     std::string sub_url = net::jsonStr(payload_obj, "media_url");
     if (sub_url.empty()) sub_url = net::jsonStr(payload_obj, "url");
     if (!sub_url.empty()) return mediaLocalPathFromUrl(sub_url);
@@ -457,7 +596,7 @@ void normalizeMsgIdentity(Msg& m) {
 }
 
 bool sameMessageIdentity(const Msg& a, const Msg& b) {
-    if (a.server_id > 0 && b.server_id > 0 && a.server_id == b.server_id) return true;
+    if (a.server_id > 0 && b.server_id > 0) return a.server_id == b.server_id;
     return !a.client_msg_id.empty()
         && !b.client_msg_id.empty()
         && a.client_msg_id == b.client_msg_id;
@@ -474,6 +613,22 @@ bool sameMessageIdentityStrict(const Msg& a, const Msg& b) {
 void mergeServerIdentity(Msg& local, const Msg& server) {
     if (local.server_id == 0 && server.server_id > 0) local.server_id = server.server_id;
     if (local.client_msg_id.empty()) local.client_msg_id = server.client_msg_id;
+    if (server.server_id > 0) {
+        local.from = server.from;
+        local.author_key = server.author_key;
+        local.peer_key = server.peer_key;
+        local.author = server.author;
+        local.status = server.status;
+        local.kind = server.kind;
+        local.body = server.body;
+        local.time = server.time;
+        local.reply_to_id = server.reply_to_id;
+        local.reply_author = server.reply_author;
+        local.reply_preview = server.reply_preview;
+        local.send_state = MsgSendState::Sent;
+        local.error_text.clear();
+        return;
+    }
     if (local.author_key.empty()) local.author_key = server.author_key;
     if (local.peer_key.empty()) local.peer_key = server.peer_key;
     if (local.author.empty()) local.author = server.author;
@@ -781,30 +936,18 @@ void applyHistoryResult(const std::wstring& slug) {
     g_history_state[slug] = exhausted ? HistoryLoadState::Exhausted : HistoryLoadState::Loaded;
     auto& msgs = result.msgs;
     auto& s = streamFor(slug);
-    std::unordered_set<int64_t> seen_server_ids;
-    std::unordered_set<std::string> seen_client_ids;
     for (auto& existing : s) {
         normalizeMsgIdentity(existing);
-        if (existing.server_id > 0) seen_server_ids.insert(existing.server_id);
-        if (!existing.client_msg_id.empty()) seen_client_ids.insert(existing.client_msg_id);
     }
     auto exists = [&](Msg& candidate) -> bool {
         normalizeMsgIdentity(candidate);
-        bool duplicate = false;
-        if (candidate.server_id > 0 && seen_server_ids.count(candidate.server_id)) duplicate = true;
-        if (!candidate.client_msg_id.empty() && seen_client_ids.count(candidate.client_msg_id)) duplicate = true;
-        if (!duplicate) {
-            if (candidate.server_id > 0) seen_server_ids.insert(candidate.server_id);
-            if (!candidate.client_msg_id.empty()) seen_client_ids.insert(candidate.client_msg_id);
-            return false;
-        }
         for (auto& existing : s) {
             if (sameMessageIdentity(existing, candidate)) {
                 mergeServerIdentity(existing, candidate);
-                break;
+                return true;
             }
         }
-        return true;
+        return false;
     };
     // 历史消息插到流的开头（之前实时收到的"me"放在后面）
     if (s.empty()) {
@@ -836,13 +979,83 @@ void applyHistoryResult(const std::wstring& slug) {
 
 static Channel* activeChannel() {
     for (auto& c : g_channels) if (c.slug == g_active) return &c;
-    return &g_channels[2];   // general
+    return g_channels.empty() ? nullptr : &g_channels.front();
 }
 
 std::string activeChatId() {
     if (g_channels.empty()) return {};
     if (auto* ch = activeChannel()) return ch->id;
     return {};
+}
+
+static bool currentUserCanWriteRestrictedChannel() {
+    if (g_user.is_admin || g_bootstrap_is_admin) return true;
+    const std::wstring& role = !g_bootstrap_role.empty() ? g_bootstrap_role : g_user.role;
+    return role == L"admin" || role == L"owner" || role == L"super_admin";
+}
+
+static bool canWriteChannel(const Channel* ch) {
+    if (!ch || ch->id.empty()) return false;
+    if (ch->is_locked || ch->is_readonly
+        || ch->write_policy == "locked"
+        || ch->write_policy == "readonly") {
+        return false;
+    }
+    if (ch->write_policy == "admin_only") return currentUserCanWriteRestrictedChannel();
+    if (ch->write_policy == "role_only") {
+        if (currentUserCanWriteRestrictedChannel()) return true;
+        if (ch->allowed_role.empty()) return false;
+        const std::wstring role = !g_bootstrap_role.empty() ? g_bootstrap_role : g_user.role;
+        return role == utf8wHist(ch->allowed_role);
+    }
+    if (ch->write_policy == "subscriber_only" || ch->requires_subscription) {
+        if (currentUserCanWriteRestrictedChannel()) return true;
+        return g_user.subscribed;
+    }
+    if (ch->write_policy == "min_level") {
+        if (currentUserCanWriteRestrictedChannel()) return true;
+        return g_user.level >= ch->min_level;
+    }
+    if (!ch->write_policy.empty()) return true;
+    if (ch->write_role <= 0) return true;
+    return currentUserCanWriteRestrictedChannel();
+}
+
+static bool canWriteActiveChannel() {
+    return canWriteChannel(activeChannel());
+}
+
+static std::wstring activeWriteBlockedMessage() {
+    auto* ch = activeChannel();
+    if (!ch || ch->id.empty()) return L"频道尚未加载";
+    if (ch->is_locked || ch->write_policy == "locked") return L"频道已锁定";
+    if (ch->is_readonly || ch->write_policy == "readonly") return L"当前频道只读";
+    if ((ch->write_policy == "admin_only" || (ch->write_policy.empty() && ch->write_role > 0))
+        && !currentUserCanWriteRestrictedChannel()) {
+        return L"仅管理员可发言";
+    }
+    if (ch->write_policy == "role_only") return L"当前角色不可发言";
+    if (ch->write_policy == "subscriber_only" || ch->requires_subscription) return L"需要有效订阅";
+    if (ch->write_policy == "min_level") return L"等级不足";
+    return L"当前频道不可发言";
+}
+
+static bool requireActiveChannelWrite() {
+    if (canWriteActiveChannel()) return true;
+    toast::show(activeWriteBlockedMessage());
+    return false;
+}
+
+static std::wstring normalizeSendErrorText(std::wstring err) {
+    if (err.find(L"channel is admin only") != std::wstring::npos) {
+        return L"仅管理员可发言";
+    }
+    if (err.find(L"channel is read only") != std::wstring::npos
+        || err.find(L"channel is readonly") != std::wstring::npos
+        || err.find(L"channel is locked") != std::wstring::npos) {
+        return L"当前频道不可发言";
+    }
+    return err;
 }
 
 static float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
@@ -864,6 +1077,34 @@ static float caretMeasureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* 
     float w = measureW(app, s.substr(0, end), fmt);
     if (end < s.size()) w += (float)(s.size() - end) * spaceW(app, fmt);
     return w;
+}
+
+static std::wstring fitTextOneLine(D2DApp& app, const std::wstring& s,
+                                   IDWriteTextFormat* fmt, float max_w) {
+    if (s.empty() || max_w <= 4.0f || measureW(app, s, fmt) <= max_w) return s;
+    const std::wstring ell = L"...";
+    float ell_w = measureW(app, ell, fmt);
+    if (ell_w >= max_w) return ell;
+    size_t lo = 0, hi = s.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        std::wstring candidate = s.substr(0, mid) + ell;
+        if (measureW(app, candidate, fmt) <= max_w) lo = mid;
+        else hi = mid - 1;
+    }
+    return s.substr(0, lo) + ell;
+}
+
+static void drawTextOneLine(ID2D1DeviceContext* ctx, std::wstring_view text,
+                            IDWriteTextFormat* fmt, float x, float y, float w, float h,
+                            ID2D1Brush* b,
+                            DWRITE_TEXT_ALIGNMENT halign = DWRITE_TEXT_ALIGNMENT_LEADING,
+                            DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR) {
+    if (!fmt) return;
+    DWRITE_WORD_WRAPPING old_wrap = fmt->GetWordWrapping();
+    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    prim::drawText_(ctx, text, fmt, x, y, w, h, b, halign, valign);
+    fmt->SetWordWrapping(old_wrap);
 }
 
 static int cursorFromComposerPoint(float x) {
@@ -1028,11 +1269,80 @@ static float replyPreviewHeight(const Msg& m) {
 void tick(float dt) {
     g_picker_t.tick(dt);
     g_picker_content_t.tick(dt);
+    g_popup_t.tick(dt);
     g_top_seg_x.tick(dt); g_top_seg_w.tick(dt);
     g_pack_tab_x.tick(dt); g_pack_tab_w.tick(dt);
 }
 
+void paintAnnouncementModal(D2DApp& app, float W, float H) {
+    if (!g_popup_open && g_popup_t.value() < 0.001f) return;
+    float t = g_popup_t.value();
+    if (t < 0.001f) return;
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    hit({ 0, 0, W, H }, [](){}, false);
+    prim::fillRect(ctx, 0, 0, W, H, br.solidA(0x000000, 0.42f * t));
+
+    float mw = (std::min)(420.0f, W - 48.0f);
+    float mh = 260.0f;
+    float mx = (W - mw) * 0.5f;
+    float my = (H - mh) * 0.5f + (1.0f - t) * 12.0f;
+    prim::drawShadow(ctx, br, mx, my, mw, mh, 12.0f, pal.shadow_card_hover, 0.75f * t, 6.0f, 5);
+    prim::fillRR(ctx, mx, my, mw, mh, 12.0f, br.solidA(pal.card, t));
+    prim::strokeRR(ctx, mx, my, mw, mh, 12.0f,
+                   br.solidA(g_popup_announcement.severity == "critical" ? pal.primary : pal.divider, t),
+                   g_popup_announcement.severity == "critical" ? 1.5f : 1.0f);
+
+    auto* title_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    auto* meta_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f), DWRITE_FONT_WEIGHT_BOLD);
+    std::wstring severity = g_popup_announcement.severity == "critical" ? L"重要公告" : L"公告";
+    prim::fillRR(ctx, mx + 18, my + 18, 72, 22, 11.0f, br.solidA(pal.primary, 0.18f * t));
+    prim::drawText_(ctx, severity, meta_fmt, mx + 18, my + 22, 72, 14,
+                    br.solidA(pal.primary, t), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    prim::drawText_(ctx,
+                    g_popup_announcement.title.empty() ? L"公告" : g_popup_announcement.title,
+                    title_fmt, mx + 18, my + 52, mw - 36, 28, br.solidA(pal.text, t));
+    std::wstring body = g_popup_announcement.body.empty() ? L"请查看公告频道。" : g_popup_announcement.body;
+    prim::drawText_(ctx, body, body_fmt, mx + 18, my + 86, mw - 36, 92,
+                    br.solidA(pal.text_muted, t));
+
+    LayoutRect view_btn{ mx + 18, my + mh - 56, 132, 34 };
+    bool view_h = view_btn.contains(g_mouse);
+    prim::fillRR(ctx, view_btn.x, view_btn.y, view_btn.w, view_btn.h, 8.0f,
+                 br.solidA(view_h ? pal.bg : pal.card, t));
+    prim::strokeRR(ctx, view_btn.x, view_btn.y, view_btn.w, view_btn.h, 8.0f,
+                   br.solidA(pal.divider, t));
+    prim::drawText_(ctx, L"查看公告", body_fmt, view_btn.x, view_btn.y + 8, view_btn.w, 18,
+                    br.solidA(pal.text, t), DWRITE_TEXT_ALIGNMENT_CENTER);
+    hit(view_btn, [](){
+        std::string id = g_popup_announcement.id;
+        g_popup_open = false;
+        g_popup_t.start(g_popup_t.value(), 0.0f, 0.14f, 0, curve::easeOutCubic);
+        markAnnouncementsReadLocal(true, id);
+        switchChannel(L"announcements");
+        stages::g_view = stages::View::Chat;
+    }, true);
+
+    LayoutRect ok_btn{ mx + mw - 18 - 112, my + mh - 56, 112, 34 };
+    bool ok_h = ok_btn.contains(g_mouse);
+    prim::fillRR(ctx, ok_btn.x, ok_btn.y, ok_btn.w, ok_btn.h, 8.0f,
+                 br.solidA(ok_h ? pal.primary_hover : pal.primary, t));
+    prim::drawText_(ctx, L"知道了", body_fmt, ok_btn.x, ok_btn.y + 8, ok_btn.w, 18,
+                    br.solidA(0xFFFFFF, t), DWRITE_TEXT_ALIGNMENT_CENTER);
+    hit(ok_btn, [](){
+        std::string id = g_popup_announcement.id;
+        g_popup_open = false;
+        g_popup_t.start(g_popup_t.value(), 0.0f, 0.14f, 0, curve::easeOutCubic);
+        markAnnouncementsReadLocal(true, id);
+    }, true);
+}
+
 void appendMedia(const std::wstring& path) {
+    if (!requireActiveChannelWrite()) return;
     Msg m;
     std::wstring p = path;
     auto dot = p.find_last_of(L'.');
@@ -1097,8 +1407,24 @@ static void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawLine(ctx, ax + 8, ay + 44, ax + aw - 8, ay + 44,
                    br.solid(pal.divider), 1.0f);
 
+    std::vector<std::wstring> groups;
+    std::set<std::wstring> seen_groups;
+    for (auto* g : kGroups) {
+        for (auto& c : g_channels) {
+            if (c.group && wcscmp(c.group, g) == 0 && seen_groups.insert(g).second) {
+                groups.emplace_back(g);
+                break;
+            }
+        }
+    }
+    for (auto& c : g_channels) {
+        std::wstring group = c.group ? c.group : L"GENERAL";
+        if (seen_groups.insert(group).second) groups.push_back(std::move(group));
+    }
+
     float row_y = ay + 50;
-    for (auto* gname : kGroups) {
+    for (auto& group_name : groups) {
+        const wchar_t* gname = group_name.c_str();
         LayoutRect ghead{ ax + 6, row_y, aw - 12, 22 };
         bool ghov = ghead.contains(g_mouse);
         if (ghov) {
@@ -1112,7 +1438,7 @@ static void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
         prim::drawText_(ctx, gname, grp_fmt,
                         ax + 26, row_y + 4, 200, 14,
                         br.solid(pal.text_muted));
-        const wchar_t* gn = gname;
+        std::wstring gn = group_name;
         hit(ghead, [gn]() { g_group_collapsed[gn] = !g_group_collapsed[gn]; }, true);
         row_y += 24;
 
@@ -1137,6 +1463,12 @@ static void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
             prim::drawText_(ctx, c.name, active ? ch_active : ch_fmt,
                             cr.x + 26, cr.y + 7, cr.w - 60, 18,
                             br.solid(active ? pal.text : pal.text_muted));
+            if (c.notice) {
+                prim::fillCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
+                                 br.solid(pal.primary));
+                prim::strokeCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
+                                   br.solid(pal.bg), 1.5f);
+            }
             std::wstring tgt = c.slug;
             hit(cr, [tgt]() { switchChannel(tgt); }, true);
             row_y += 30;
@@ -1209,9 +1541,8 @@ static float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool pre
         std::wstring state_text = (m.send_state == MsgSendState::Pending)
             ? (m.error_text.empty() ? L"sending..." : m.error_text)
             : (m.error_text.empty() ? L"send failed" : m.error_text);
-        DWRITE_TEXT_METRICS sm{};
-        app.texts().measure(state_fmt, state_text, text_w, 64, &sm);
-        bub_h += (std::max)(14.0f, sm.height + 4.0f);
+        WrappedText state_layout = wrapTextForWidth(app, state_text, state_fmt, text_w);
+        bub_h += (std::max)(14.0f, state_layout.text_h + 4.0f);
     }
     if (!url.empty()) bub_h += 4;
     return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
@@ -1331,7 +1662,8 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
         prim::fillRR(ctx, ref_x + 8, reply_y + 6, 3, 14, 1.5f,
                      br.solidA(me ? 0xFFFFFF : pal.primary, clickable ? 0.80f : 0.42f));
         auto* ref_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
-        prim::drawText_(ctx, replyPreviewLine(m), ref_fmt,
+        std::wstring ref_line = fitTextOneLine(app, replyPreviewLine(m), ref_fmt, ref_w - 24);
+        drawTextOneLine(ctx, ref_line, ref_fmt,
                         ref_x + 16, reply_y + 5, ref_w - 24, 14,
                         br.solidA(me ? 0xFFFFFF : pal.text_muted, clickable ? 0.92f : 0.68f));
         if (clickable) {
@@ -1603,13 +1935,19 @@ static float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, f
             : (m.error_text.empty() ? L"send failed" : m.error_text);
     }
     float state_h = 0.0f;
+    WrappedText state_layout;
     if (show_state) {
-        DWRITE_TEXT_METRICS sm{};
-        app.texts().measure(state_fmt, state_text, text_w, 64, &sm);
-        state_h = (std::max)(14.0f, sm.height + 4.0f);
+        state_layout = wrapTextForWidth(app, state_text, state_fmt, text_w);
+        state_h = (std::max)(14.0f, state_layout.text_h + 4.0f);
     }
     float content_w = (std::max)((float)std::ceil(body_layout.max_line_w) + 8.0f, 16.0f);
+    if (show_state) {
+        content_w = (std::max)(content_w, (float)std::ceil(state_layout.max_line_w) + 8.0f);
+    }
     float bub_w = (std::max)(44.0f, (std::min)(content_w + 28.0f, bub_max_w));
+    if (show_state && m.send_state == MsgSendState::Failed) {
+        bub_w = (std::max)(bub_w, (std::min)(220.0f, bub_max_w));
+    }
     if (body_layout.max_line_w >= text_w - 1.0f) bub_w = bub_max_w;
     float bub_h = (std::max)(body_layout.text_h + 18.0f, 30.0f) + state_h;
     float bub_x = bub_x_for(bub_w);
@@ -1719,7 +2057,8 @@ void applySendResult() {
                     resolveLocalReplyTargets(la.slug);
                 } else {
                     it->send_state = MsgSendState::Failed;
-                    it->error_text = la.error_text.empty() ? L"发送失败" : la.error_text;
+                    it->error_text = normalizeSendErrorText(
+                        la.error_text.empty() ? L"send failed" : la.error_text);
                 }
                 break;
             }
@@ -1750,7 +2089,9 @@ static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kin
     };
     if (g_session_token.empty()) { fail(L"未登录"); return; }
     auto* ch = activeChannel();
+    if (!ch) { fail(L"channel not ready"); return; }
     if (ch->id.empty()) { fail(L"channel not ready"); return; }
+    if (!canWriteChannel(ch)) { fail(activeWriteBlockedMessage()); return; }
     if (ch->id.empty()) return;     // 还没拿到 backend uuid
     auto& msgs = streamFor(slug);
     for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
@@ -1822,7 +2163,7 @@ static void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kin
                 return 0;
             }
         }
-        push_result(false, 0, r.body.empty() ? L"send failed" : utf8wHist(r.body.substr(0, 80)));
+        push_result(false, 0, r.body.empty() ? L"send failed" : normalizeSendErrorText(utf8wHist(r.body.substr(0, 80))));
         return 0;
     }, a, 0, nullptr);
 }
@@ -1861,7 +2202,8 @@ void onWsMessageDeleted(int64_t server_id) {
 }
 
 // 兼容老调用名
-static void sendTextMessage(HWND hwnd, const std::wstring& text) {
+static bool sendTextMessage(HWND hwnd, const std::wstring& text) {
+    if (!requireActiveChannelWrite()) return false;
     int64_t reply_to_id = 0;
     std::string reply_client_msg_id;
     if (g_pending_reply.active && g_pending_reply.slug == g_active) {
@@ -1902,6 +2244,8 @@ static void sendTextMessage(HWND hwnd, const std::wstring& text) {
     }
     g_pending_reply = PendingReply{};
     g_pending_mentions.clear();
+    if (g_picker_open) setPickerOpen(false);
+    return true;
 }
 
 // ============== Composer ==============
@@ -1909,6 +2253,10 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
     auto& br = app.brushes();
+    bool writable = canWriteActiveChannel();
+    if (!writable) {
+        g_focus_composer = false;
+    }
     prim::fillRect(ctx, ax, ay, aw, ah, br.solid(pal.bg));
     prim::drawLine(ctx, ax, ay, ax + aw, ay,
                    br.solid(pal.divider), 1.0f);
@@ -1925,8 +2273,8 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         prim::drawText_(ctx, L"Reply", reply_fmt,
                         rx + 10, ry + 3, 42, 12, br.solid(pal.primary));
         std::wstring preview = g_pending_reply.author + L": " + g_pending_reply.preview;
-        if (preview.size() > 90) preview = preview.substr(0, 90) + L"...";
-        prim::drawText_(ctx, preview, reply_body_fmt,
+        preview = fitTextOneLine(app, preview, reply_body_fmt, rw - 82);
+        drawTextOneLine(ctx, preview, reply_body_fmt,
                         rx + 54, ry + 3, rw - 82, 12, br.solid(pal.text_muted));
         LayoutRect cancel{ rx + rw - 22, ry, 18, 18 };
         bool ch = cancel.contains(g_mouse);
@@ -1946,8 +2294,11 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
                      br.solid(pal.card));
     }
     icons::drawIcon(app, icons::Name::Smile, ix + 6, iy + 6, 18,
-                    ehov ? pal.text : pal.text_muted);
+                    writable && ehov ? pal.text : pal.text_muted);
+    g_emoji_button_rect = emoji_btn;
     hit(emoji_btn, [](){
+        if (!requireActiveChannelWrite()) return;
+        g_focus_composer = true;
         setPickerOpen(!g_picker_open);
     }, true);
 
@@ -1960,10 +2311,10 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     g_composer.bounds = { fx, fy, fw, fh };
 
     prim::fillRR(ctx, fx, fy, fw, fh, fh * 0.5f, br.solid(pal.card));
-    auto* border = g_focus_composer ? br.solid(pal.primary) : br.solid(pal.divider);
+    auto* border = (g_focus_composer && writable) ? br.solid(pal.primary) : br.solid(pal.divider);
     prim::strokeRR(ctx, fx, fy, fw, fh, fh * 0.5f, border,
-                   g_focus_composer ? 1.4f : 1.0f);
-    if (g_focus_composer) {
+                   (g_focus_composer && writable) ? 1.4f : 1.0f);
+    if (g_focus_composer && writable) {
         prim::strokeRR(ctx, fx - 2, fy - 2, fw + 4, fh + 4, fh * 0.5f + 2,
                        br.solidA(pal.primary, 0.10f), 3.0f);
     }
@@ -1984,7 +2335,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
 
     if (g_composer.text.empty()) {
-        prim::drawText_(ctx, L"写点什么…", tx_fmt,
+        prim::drawText_(ctx, writable ? L"写点什么..." : activeWriteBlockedMessage(), tx_fmt,
                         fx + pad_l, text_y, text_w, 18,
                         br.solid(pal.text_muted));
     } else {
@@ -1992,7 +2343,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
                                              fx + pad_l + text_w, fy + fh - 4),
                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         // 选区
-        if (g_focus_composer && g_composer.hasSelection()) {
+        if (g_focus_composer && writable && g_composer.hasSelection()) {
             float pre_w = caretMeasureW(app,
                 g_composer.displaySlice(0, g_composer.selStart()), tx_fmt);
             float in_w = caretMeasureW(app,
@@ -2009,7 +2360,7 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
 
     // caret
-    if (g_focus_composer && !g_composer.hasSelection()) {
+    if (g_focus_composer && writable && !g_composer.hasSelection()) {
         float pre_w = caret_w - text_scroll_x;
         int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
         if (phase < 500) {
@@ -2020,12 +2371,15 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         }
     }
 
-    hit(g_composer.bounds, [](){ g_focus_composer = true; }, true);
+    hit(g_composer.bounds, [](){
+        if (!requireActiveChannelWrite()) return;
+        g_focus_composer = true;
+    }, true);
 
     // send btn
     float sx = ax + aw - 14 - send_w;
     float sy = iy + (fh - send_w) * 0.5f;
-    bool can_send = !g_composer.text.empty();
+    bool can_send = writable && !g_composer.text.empty();
     LayoutRect send_btn{ sx, sy, send_w, send_w };
     bool sh_ = send_btn.contains(g_mouse);
     uint32_t sbg = !can_send ? fadeArgb(pal.primary, 0.55f)
@@ -2035,11 +2389,16 @@ static void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     icons::drawIcon(app, icons::Name::ArrowUp, sx + 10, sy + 10, 18, 0xFFFFFFFF, 2.1f);
     if (can_send) {
         hit(send_btn, []() {
-            sendTextMessage(GetActiveWindow(), g_composer.text);
-            g_composer.text.clear();
-            g_composer.cursor = 0;
-            g_composer.clearSel();
-            g_focus_composer = true;
+            if (sendTextMessage(GetActiveWindow(), g_composer.text)) {
+                g_composer.text.clear();
+                g_composer.cursor = 0;
+                g_composer.clearSel();
+                g_focus_composer = true;
+            }
+        }, true);
+    } else {
+        hit(send_btn, []() {
+            if (!canWriteActiveChannel()) toast::show(activeWriteBlockedMessage());
         }, true);
     }
 }
@@ -2060,6 +2419,9 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
                    br.solid(pal.divider), 1.0f);
 
     auto* ch = activeChannel();
+    if (!ch) {
+        ch = g_channels.empty() ? nullptr : &g_channels.front();
+    }
     auto* hash_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(14.0f),
                                         DWRITE_FONT_WEIGHT_BOLD);
     auto* name_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
@@ -2067,10 +2429,12 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* sub_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
     prim::drawText_(ctx, L"#", hash_fmt,
                     ax + 18, ay + 16, 16, 22, br.solid(pal.text_muted));
-    prim::drawText_(ctx, ch->name, name_fmt,
+    const wchar_t* channel_name = ch ? ch->name : L"general";
+    bool is_market = ch && ch->is_market;
+    prim::drawText_(ctx, channel_name, name_fmt,
                     ax + 36, ay + 14, 200, 22, br.solid(pal.text));
     prim::drawText_(ctx,
-                    ch->is_market ? L"社区交易市场（出售 .cfg / 灵敏度配置）" : L"官方频道",
+                    is_market ? L"社区交易市场（出售 .cfg / 灵敏度配置）" : L"官方频道",
                     sub_fmt,
                     ax + 36, ay + 32, 300, 16, br.solid(pal.text_muted));
 
@@ -2105,7 +2469,7 @@ static void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     if (msgs.empty()) {
         auto* empty_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
         prim::drawText_(ctx,
-            ch->is_market ? L"市场频道 — 切到 Market 标签查看商品" :
+            is_market ? L"市场频道 — 切到 Market 标签查看商品" :
                             L"还没消息。说点什么吧～",
             empty_fmt,
             ax, stream_y + stream_h * 0.5f - 12, aw, 24,
@@ -2728,6 +3092,7 @@ static void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                     std::wstring path = cur_pack.stickers[i];
                     bool can_delete = cur_pack.is_owner;
                     auto send_sticker = [path]() {
+                        if (!requireActiveChannelWrite()) return;
                         Msg m;
                         auto sd2 = path.find_last_of(L'.');
                         bool is_g = (sd2 != std::wstring::npos
@@ -2893,7 +3258,11 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
 // ============== 事件 ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
-    if (g_composer.bounds.contains(dip)) {
+    bool picker_was_open = g_picker_open;
+    bool clicked_picker = picker_was_open && g_picker_rect.contains(dip);
+    bool clicked_emoji_button = g_emoji_button_rect.contains(dip);
+    bool clicked_composer = g_composer.bounds.contains(dip);
+    if (clicked_composer && canWriteActiveChannel()) {
         g_focus_composer = true;
         int pos = cursorFromComposerPoint((float)dip.x);
         g_composer.cursor = pos;
@@ -2918,13 +3287,15 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
         }
     }
     bool consumed = dispatchClick(dip);
-    if (g_focus_composer && !g_composer.bounds.contains(dip)) {
+    if (g_focus_composer && !clicked_composer && !clicked_picker && !clicked_emoji_button) {
         g_focus_composer = false;
     }
     if (g_composer_drag.active && !g_composer.hasSelection()) {
         g_composer.clearSel();
     }
-    if (g_picker_open && !consumed) {
+    if (picker_was_open && g_picker_open && !clicked_picker && !clicked_emoji_button) {
+        setPickerOpen(false);
+    } else if (g_picker_open && !consumed) {
         setPickerOpen(false);
     }
     return consumed;
@@ -2959,6 +3330,9 @@ bool onMouseRDown(HWND hwnd, POINT dip) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return true;
         }
+    }
+    if (g_active == L"announcements" && g_announcements_stream_dirty) {
+        rebuildAnnouncementStream();
     }
     auto& msgs = streamFor(g_active);
     auto open_msg_menu = [&](const std::vector<MsgHit>& hits) -> bool {
@@ -3002,17 +3376,26 @@ bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
 
 void onChar(HWND hwnd, wchar_t c, bool ctrl) {
     if (!g_focus_composer) return;
+    if (!canWriteActiveChannel()) {
+        g_focus_composer = false;
+        return;
+    }
     g_composer.onChar(c, ctrl, hwnd);
 }
 
 void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!g_focus_composer) return;
+    if (!canWriteActiveChannel()) {
+        g_focus_composer = false;
+        return;
+    }
     if (vk == VK_RETURN) {
         if (!g_composer.text.empty()) {
-            sendTextMessage(hwnd, g_composer.text);
-            g_composer.text.clear();
-            g_composer.cursor = 0;
-            g_composer.clearSel();
+            if (sendTextMessage(hwnd, g_composer.text)) {
+                g_composer.text.clear();
+                g_composer.cursor = 0;
+                g_composer.clearSel();
+            }
         }
         return;
     }
@@ -3024,7 +3407,48 @@ void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
 namespace {
 struct OfficialArg { HWND h; };
 std::mutex g_official_mtx;
-std::vector<std::pair<std::wstring, std::string>> g_pending_official;  // slug → uuid
+struct PendingOfficialChannel {
+    std::wstring slug;
+    std::wstring name;
+    std::wstring group;
+    bool is_market = false;
+    std::string id;
+    int write_role = 0;
+    bool notice = false;
+    std::string write_policy;
+    std::string allowed_role;
+    int min_level = 1;
+    int slowmode_seconds = 0;
+    bool requires_subscription = false;
+    bool is_readonly = false;
+    bool is_locked = false;
+};
+std::vector<PendingOfficialChannel> g_pending_official;
+bool g_pending_official_replace = false;
+std::vector<AnnouncementItem> g_pending_announcements;
+std::wstring g_pending_me_role;
+bool g_pending_me_admin = false;
+int g_pending_me_level = 1;
+
+std::vector<std::string> jsonObjectsInArray(const std::string& arr) {
+    std::vector<std::string> out;
+    size_t p = 0;
+    while (true) {
+        auto open_brace = arr.find('{', p);
+        if (open_brace == std::string::npos) break;
+        auto close_brace = net::findJsonObjectEnd(arr, open_brace);
+        if (close_brace == std::string::npos) break;
+        out.push_back(arr.substr(open_brace, close_brace - open_brace + 1));
+        p = close_brace + 1;
+    }
+    return out;
+}
+
+int writeRoleFromPolicy(const std::string& policy, bool readonly, bool locked) {
+    if (readonly || locked) return 1;
+    if (policy == "admin_only" || policy == "readonly" || policy == "locked") return 1;
+    return 0;
+}
 }
 
 void fetchOfficialChannels(HWND notify) {
@@ -3032,32 +3456,106 @@ void fetchOfficialChannels(HWND notify) {
     auto* a = new OfficialArg{ notify };
     CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
         std::unique_ptr<OfficialArg> a((OfficialArg*)lp);
-        std::string path = "/api/chat/official?session_token=" + g_session_token;
-        std::wstring wpath(path.begin(), path.end());
-        auto resp = net::request(L"GET", wpath.c_str(), {}, L"");
-        if (!resp.ok()) return 0;
-        // 简易解析 [{"id":"...","slug":"...","title":"...","group_label":"...","write_role":"..."}]
-        std::vector<std::pair<std::wstring, std::string>> tmp;
-        size_t p = 0;
-        while (true) {
-            auto open_brace = resp.body.find('{', p);
-            if (open_brace == std::string::npos) break;
-            auto close_brace = net::findJsonObjectEnd(resp.body, open_brace);
-            if (close_brace == std::string::npos) break;
-            std::string obj = resp.body.substr(open_brace, close_brace - open_brace + 1);
-            std::string id = net::jsonStr(obj, "id");
-            std::string slug = net::jsonStr(obj, "slug");
-            if (!id.empty() && !slug.empty()) {
-                int n = MultiByteToWideChar(CP_UTF8, 0, slug.c_str(), -1, nullptr, 0);
-                std::wstring wslug(n > 0 ? n - 1 : 0, 0);
-                if (n > 0) MultiByteToWideChar(CP_UTF8, 0, slug.c_str(), -1, wslug.data(), n);
-                tmp.emplace_back(std::move(wslug), id);
+        std::vector<PendingOfficialChannel> tmp;
+        std::vector<AnnouncementItem> anns;
+        std::wstring me_role;
+        bool me_admin = false;
+        int me_level = 1;
+        bool replace = false;
+        {
+            std::string path = "/api/community/bootstrap?session_token=" + g_session_token;
+            std::wstring wpath(path.begin(), path.end());
+            auto resp = net::request(L"GET", wpath.c_str(), {}, L"");
+            if (resp.ok()) {
+                std::string me = net::jsonRaw(resp.body, "me");
+                if (!me.empty()) {
+                    me_role = utf8wHist(net::jsonStr(me, "role"));
+                    me_admin = net::jsonRaw(me, "is_admin") == "true";
+                    me_level = (int)net::jsonInt(me, "level");
+                    if (me_level < 1) me_level = 1;
+                }
+                std::string channels = net::jsonRaw(resp.body, "channels");
+                for (const auto& obj : jsonObjectsInArray(channels)) {
+                    std::string id = net::jsonStr(obj, "id");
+                    std::string slug = net::jsonStr(obj, "slug");
+                    if (id.empty() || slug.empty()) continue;
+                    std::string title = net::jsonStr(obj, "title");
+                    std::string area_name = net::jsonStr(obj, "area_name");
+                    std::string area_slug = net::jsonStr(obj, "area_slug");
+                    std::string policy = net::jsonStr(obj, "write_policy");
+                    bool readonly = net::jsonRaw(obj, "is_readonly") == "true";
+                    bool locked = net::jsonRaw(obj, "is_locked") == "true";
+                    int min_level = (int)net::jsonInt(obj, "min_level");
+                    int slowmode_seconds = (int)net::jsonInt(obj, "slowmode_seconds");
+                    bool requires_subscription = net::jsonRaw(obj, "requires_subscription") == "true";
+                    PendingOfficialChannel ch;
+                    ch.slug = utf8wHist(slug);
+                    ch.name = utf8wHist(title.empty() ? slug : title);
+                    ch.group = utf8wHist(area_name.empty() ? area_slug : area_name);
+                    if (ch.group.empty()) ch.group = L"GENERAL";
+                    ch.id = id;
+                    ch.is_market = slug == "market" || area_slug == "shop";
+                    ch.write_role = writeRoleFromPolicy(policy, readonly, locked);
+                    ch.write_policy = policy;
+                    ch.allowed_role = net::jsonStr(obj, "allowed_role");
+                    ch.min_level = min_level > 0 ? min_level : 1;
+                    ch.slowmode_seconds = slowmode_seconds > 0 ? slowmode_seconds : 0;
+                    ch.requires_subscription = requires_subscription;
+                    ch.is_readonly = readonly;
+                    ch.is_locked = locked;
+                    tmp.push_back(std::move(ch));
+                }
+                std::string announcements = net::jsonRaw(resp.body, "announcements");
+                for (const auto& obj : jsonObjectsInArray(announcements)) {
+                    AnnouncementItem a;
+                    a.id = net::jsonStr(obj, "id");
+                    if (a.id.empty()) continue;
+                    a.title = utf8wHist(net::jsonStr(obj, "title"));
+                    a.body = utf8wHist(net::jsonStr(obj, "body"));
+                    a.severity = net::jsonStr(obj, "severity");
+                    a.force_popup = net::jsonRaw(obj, "force_popup") == "true";
+                    a.red_dot = net::jsonRaw(obj, "red_dot") == "true";
+                    a.unread = net::jsonRaw(obj, "unread") == "true";
+                    a.acknowledged = net::jsonRaw(obj, "acknowledged_at") != "null"
+                        && !net::jsonRaw(obj, "acknowledged_at").empty();
+                    anns.push_back(std::move(a));
+                }
+                bool notice = false;
+                for (const auto& a : anns) {
+                    if (a.red_dot && a.unread) {
+                        notice = true;
+                        break;
+                    }
+                }
+                for (auto& ch : tmp) {
+                    if (ch.slug == L"announcements") ch.notice = notice;
+                }
+                replace = !tmp.empty();
             }
-            p = close_brace + 1;
+        }
+        if (!replace) {
+            std::string path = "/api/chat/official?session_token=" + g_session_token;
+            std::wstring wpath(path.begin(), path.end());
+            auto resp = net::request(L"GET", wpath.c_str(), {}, L"");
+            if (!resp.ok()) return 0;
+            for (const auto& obj : jsonObjectsInArray(resp.body)) {
+                std::string id = net::jsonStr(obj, "id");
+                std::string slug = net::jsonStr(obj, "slug");
+                if (id.empty() || slug.empty()) continue;
+                PendingOfficialChannel ch;
+                ch.slug = utf8wHist(slug);
+                ch.id = id;
+                tmp.push_back(std::move(ch));
+            }
         }
         {
             std::lock_guard<std::mutex> lk(g_official_mtx);
             g_pending_official = std::move(tmp);
+            g_pending_official_replace = replace;
+            g_pending_announcements = std::move(anns);
+            g_pending_me_role = std::move(me_role);
+            g_pending_me_admin = me_admin;
+            g_pending_me_level = me_level;
         }
         PostMessageW(a->h, WM_APP + 5, 0, 0);
         return 0;
@@ -3067,12 +3565,77 @@ void fetchOfficialChannels(HWND notify) {
 // 由 main thread WM_APP+5 调用
 void applyOfficialResult() {
     std::lock_guard<std::mutex> lk(g_official_mtx);
-    for (auto& [slug, id] : g_pending_official) {
+    if (!g_pending_me_role.empty() || g_pending_official_replace) {
+        g_bootstrap_role = g_pending_me_role;
+        g_bootstrap_is_admin = g_pending_me_admin;
+        g_user.level = g_pending_me_level;
+    }
+    if (g_pending_official_replace && !g_pending_official.empty()) {
+        g_channel_string_pool.clear();
+        g_channel_string_pool.reserve(g_pending_official.size() * 3);
+        std::vector<Channel> next;
+        next.reserve(g_pending_official.size());
+        for (auto& p : g_pending_official) {
+            g_channel_string_pool.push_back(p.slug);
+            const wchar_t* slug = g_channel_string_pool.back().c_str();
+            g_channel_string_pool.push_back(p.name.empty() ? p.slug : p.name);
+            const wchar_t* name = g_channel_string_pool.back().c_str();
+            g_channel_string_pool.push_back(p.group.empty() ? L"GENERAL" : p.group);
+            const wchar_t* group = g_channel_string_pool.back().c_str();
+            next.push_back(Channel{ slug, name, group, p.is_market, p.id, p.write_role, p.notice,
+                                    p.write_policy, p.allowed_role, p.min_level, p.slowmode_seconds,
+                                    p.requires_subscription, p.is_readonly, p.is_locked });
+        }
+        g_channels = std::move(next);
+        bool active_ok = false;
         for (auto& c : g_channels) {
-            if (slug == c.slug) { c.id = id; break; }
+            if (g_active == c.slug) { active_ok = true; break; }
+        }
+        if (!active_ok && !g_channels.empty()) {
+            for (auto& c : g_channels) {
+                if (wcscmp(c.slug, L"general") == 0) {
+                    g_active = c.slug;
+                    active_ok = true;
+                    break;
+                }
+            }
+            if (!active_ok) g_active = g_channels.front().slug;
+        }
+    } else {
+        for (auto& pending : g_pending_official) {
+            for (auto& c : g_channels) {
+                if (pending.slug == c.slug) { c.id = pending.id; break; }
+            }
         }
     }
+    if (g_pending_official_replace) {
+        AnnouncementItem popup;
+        bool have_popup = false;
+        {
+            std::lock_guard<std::mutex> alk(g_announcements_mtx);
+            g_announcements = std::move(g_pending_announcements);
+            g_announcements_stream_dirty = true;
+            for (const auto& a : g_announcements) {
+                if (a.force_popup && a.unread && !a.acknowledged) {
+                    popup = a;
+                    have_popup = true;
+                    break;
+                }
+            }
+        }
+        if (have_popup) {
+            g_popup_announcement = std::move(popup);
+            g_popup_open = true;
+            g_popup_t.start(g_popup_t.value(), 1.0f, 0.18f, 0, curve::easeOutCubic);
+        }
+        if (g_active == L"announcements") rebuildAnnouncementStream();
+        syncAnnouncementNoticeOnChannels();
+    }
     g_pending_official.clear();
+    g_pending_announcements.clear();
+    g_pending_me_role.clear();
+    g_pending_me_admin = false;
+    g_pending_official_replace = false;
 }
 
 }  // namespace launcher::d2d::chat

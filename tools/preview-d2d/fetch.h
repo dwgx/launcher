@@ -105,7 +105,10 @@ void geoIP(HWND notify);
 // 异步线程，完成后 PostMessage WM_APP+54 让 main 把结果写回 g_user / g_status
 struct MyProfileSnapshot {
     std::wstring nickname, uid, username, status, status_text, bio, role, role_label;
+    std::wstring tier;
+    int64_t tier_expires_at = 0;
     bool is_admin = false;
+    bool subscribed = false;
     bool loaded = false;
 };
 extern MyProfileSnapshot g_pending_my_profile;
