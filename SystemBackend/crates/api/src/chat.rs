@@ -13,9 +13,7 @@ use sqlx::{postgres::PgRow, Row};
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 async fn can_access_chat(
     state: &AppState,

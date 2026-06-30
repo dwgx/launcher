@@ -28,9 +28,7 @@ fn max_bytes_for(state: &AppState, category: &str) -> u64 {
     }
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 pub async fn auth_user(state: &AppState, token: &str) -> Result<Uuid, (StatusCode, String)> {
     sqlx::query_scalar!(

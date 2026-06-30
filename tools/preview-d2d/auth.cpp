@@ -14,6 +14,8 @@
 #include "user_state.h"
 #include "hwid.h"
 #include "persist.h"
+#include "i18n.h"
+#include "chat.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -32,22 +34,8 @@ namespace launcher::d2d::auth {
 
 Form g_form;
 
-// hardcode 中文文案 — i18n 全套留 Step 8 Settings 时一起做
+// UI 文案走 i18n（tr/trW），随系统/用户语言切换
 namespace {
-const wchar_t* kTitleLogin = L"登录";
-const wchar_t* kTitleReg   = L"注册";
-const wchar_t* kSubLogin   = L"欢迎回来";
-const wchar_t* kSubReg     = L"邀请码注册";
-const wchar_t* kPhUser     = L"用户名";
-const wchar_t* kPhPass     = L"密码";
-const wchar_t* kPhInvite   = L"邀请码";
-const wchar_t* kBtnLogin   = L"登录";
-const wchar_t* kBtnReg     = L"注册";
-const wchar_t* kBtnBusy    = L"处理中…";
-const wchar_t* kSwitchToReg   = L"还没账号？";
-const wchar_t* kSwitchToLogin = L"已经有账号？";
-const wchar_t* kSwitchGoReg   = L"立即注册";
-const wchar_t* kSwitchGoLogin = L"立即登录";
 
 // 测文字 DIP 宽度
 float measureW(D2DApp& app, std::wstring_view s, IDWriteTextFormat* fmt) {
@@ -200,25 +188,28 @@ void paintAuthView(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(16.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-    prim::drawText_(ctx, reg ? kTitleReg : kTitleLogin, h1,
+    prim::drawText_(ctx, reg ? trW("auth.register.title") : trW("auth.login.title"), h1,
                     lx + lr * 2 + 10, cy + 28, 220, 26,
                     br.solidA(pal.text, op));
-    prim::drawText_(ctx, reg ? kSubReg : kSubLogin, sub,
+    prim::drawText_(ctx, reg ? trW("auth.register.sub") : trW("auth.login.sub"), sub,
                     cx + 30, cy + 60, 320, 18,
                     br.solidA(pal.text_muted, op));
 
     // ===== Fields =====
     float fy = cy + 90;
+    std::wstring ph_user = trW("auth.username");
     drawField(app, g_form.username, cx + 30, fy, cw - 60, 48,
-              kPhUser, 0, op);
+              ph_user.c_str(), 0, op);
     fy += 62;
     g_form.password.password = true;
+    std::wstring ph_pass = trW("auth.password");
     drawField(app, g_form.password, cx + 30, fy, cw - 60, 48,
-              kPhPass, 1, op);
+              ph_pass.c_str(), 1, op);
     fy += 62;
     if (reg) {
+        std::wstring ph_invite = trW("auth.invite");
         drawField(app, g_form.invite, cx + 30, fy, cw - 60, 48,
-                  kPhInvite, 2, op);
+                  ph_invite.c_str(), 2, op);
         fy += 62;
     }
 
@@ -241,9 +232,9 @@ void paintAuthView(D2DApp& app, float W, float H) {
                  br.solidA(btn_rgb, op));
     auto* btn_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
                                        DWRITE_FONT_WEIGHT_BOLD);
-    const wchar_t* btn_label = g_form.busy
-        ? kBtnBusy
-        : (reg ? kBtnReg : kBtnLogin);
+    std::wstring btn_label = g_form.busy
+        ? trW("auth.busy")
+        : (reg ? trW("auth.register") : trW("auth.login"));
     prim::drawText_(ctx, btn_label, btn_fmt,
                     btn.x, btn.y + lift, btn.w, btn.h,
                     br.solidA(0xFFFFFF, op),
@@ -268,15 +259,18 @@ void paintAuthView(D2DApp& app, float W, float H) {
     auto* link_normal = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     auto* link_bold   = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
                                            DWRITE_FONT_WEIGHT_BOLD);
-    const wchar_t* prompt = reg ? kSwitchToLogin : kSwitchToReg;
-    const wchar_t* link_label = reg ? kSwitchGoLogin : kSwitchGoReg;
+    std::wstring prompt = reg ? trW("auth.to_login") : trW("auth.to_register");
+    std::wstring link_label = reg ? trW("auth.go_login") : trW("auth.go_register");
     float link_y = btn.y + btn.h + 16.0f
                  + (g_form.error_msg.empty() ? 0.0f : 32.0f);
-    prim::drawText_(ctx, prompt, link_normal,
-                    cx + 30, link_y, 160, 18,
+    // prompt 宽度按文案实测，link 紧跟其后（日文「既にアカウントがある？」比中英长，
+    // 固定 +130 偏移会与 link 重叠）。
+    float prompt_w = measureW(app, prompt, link_normal);
+    prim::drawTextNoWrap(ctx, prompt, link_normal,
+                    cx + 30, link_y, prompt_w + 4.0f, 18,
                     br.solidA(pal.text_muted, op));
     float link_w = measureW(app, link_label, link_bold) + 6.0f;
-    LayoutRect link{ cx + 30 + 130, link_y, link_w, 18 };
+    LayoutRect link{ cx + 30 + prompt_w + 8.0f, link_y, link_w, 18 };
     bool lhov = link.contains(g_mouse);
     prim::drawText_(ctx, link_label, link_bold,
                     link.x, link.y + 1, link.w, 18,
@@ -318,7 +312,7 @@ void paintAuthView(D2DApp& app, float W, float H) {
             float a = (ct - 0.6f) / 0.4f;
             auto* ok_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(12.0f),
                                               DWRITE_FONT_WEIGHT_BOLD);
-            prim::drawText_(ctx, L"登录成功", ok_fmt,
+            prim::drawText_(ctx, trW("auth.login_ok"), ok_fmt,
                             cx, ccy + 36, cw, 22,
                             br.solidA(pal.text, a),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -349,6 +343,7 @@ std::wstring g_pending_user_id;
 std::wstring g_pending_uid;
 std::wstring g_pending_nick;
 std::wstring g_pending_error;
+bool g_pending_hwid_ok = true;
 
 std::wstring utf8ToW(const std::string& s) {
     if (s.empty()) return {};
@@ -371,11 +366,11 @@ std::string wToUtf8(const std::wstring& w) {
 void handleSubmit(HWND hwnd) {
     if (g_form.busy) return;
     if (g_form.username.text.empty() || g_form.password.text.empty()) {
-        g_form.error_msg = L"用户名 / 密码不能为空";
+        g_form.error_msg = trW("auth.empty");
         return;
     }
     if (stages::g_auth_mode == AuthMode::Register && g_form.invite.text.empty()) {
-        g_form.error_msg = L"邀请码不能为空";
+        g_form.error_msg = trW("auth.empty_invite");
         return;
     }
     g_form.error_msg.clear();
@@ -418,6 +413,8 @@ void handleSubmit(HWND hwnd) {
                 g_pending_user_id       = utf8ToW(net::jsonStr(resp.body, "user_id"));
                 g_pending_uid           = utf8ToW(net::jsonStr(resp.body, "uid"));
                 g_pending_nick          = utf8ToW(net::jsonStr(resp.body, "nickname"));
+                // hwid_ok=false → 换机登录，功能受限（仅可发工单/重绑）。缺省视为 true。
+                g_pending_hwid_ok       = net::jsonRaw(resp.body, "hwid_ok") != "false";
                 g_pending_error.clear();
                 // DPAPI 加密保存凭据，下次自动登录用
                 persist::saveCreds(a->user, a->pass);
@@ -425,8 +422,8 @@ void handleSubmit(HWND hwnd) {
                 // 把 body 直接当错误消息（GDI+ Preview 同款做法），更接近后端真实错误
                 std::string msg = resp.body;
                 if (msg.empty()) {
-                    msg = (resp.status == 0) ? "无法连接服务器（154.40.36.22:1337）"
-                                              : "登录失败";
+                    msg = (resp.status == 0) ? tr("auth.err_no_server")
+                                              : tr("auth.err_login_fail");
                 }
                 if (msg.size() > 80) msg = msg.substr(0, 80);
                 g_pending_error = utf8ToW(msg);
@@ -443,13 +440,17 @@ void onSubmitResult(HWND /*hwnd*/, bool success) {
     if (success) {
         g_session_token = wToUtf8(g_pending_session_token);
         g_user_id       = wToUtf8(g_pending_user_id);
+        // 切换账号：清掉上一个账号残留的消息缓存，避免它们在新账号下
+        // 仍被当成"自己"而全部右对齐。必须在 g_user_id 更新之后调用。
+        chat::resetForAccount();
         if (!g_pending_uid.empty())  g_user.uid       = g_pending_uid;
         if (!g_pending_nick.empty()) g_user.nickname  = g_pending_nick;
         g_user.username  = g_form.username.text;
+        g_user.hwid_ok   = g_pending_hwid_ok;
         g_form.error_msg.clear();
         stages::simulateAuthSubmit();
     } else {
-        g_form.error_msg = g_pending_error.empty() ? L"登录失败" : g_pending_error;
+        g_form.error_msg = g_pending_error.empty() ? trW("auth.err_login_fail") : g_pending_error;
     }
 }
 

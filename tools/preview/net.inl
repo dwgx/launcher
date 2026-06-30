@@ -1,5 +1,5 @@
 // WinHTTP 客户端 — POST JSON / GET / multipart upload / TLS skip-verify (LE IP cert).
-// 后端 https://154.40.36.22:1337 用 LE IP 证书，但客户端有时拒，直接 SECURITY_FLAG_IGNORE_*
+// 后端用 LE IP 证书，但客户端有时拒，直接 SECURITY_FLAG_IGNORE_*
 // （不是 prod 加固方案；prod 改成 pinning 公钥 hash）
 #pragma once
 
@@ -7,7 +7,10 @@
 
 namespace net {
 
-constexpr const wchar_t* kHost = L"154.40.36.22";
+#ifndef LAUNCHER_DEFAULT_HOST
+#define LAUNCHER_DEFAULT_HOST L"127.0.0.1"
+#endif
+constexpr const wchar_t* kHost = LAUNCHER_DEFAULT_HOST;
 constexpr INTERNET_PORT kPort = 1337;
 constexpr const wchar_t* kUserAgent = L"Launcher/0.1";
 

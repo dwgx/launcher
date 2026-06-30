@@ -2,6 +2,7 @@
 #include "palette.h"
 #include "render/primitives.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace launcher::d2d::toast {
@@ -35,17 +36,21 @@ void paint(D2DApp& app, float W, float H) {
     float t = g_toast.t.value();
 
     auto* fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    // 先按窗口宽算出可用上限，再在该上限内测量 — 否则长文案（中/日/带计数）
+    // 会让 tw 超过窗口宽，tx 变负把左侧文字推出屏幕外。
+    float max_tw = (std::min)(W - 48.0f, 520.0f);
+    if (max_tw < 120.0f) max_tw = 120.0f;
     DWRITE_TEXT_METRICS m{};
-    app.texts().measure(fmt, g_toast.text, 8192, 256, &m);
-    float tw = m.width + 36.0f;
+    app.texts().measure(fmt, g_toast.text, max_tw - 36.0f, 256, &m);
+    float tw = (std::min)(m.width + 36.0f, max_tw);
     float th = 36.0f;
-    float tx = W - tw - 24.0f;
+    float tx = (std::max)(8.0f, W - tw - 24.0f);
     float ty = H - th - 24.0f - 8.0f * (1.0f - t);
 
     prim::drawShadow(ctx, br, tx, ty, tw, th, 8.0f, 0x99000000, t, 4.0f, 3);
     prim::fillRR(ctx, tx, ty, tw, th, 8.0f, br.solidA(pal.card, t * 0.96f));
     prim::strokeRR(ctx, tx, ty, tw, th, 8.0f, br.solidA(pal.divider, t));
-    prim::drawText_(ctx, g_toast.text, fmt,
+    prim::drawTextNoWrap(ctx, g_toast.text, fmt,
                     tx + 18, ty + 11, tw - 36, 18,
                     br.solidA(pal.text, t),
                     DWRITE_TEXT_ALIGNMENT_LEADING,

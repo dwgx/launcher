@@ -1,8 +1,8 @@
 @echo off
 setlocal
 set "VCVARS="
-if exist "D:\Software\MS\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    set "VCVARS=D:\Software\MS\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+if exist "D:\Software\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VCVARS=D:\Software\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
 )
 if not defined VCVARS if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" (
     for /f "usebackq tokens=*" %%I in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
@@ -23,10 +23,19 @@ call "%VCVARS%" >nul
 if errorlevel 1 (echo vcvars failed: "%VCVARS%" & exit /b 1)
 pushd "%~dp0"
 
-cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE ^
+rem 生产 host 通过环境变量注入，不写死进源码（脱敏）。
+rem 发布前：set LAUNCHER_DEFAULT_HOST=your.prod.host
+rem 未设置时回退到 net.h 内的 127.0.0.1 默认值。
+set "HOST_DEF="
+if defined LAUNCHER_DEFAULT_HOST set "HOST_DEF=/DLAUNCHER_DEFAULT_HOST=L\"%LAUNCHER_DEFAULT_HOST%\""
+rem scheme: 设 LAUNCHER_DEFAULT_SCHEME=http 走明文（默认 https）。
+if /I "%LAUNCHER_DEFAULT_SCHEME%"=="http" set "HOST_DEF=%HOST_DEF% /DLAUNCHER_DEFAULT_SECURE=0"
+if defined LAUNCHER_DEFAULT_PORT set "HOST_DEF=%HOST_DEF% /DLAUNCHER_DEFAULT_PORT=%LAUNCHER_DEFAULT_PORT%"
+
+cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE %HOST_DEF% ^
    /I. /I..\..\third_party\webview2\build\native\include ^
    d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp ^
-   chat.cpp modals.cpp persist.cpp toast.cpp i18n.cpp fetch.cpp ws_user.cpp ^
+   chat.cpp chat_state.cpp chat_announcements.cpp chat_identity.cpp chat_net.cpp chat_paint.cpp modals.cpp persist.cpp toast.cpp i18n.cpp fetch.cpp ws_user.cpp ^
    tray.cpp sticker.cpp webview.cpp main.cpp /link ^
    /SUBSYSTEM:WINDOWS /OUT:LauncherD2D.exe
 set RC=%ERRORLEVEL%

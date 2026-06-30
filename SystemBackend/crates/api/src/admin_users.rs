@@ -22,9 +22,7 @@ pub struct AdminAuth {
     pub key: Option<String>,
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 // ---------------- JSON API ----------------
 #[derive(Serialize)]
@@ -133,6 +131,7 @@ pub async fn patch_user(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.patch_user', $2, NULL)",
         &actor.name, id.to_string())
         .execute(&s.db).await.ok();
+    crate::audit::event(&actor.name, "admin.patch_user", &id.to_string());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -179,6 +178,7 @@ pub async fn admin_reset_password(
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'admin.reset_password', $2, NULL)",
         &actor.name, id.to_string()).execute(&s.db).await.ok();
+    crate::audit::event(&actor.name, "admin.reset_password", &id.to_string());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -193,6 +193,9 @@ pub struct UserVm {
     pub invite_code: String,
     pub role: String,
     pub role_label: String, // 0009 加的字段
+    pub hwid_bound: bool,    // 是否已绑定 HWID
+    pub hwid_fp: String,     // 最近一次登录的 HWID 指纹（hex 前 16 位），未知显 —
+    pub hwid_changed: String, // hwid_last_changed_at，未变显 —
 }
 pub struct RoleVm {
     pub role: String,
@@ -209,13 +212,20 @@ pub struct UsersPage {
     pub route: &'static str,
     pub users: Vec<UserVm>,
     pub roles: Vec<RoleVm>,
+    pub search: String,    // 回显搜索框，无则空串
+    pub page: i64,         // 当前页（从 1 开始）
+    pub total_pages: i64,  // 总页数（至少 1）
+    pub total: i64,        // 匹配的用户总数
 }
 
 #[derive(Deserialize, Default)]
 pub struct UsersNoticeQuery {
     pub reset: Option<String>,
     pub delete: Option<String>,
+    pub hwid: Option<String>,
     pub err: Option<String>,
+    pub q: Option<String>,     // 搜索词（UID / 用户名 / 昵称）
+    pub page: Option<i64>,     // 页码，从 1 开始
 }
 
 fn users_notice(q: &UsersNoticeQuery) -> Option<ui::AdminNotice> {
@@ -231,6 +241,9 @@ fn users_notice(q: &UsersNoticeQuery) -> Option<ui::AdminNotice> {
             Some(ui::AdminNotice::warning("删除确认用户名不一致，操作已取消"))
         }
         (_, _, Some("delete_failed")) => Some(ui::AdminNotice::error("删除失败，请查看服务日志")),
+        _ if q.hwid.as_deref() == Some("ok") => {
+            Some(ui::AdminNotice::success("HWID 已重置，该用户下次登录将自动绑定新机器"))
+        }
         _ => None,
     }
 }
@@ -246,9 +259,47 @@ async fn users_page(
         return resp;
     }
 
+    // 搜索词：trim 后为空当 None，避免无意义过滤
+    let search: Option<String> = q
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    const PER_PAGE: i64 = 50;
+    // 总数（同样的 WHERE 条件），用于算总页数
+    let total: i64 = sqlx::query!(
+        r#"SELECT COUNT(*) AS "count!" FROM users u
+           WHERE ($1::text IS NULL
+                  OR u.username ILIKE '%'||$1||'%'
+                  OR u.nickname ILIKE '%'||$1||'%'
+                  OR u.uid ILIKE '%'||$1||'%')"#,
+        search.as_deref())
+        .fetch_one(&s.db)
+        .await
+        .map(|r| r.count)
+        .unwrap_or(0);
+
+    let total_pages = if total <= 0 { 1 } else { (total + PER_PAGE - 1) / PER_PAGE };
+    // page 边界保护：>=1 且 <= total_pages
+    let page = q.page.unwrap_or(1).max(1).min(total_pages);
+    let offset = (page - 1) * PER_PAGE;
+
     let rows = sqlx::query!(
-        r#"SELECT id, uid, username, nickname, subscription_tier, created_at, invite_code_used, role, role_label
-           FROM users ORDER BY created_at DESC LIMIT 200"#)
+        r#"SELECT u.id, u.uid, u.username, u.nickname, u.subscription_tier, u.created_at,
+                  u.invite_code_used, u.role, u.role_label,
+                  u.hwid_bound, u.hwid_last_changed_at,
+                  (SELECT lh.hwid_short FROM login_history lh
+                     WHERE lh.user_id = u.id AND lh.success = true
+                     ORDER BY lh.occurred_at DESC LIMIT 1) AS hwid_fp
+           FROM users u
+           WHERE ($1::text IS NULL
+                  OR u.username ILIKE '%'||$1||'%'
+                  OR u.nickname ILIKE '%'||$1||'%'
+                  OR u.uid ILIKE '%'||$1||'%')
+           ORDER BY u.created_at DESC LIMIT $2 OFFSET $3"#,
+        search.as_deref(), PER_PAGE, offset)
         .fetch_all(&s.db).await.unwrap_or_default();
     let users = rows
         .into_iter()
@@ -262,6 +313,12 @@ async fn users_page(
             invite_code: r.invite_code_used.unwrap_or("—".into()),
             role: r.role,
             role_label: r.role_label.unwrap_or("—".into()),
+            hwid_bound: r.hwid_bound.is_some(),
+            hwid_fp: r.hwid_fp.unwrap_or("—".into()),
+            hwid_changed: r
+                .hwid_last_changed_at
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or("—".into()),
         })
         .collect();
     let role_rows =
@@ -284,6 +341,10 @@ async fn users_page(
         route: ui::ROUTE_USERS,
         users,
         roles,
+        search: search.unwrap_or_default(),
+        page,
+        total_pages,
+        total,
     })
     .into_response()
 }
@@ -335,6 +396,7 @@ async fn user_edit_submit(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.edit_user',$2,NULL)",
         &actor.name, id.to_string()).execute(&s.db).await;
+    crate::audit::event(&actor.name, "admin.edit_user", &id.to_string());
     Redirect::to("/admin/users").into_response()
 }
 
@@ -380,7 +442,34 @@ async fn user_reset_pw_form(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.reset_password_form',$2,NULL)",
         &actor.name, id.to_string()).execute(&s.db).await;
+    crate::audit::event(&actor.name, "admin.reset_password_form", &id.to_string());
     Redirect::to("/admin/users?reset=ok").into_response()
+}
+
+// SSR 重置 HWID：把 hwid_bound 置空，下次任意机器登录自动重绑。
+// 用于用户换硬件/重装后管理员手动放行（不走 rebind 审批流时的快捷操作）。
+async fn user_reset_hwid_form(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let actor =
+        match crate::admin_customization::require_actor(&headers, &s, "admin.users.manage").await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    let _ = sqlx::query!(
+        "UPDATE users SET hwid_bound = NULL, hwid_last_changed_at = now() WHERE id = $1",
+        id
+    )
+    .execute(&s.db)
+    .await;
+    let _ = sqlx::query!(
+        "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'admin.reset_hwid',$2,NULL)",
+        &actor.name, id.to_string()).execute(&s.db).await;
+    crate::audit::event(&actor.name, "admin.reset_hwid", &id.to_string());
+    Redirect::to("/admin/users?hwid=ok").into_response()
 }
 
 // =====================================================================
@@ -460,6 +549,7 @@ async fn user_delete_submit(
         tracing::error!("delete user failed: {}", e);
         return Redirect::to("/admin/users?err=delete_failed").into_response();
     }
+    crate::audit::event(&actor.name, "admin.delete_user", &id.to_string());
     Redirect::to("/admin/users?delete=ok").into_response()
 }
 
@@ -468,6 +558,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/users", get(users_page))
         .route("/admin/users/:id/edit", post(user_edit_submit))
         .route("/admin/users/:id/reset-pw", post(user_reset_pw_form))
+        .route("/admin/users/:id/reset-hwid", post(user_reset_hwid_form))
         .route("/admin/users/:id/delete", post(user_delete_submit))
         .route("/api/admin/users", get(list_users))
         .route("/api/admin/users/:id", post(patch_user))

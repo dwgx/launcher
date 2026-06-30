@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 // ---------- 创建 sticker（基于已上传的 media） ----------
 #[derive(Deserialize)]
@@ -625,7 +623,7 @@ pub async fn delete_pack(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
     let pack = sqlx::query!(
-        "SELECT creator_id FROM sticker_packs WHERE id = $1",
+        "SELECT creator_id, name FROM sticker_packs WHERE id = $1",
         req.pack_id
     )
     .fetch_optional(&s.db)
@@ -634,6 +632,10 @@ pub async fn delete_pack(
     .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
     if pack.creator_id != Some(me) {
         return Err((StatusCode::FORBIDDEN, "not your pack".into()));
+    }
+    // 「我的表情」是用户默认分组，不允许删除（与客户端约定的 canonical name）。
+    if pack.name == "我的表情" {
+        return Err((StatusCode::FORBIDDEN, "default pack cannot be deleted".into()));
     }
     // 先把这个 pack 里 user 创建的孤儿 stickers 也删掉（user 视图里"删除分组 = 云端也删"）
     sqlx::query!(
@@ -669,13 +671,60 @@ pub struct ShareResp {
     pub is_public: bool,
 }
 
+// pack_id 前 12 位 hex —— 全局唯一的 short_name 兜底（uuid 不会冲突）。
+fn uuid_short(pack_id: Uuid) -> String {
+    pack_id.simple().to_string()[..12].to_string()
+}
+
+// 判断 sqlx 错误是否为 Postgres 唯一约束冲突（SQLSTATE 23505）。
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .as_deref()
+        == Some("23505")
+}
+
+// 把账号昵称（或 username）转成 short_name 候选 slug（不保证唯一，冲突由调用方兜底）：
+//   - 取 nickname，回退 username，再回退 uuid 前缀
+//   - 仅保留 ASCII 字母数字（小写），其它（含中文/空格）转下划线
+//   - 截断到 32 字，去掉首尾下划线；为空则退回 uuid 前缀
+// 不再预查唯一性（那是 TOCTOU 竞态 + 多余往返）—— 由 share_pack 的 UPDATE 捕获冲突回退。
+async fn nickname_short_name(s: &Arc<AppState>, me: Uuid, pack_id: Uuid) -> String {
+    let row = sqlx::query!("SELECT nickname, username FROM users WHERE id = $1", me)
+        .fetch_optional(&s.db)
+        .await
+        .ok()
+        .flatten();
+    let base = match row.and_then(|r| r.nickname.filter(|n| !n.trim().is_empty()).or(r.username)) {
+        Some(b) => b,
+        None => return uuid_short(pack_id),
+    };
+    let mut slug: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    slug.truncate(32); // slug 此时全是单字节 ASCII，按字节截断安全
+    let slug = slug.trim_matches('_').to_string();
+    if slug.is_empty() {
+        uuid_short(pack_id)
+    } else {
+        slug
+    }
+}
+
 pub async fn share_pack(
     State(s): State<Arc<AppState>>,
     Json(req): Json<SharePackReq>,
 ) -> Result<Json<ShareResp>, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
     let pack = sqlx::query!(
-        r#"SELECT creator_id, short_name, cover_media_id
+        r#"SELECT creator_id, short_name, cover_media_id, name
            FROM sticker_packs WHERE id = $1"#,
         req.pack_id
     )
@@ -693,13 +742,17 @@ pub async fn share_pack(
             "non-owner can only share, not unshare".into(),
         ));
     }
-    // 已有 short_name 就复用；没有就生成（pack_id 取前 12 字 base32-friendly）
+    // short_name 选取规则：
+    //   1. 已有 short_name → 复用（链接稳定，不因再次分享而变）。
+    //   2. owner 分享自己的「我的表情」默认分组 → 用账号昵称作 short_name
+    //      （可读、与账号绑定，如 launcher://pack/dwgx）；落库冲突时回退 uuid 前缀。
+    //   3. 其它情况 → uuid 前 12 字。
     let short = match pack.short_name {
         Some(s) if !s.is_empty() => s,
-        _ => {
-            let raw = req.pack_id.simple().to_string();
-            raw[..12].to_string()
+        _ if is_owner && pack.name == "我的表情" => {
+            nickname_short_name(&s, me, req.pack_id).await
         }
+        _ => uuid_short(req.pack_id),
     };
     // 自动给 pack 设 cover：如果 owner 没设过，挑第一个 sticker 当封面（按 sort_order）
     if is_owner && pack.cover_media_id.is_none() {
@@ -724,16 +777,34 @@ pub async fn share_pack(
         }
     }
     // owner 才允许翻 is_public（非 owner 即使传 want_public=true 也只刷 short_name）
+    let mut short = short;
     if is_owner {
-        sqlx::query!(
+        let res = sqlx::query!(
             r#"UPDATE sticker_packs SET is_public = $1, short_name = $2 WHERE id = $3"#,
             want_public,
             short,
             req.pack_id
         )
         .execute(&s.db)
-        .await
-        .map_err(internal)?;
+        .await;
+        // short_name UNIQUE 冲突（别人已占用该昵称 slug）→ 回退到全局唯一的 uuid 前缀重试。
+        // 消除了原先「先 EXISTS 查、再写」的 TOCTOU 竞态。
+        if let Err(e) = res {
+            if is_unique_violation(&e) && short != uuid_short(req.pack_id) {
+                short = uuid_short(req.pack_id);
+                sqlx::query!(
+                    r#"UPDATE sticker_packs SET is_public = $1, short_name = $2 WHERE id = $3"#,
+                    want_public,
+                    short,
+                    req.pack_id
+                )
+                .execute(&s.db)
+                .await
+                .map_err(internal)?;
+            } else {
+                return Err(internal(e));
+            }
+        }
     } else {
         // 非 owner 只补 short_name（如果还没有的话）
         sqlx::query!(

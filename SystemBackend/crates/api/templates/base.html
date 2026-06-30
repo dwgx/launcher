@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · Launcher 后台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%231F1B17'/%3E%3Cpath%20d='M11%208h3.4v12.4H22V24H11z'%20fill='%23D97757'/%3E%3C/svg%3E">
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@4.7.2/dist/full.min.css" rel="stylesheet">
 <style>
@@ -38,7 +39,8 @@
     background: #1F1B17;
   }
   body {
-    font-family: 'Source Han Sans CN', 'BIZ UDPGothic', 'Segoe UI', system-ui, sans-serif;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system,
+                 'Source Han Sans CN', 'Microsoft YaHei UI', 'BIZ UDPGothic', sans-serif;
     background:
       radial-gradient(1200px 600px at 90% -10%, rgba(217,119,87,.06), transparent 60%),
       radial-gradient(800px 400px at -10% 110%, rgba(217,119,87,.04), transparent 50%),
@@ -68,9 +70,14 @@
     border-radius: var(--rounded-box);
     box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 8px 24px -16px rgba(0,0,0,.5);
   }
-  /* 表头单色淡橙 */
+  /* 表头单色淡橙 + 吸顶 */
   table thead th {
-    background: rgba(217,119,87,.14) !important;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    /* Why: 吸顶时下方内容会从半透明橙色背景透出，叠一层不透明暗底兜底防透字 */
+    background-color: #2a2420 !important;
+    background-image: linear-gradient(rgba(217,119,87,.14), rgba(217,119,87,.14)) !important;
     color: #F8EFE2 !important;
     font-weight: 600;
     border-bottom: 1px solid rgba(126, 108, 94, 0.75);
@@ -181,6 +188,23 @@
   .btn-primary:hover {
     background: linear-gradient(180deg, #E0846A, #D27050);
   }
+  /* 语义化危险/警告按钮：替代散落的内联 style="background:#B14444"，与 .badge-revoked/-expired 成体系 */
+  .btn-danger {
+    background: linear-gradient(180deg, #C24E4E, #B14444);
+    border: 1px solid hsl(0 48% 34%);
+    color: #fff;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: linear-gradient(180deg, #CE5959, #BE4E4E);
+  }
+  .btn-warning {
+    background: linear-gradient(180deg, #C89238, #B47533);
+    border: 1px solid hsl(33 56% 32%);
+    color: #fff;
+  }
+  .btn-warning:hover:not(:disabled) {
+    background: linear-gradient(180deg, #D29D43, #C0813E);
+  }
   .input, .select, .textarea {
     background: rgba(31, 27, 23, 0.92) !important;
     color: #F8EFE2 !important;
@@ -258,9 +282,59 @@
     height: 100%;
     cursor: default;
   }
+  /* 键盘焦点环：限定交互元素，避免覆盖 .input:focus 自定义阴影 */
+  a:focus-visible,
+  button:focus-visible,
+  [tabindex]:focus-visible,
+  .btn:focus-visible {
+    outline: 2px solid #D97757;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  /* 跳到主内容：默认视觉隐藏，键盘聚焦时移回左上角 */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: auto;
+    z-index: 2000;
+    padding: .6rem 1rem;
+    border-radius: .55rem;
+    background: #29231F;
+    color: #F8EFE2;
+    border: 1px solid #D97757;
+    box-shadow: 0 8px 24px -10px rgba(0,0,0,.6);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .skip-link:focus {
+    left: 1rem;
+    top: 1rem;
+  }
+  /* 行内小按钮最小触控高度：只设下限，不放大现有紧凑布局 */
+  .table .btn-xs,
+  .table .btn-sm {
+    min-height: 1.85rem;
+  }
+  /* 下拉菜单项触控下限 + 内边距，更好点选 */
+  .dropdown-content.menu li > a,
+  .dropdown-content.menu li > button {
+    min-height: 2.1rem;
+    padding-block: .35rem;
+    align-items: center;
+  }
+  /* 复选框：sm 太小不好点，统一到 1.15rem 并对齐文字 */
+  .checkbox.checkbox-sm {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+  .label.cursor-pointer {
+    padding-block: .35rem;
+  }
 </style>
 </head>
 <body class="min-h-screen">
+
+<a href="#main-content" class="skip-link">跳到主内容</a>
 
 <div class="drawer lg:drawer-open">
   <input id="drawer" type="checkbox" class="drawer-toggle">
@@ -268,7 +342,7 @@
   <div class="drawer-content flex flex-col">
     <header class="navbar bg-base-100 px-6 shrink-0">
       <div class="flex-none lg:hidden">
-        <label for="drawer" class="btn btn-square btn-ghost">
+        <label for="drawer" class="btn btn-square btn-ghost" aria-label="打开侧边菜单">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
                class="inline-block w-6 h-6 stroke-current"><path stroke-linecap="round"
                stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -288,7 +362,7 @@
       </div>
     </header>
 
-    <main class="flex-1 p-6 lg:p-8">
+    <main id="main-content" class="flex-1 p-6 lg:p-8">
       <div class="mb-6">
         <h1 class="text-3xl font-bold tracking-tight">{{ title }}</h1>
         {% if subtitle.is_some() %}
@@ -321,21 +395,21 @@
         </div>
       </div>
       <ul class="menu menu-md gap-0.5 [&_li>a]:rounded-lg [&_li>a]:py-2.5 [&_li>a]:px-3">
-        <li><a href="/admin"          class='{% if route == "dashboard" %}nav-active{% endif %}'><span class="opacity-80">▦</span> <span>仪表盘</span></a></li>
-        <li><a href="/admin/users"    class='{% if route == "users" %}nav-active{% endif %}'><span class="opacity-80">◐</span> <span>用户</span></a></li>
-        <li><a href="/admin/invites"  class='{% if route == "invites" %}nav-active{% endif %}'><span class="opacity-80">✦</span> <span>邀请码</span></a></li>
-        <li><a href="/admin/rebind"   class='{% if route == "rebind" %}nav-active{% endif %}'><span class="opacity-80">⟲</span> <span>HWID 重绑定</span></a></li>
-        <li><a href="/admin/channels" class='{% if route == "channels" %}nav-active{% endif %}'><span class="opacity-80">#</span> <span>频道管控</span></a></li>
-        <li><a href="/admin/chat"     class='{% if route == "chat" %}nav-active{% endif %}'><span class="opacity-80">▣</span> <span>聊天控制台</span></a></li>
-        <li><a href="/admin/tickets"  class='{% if route == "tickets" %}nav-active{% endif %}'><span class="opacity-80">!</span> <span>工单</span></a></li>
-        <li><a href="/admin/announcements" class='{% if route == "announcements" %}nav-active{% endif %}'><span class="opacity-80">*</span> <span>公告</span></a></li>
+        <li><a href="/admin"          class='{% if route == "dashboard" %}nav-active{% endif %}' {% if route == "dashboard" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">▦</span> <span>仪表盘</span></a></li>
+        <li><a href="/admin/users"    class='{% if route == "users" %}nav-active{% endif %}' {% if route == "users" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">◐</span> <span>用户</span></a></li>
+        <li><a href="/admin/invites"  class='{% if route == "invites" %}nav-active{% endif %}' {% if route == "invites" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">✦</span> <span>邀请码</span></a></li>
+        <li><a href="/admin/rebind"   class='{% if route == "rebind" %}nav-active{% endif %}' {% if route == "rebind" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">⟲</span> <span>HWID 重绑定</span></a></li>
+        <li><a href="/admin/channels" class='{% if route == "channels" %}nav-active{% endif %}' {% if route == "channels" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">#</span> <span>频道管控</span></a></li>
+        <li><a href="/admin/chat"     class='{% if route == "chat" %}nav-active{% endif %}' {% if route == "chat" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">▣</span> <span>聊天控制台</span></a></li>
+        <li><a href="/admin/tickets"  class='{% if route == "tickets" %}nav-active{% endif %}' {% if route == "tickets" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">!</span> <span>工单</span></a></li>
+        <li><a href="/admin/announcements" class='{% if route == "announcements" %}nav-active{% endif %}' {% if route == "announcements" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">*</span> <span>公告</span></a></li>
         <li class="menu-title mt-6 text-xs uppercase opacity-40 tracking-widest">运营配置</li>
-        <li><a href="/admin/config" class='{% if route == "config" %}nav-active{% endif %}'><span class="opacity-80">⚙</span> <span>配置中心</span></a></li>
-        <li><a href="/admin/operators" class='{% if route == "operators" %}nav-active{% endif %}'><span class="opacity-80">◇</span> <span>后台权限</span></a></li>
-        <li><a href="/admin/audit" class='{% if route == "audit" %}nav-active{% endif %}'><span class="opacity-80">⌁</span> <span>审计日志</span></a></li>
+        <li><a href="/admin/config" class='{% if route == "config" %}nav-active{% endif %}' {% if route == "config" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">⚙</span> <span>配置中心</span></a></li>
+        <li><a href="/admin/operators" class='{% if route == "operators" %}nav-active{% endif %}' {% if route == "operators" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">◇</span> <span>后台权限</span></a></li>
+        <li><a href="/admin/audit" class='{% if route == "audit" %}nav-active{% endif %}' {% if route == "audit" %}aria-current="page"{% endif %}><span class="opacity-80" aria-hidden="true">⌁</span> <span>审计日志</span></a></li>
         <li class="menu-title mt-6 text-xs uppercase opacity-40 tracking-widest">参考</li>
-        <li><a href="https://github.com/dwgx/launcher" target="_blank" class="opacity-70"><span>↗</span> <span>GitHub 仓库</span></a></li>
-        <li><a href="/admin/login" class="opacity-70"><span>⏻</span> <span>登录</span></a></li>
+        <li><a href="https://github.com/dwgx/launcher" target="_blank" class="opacity-70"><span aria-hidden="true">↗</span> <span>GitHub 仓库</span></a></li>
+        <li><a href="/admin/login" class="opacity-70"><span aria-hidden="true">⏻</span> <span>登录</span></a></li>
       </ul>
     </aside>
   </div>

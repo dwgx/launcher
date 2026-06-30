@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 // ---------- 分类 ----------
 #[derive(Serialize)]
@@ -499,5 +497,6 @@ pub async fn admin_grant_credit(
     .await
     .ok();
     tx.commit().await.map_err(internal)?;
+    crate::audit::event(&actor.name, "admin.grant_credit", &req.user_id.to_string());
     Ok(Json(serde_json::json!({"ok": true})))
 }

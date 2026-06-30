@@ -82,8 +82,8 @@ systemctl restart systembackend
 ```bash
 systemctl status systembackend --no-pager -l
 ss -tlnp | grep ':1337'
-curl -k -I https://154.40.36.22:1337/admin
-curl -k https://154.40.36.22:1337/api/market/categories
+curl -k -I https://<DEPLOY_HOST>:1337/admin
+curl -k https://<DEPLOY_HOST>:1337/api/market/categories
 journalctl -u systembackend --no-pager -n 60
 ```
 
@@ -143,11 +143,11 @@ git push origin master
 
 最近一次实测状态：
 
-- Debian 12 VPS: `154.40.36.22`
+- Debian 12 VPS: `<DEPLOY_HOST>`
 - service: `systembackend.service`
 - runtime dir: `/opt/systembackend`
 - source dir: `/opt/systembackend/build_src`
-- public API: `https://154.40.36.22:1337`
+- public API: `https://<DEPLOY_HOST>:1337`
 - TLS: 服务直接加载 `/opt/systembackend/certs/cert.pem` 和 `key.pem`
 
 这些是运行基线，不是凭据。实际数据库密码、admin 密码、证书私钥只保存在 VPS 本地。

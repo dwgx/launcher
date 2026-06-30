@@ -4,6 +4,7 @@
 #include "fetch.h"
 #include "net.h"
 #include "user_state.h"
+#include "i18n.h"
 
 #include <ShlObj.h>
 #include <memory>
@@ -14,10 +15,17 @@
 namespace launcher::d2d::sticker {
 
 std::vector<Pack> g_packs = {
-    { "", L"系统 emoji", {}, {}, {}, true,  false, false, L"", "", 0 },
-    { "", L"我的表情",   {}, {}, {}, false, false, true,  L"", "", 0 },
+    { "", kSysEmojiName,   {}, {}, {}, true,  false, false, L"", "", 0 },
+    { "", kMyStickersName, {}, {}, {}, false, false, true,  L"", "", 0 },
 };
 std::mutex g_packs_mtx;
+
+// 内置分组取译文，普通 pack 用真实 name（见 sticker.h 约定）。
+std::wstring packDisplayName(const Pack& p) {
+    if (p.is_system) return trW("pack.sys_emoji");
+    if (isMyStickersPack(p)) return trW("pack.my_stickers");
+    return p.name;
+}
 
 PackPreview g_pack_preview;
 std::mutex  g_pack_preview_mtx;
@@ -168,7 +176,7 @@ void fetchMyPacks(HWND notify) {
                     np.sticker_ids = std::move(it->second.sticker_ids);
                     np.items = std::move(it->second.items);
                 }
-                if (np.name == L"我的表情") found_mine = true;
+                if (isMyStickersPack(np)) found_mine = true;
                 merged.push_back(std::move(np));
             }
 
@@ -176,7 +184,7 @@ void fetchMyPacks(HWND notify) {
             // 会异步创建，下次 fetchMyPacks 就有了）。避免重复"我的表情"。
             if (!found_mine) {
                 for (auto& p : g_packs) {
-                    if (!p.is_system && p.name == L"我的表情" && p.id.empty()) {
+                    if (isMyStickersPack(p) && p.id.empty()) {
                         merged.insert(merged.begin() + 1, p);
                         break;
                     }
@@ -210,7 +218,7 @@ void fetchMyStickers(HWND notify) {
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& p : g_packs) {
-                if (p.name == L"我的表情") {
+                if (isMyStickersPack(p)) {
                     for (auto& item : downloaded) {
                         addItemToPack(p, std::move(item));
                     }
@@ -305,7 +313,8 @@ void exportPackToFolder(HWND notify, const std::string& pack_id) {
     // 先弹文件夹选择对话框
     BROWSEINFOW bi{};
     bi.hwndOwner = notify;
-    bi.lpszTitle = L"选择导出目标文件夹";
+    std::wstring title = trW("sticker.export_dialog_title");
+    bi.lpszTitle = title.c_str();
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return;
@@ -370,7 +379,7 @@ void previewPackByShort(HWND notify, const std::string& short_name) {
             {
             std::lock_guard<std::mutex> lk(g_pack_preview_mtx);
             if (g_pack_preview.short_name == a->sn) {
-            g_pack_preview.err = r.body.empty() ? "无法连接" : r.body.substr(0, 80);
+            g_pack_preview.err = r.body.empty() ? tr("auth.err_no_server") : r.body.substr(0, 80);
             g_pack_preview.loaded = true;
                 apply = true;
             }
@@ -555,7 +564,8 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
 void importFromFolderUi(HWND notify, const std::string& pack_id) {
     BROWSEINFOW bi{};
     bi.hwndOwner = notify;
-    bi.lpszTitle = L"选择含 .png/.jpg/.gif/.webp 的文件夹（批量导入到表情包）";
+    std::wstring title = trW("sticker.import_dialog_title");
+    bi.lpszTitle = title.c_str();
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return;
@@ -635,7 +645,7 @@ void ensureMyStickersPack(HWND notify) {
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (auto& p : g_packs) {
-            if (!p.is_system && p.name == L"我的表情" && !p.id.empty()) return;
+            if (isMyStickersPack(p) && !p.id.empty()) return;
         }
     }
     // 没找到带 id 的"我的表情" → 后端创建一个
@@ -645,14 +655,14 @@ void ensureMyStickersPack(HWND notify) {
         std::unique_ptr<A> a((A*)lp);
         if (g_session_token.empty()) return 0;
         std::string body = "{\"session_token\":\"" + g_session_token
-                         + "\",\"name\":\"" + net::jsonEscape(L"我的表情") + "\"}";
+                         + "\",\"name\":\"" + net::jsonEscape(kMyStickersName) + "\"}";
         auto r = net::postJson(L"/api/sticker/pack", body);
         if (r.ok()) {
             std::string id = net::jsonStr(r.body, "id");
             if (!id.empty()) {
                 std::lock_guard<std::mutex> lk(g_mtx);
                 for (auto& p : g_packs) {
-                    if (!p.is_system && p.name == L"我的表情") {
+                    if (isMyStickersPack(p)) {
                         p.id = id;
                         break;
                     }

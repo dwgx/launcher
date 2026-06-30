@@ -1,4 +1,5 @@
 #include "tray.h"
+#include "i18n.h"
 
 namespace launcher::d2d::tray {
 
@@ -25,9 +26,11 @@ void add(HWND hwnd) {
 
     if (!g_menu) {
         g_menu = CreatePopupMenu();
-        AppendMenuW(g_menu, MF_STRING, 1, L"显示主窗口");
+        std::wstring show_label = trW("tray.show");
+        std::wstring exit_label = trW("tray.exit");
+        AppendMenuW(g_menu, MF_STRING, 1, show_label.c_str());
         AppendMenuW(g_menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(g_menu, MF_STRING, 2, L"退出");
+        AppendMenuW(g_menu, MF_STRING, 2, exit_label.c_str());
     }
 }
 
@@ -50,7 +53,8 @@ void hideToTray(HWND hwnd) {
         b.uFlags = NIF_INFO;
         b.dwInfoFlags = NIIF_INFO;
         wcscpy_s(b.szInfoTitle, L"Launcher");
-        wcscpy_s(b.szInfo, L"程序已最小化到托盘，右键退出");
+        std::wstring balloon = trW("tray.balloon");
+        wcscpy_s(b.szInfo, balloon.c_str());
         Shell_NotifyIconW(NIM_MODIFY, &b);
     }
 }

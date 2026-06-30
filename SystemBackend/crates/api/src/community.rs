@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 fn clean_text(input: &str, max: usize) -> String {
     input.trim().chars().take(max).collect()
@@ -185,6 +183,26 @@ struct TicketAccess {
 pub struct SessionQ {
     pub session_token: String,
 }
+
+/// 分页查询参数：在 SessionQ 基础上加可选 limit/offset。
+/// 不传参时退化为原有行为（limit = 该端点默认上限，offset = 0）。
+#[derive(Deserialize)]
+pub struct PagedQ {
+    pub session_token: String,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+impl PagedQ {
+    /// 把 limit clamp 到 [1, max]（默认 max），offset clamp 到 >= 0。
+    /// max 用各端点原本的固定 LIMIT，既保留安全上限，又支持翻页。
+    fn bounds(&self, max: i64) -> (i64, i64) {
+        let limit = self.limit.unwrap_or(max).clamp(1, max);
+        let offset = self.offset.unwrap_or(0).max(0);
+        (limit, offset)
+    }
+}
+
 
 #[derive(Serialize)]
 pub struct AreaOut {
@@ -560,17 +578,20 @@ pub async fn create_topic(
 
 pub async fn list_topics(
     State(s): State<Arc<AppState>>,
-    Query(q): Query<SessionQ>,
+    Query(q): Query<PagedQ>,
 ) -> Result<Json<Vec<TopicOut>>, (StatusCode, String)> {
     let _me = auth_user(&s, &q.session_token).await?;
+    let (limit, offset) = q.bounds(100);
     let rows = sqlx::query(
         r#"SELECT id, chat_id, area_id, author_id, title, status, pinned, locked,
                   view_count, last_reply_at, created_at
            FROM forum_topics
            WHERE status <> 'hidden'
            ORDER BY pinned DESC, COALESCE(last_reply_at, created_at) DESC
-           LIMIT 100"#,
+           LIMIT $1 OFFSET $2"#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&s.db)
     .await
     .map_err(internal)?;
@@ -889,19 +910,21 @@ pub async fn create_ticket(
 
 pub async fn list_my_tickets(
     State(s): State<Arc<AppState>>,
-    Query(q): Query<SessionQ>,
+    Query(q): Query<PagedQ>,
 ) -> Result<Json<Vec<TicketOut>>, (StatusCode, String)> {
     let me = auth_user(&s, &q.session_token).await?;
-    list_tickets_with_where(&s, "WHERE t.creator_id = $1", me, false)
+    let (limit, offset) = q.bounds(100);
+    list_tickets_with_where(&s, "WHERE t.creator_id = $1", me, false, limit, offset)
         .await
         .map(Json)
 }
 
 pub async fn list_public_tickets(
     State(s): State<Arc<AppState>>,
-    Query(q): Query<SessionQ>,
+    Query(q): Query<PagedQ>,
 ) -> Result<Json<Vec<TicketOut>>, (StatusCode, String)> {
     let _me = auth_user(&s, &q.session_token).await?;
+    let (limit, offset) = q.bounds(100);
     let rows = sqlx::query(
         r#"SELECT t.id, t.chat_id, t.number, t.creator_id, t.category_id, tc.name AS category_name,
                   t.title, t.status, t.visibility, t.protected_by_superadmin,
@@ -909,8 +932,10 @@ pub async fn list_public_tickets(
            FROM tickets t
            LEFT JOIN ticket_categories tc ON tc.id = t.category_id
            WHERE t.visibility = 'public' AND t.protected_by_superadmin = FALSE
-           ORDER BY t.updated_at DESC LIMIT 100"#,
+           ORDER BY t.updated_at DESC LIMIT $1 OFFSET $2"#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&s.db)
     .await
     .map_err(internal)?;
@@ -922,17 +947,18 @@ pub async fn list_public_tickets(
 
 pub async fn list_admin_tickets(
     State(s): State<Arc<AppState>>,
-    Query(q): Query<SessionQ>,
+    Query(q): Query<PagedQ>,
 ) -> Result<Json<Vec<TicketOut>>, (StatusCode, String)> {
     let me = auth_user(&s, &q.session_token).await?;
     let is_super_admin = ensure_admin(&s, me).await?;
+    let (limit, offset) = q.bounds(200);
     let sql = if is_super_admin {
         r#"SELECT t.id, t.chat_id, t.number, t.creator_id, t.category_id, tc.name AS category_name,
                   t.title, t.status, t.visibility, t.protected_by_superadmin,
                   t.assigned_admin_id, t.resolved_by, t.resolved_at, t.created_at, t.updated_at
            FROM tickets t
            LEFT JOIN ticket_categories tc ON tc.id = t.category_id
-           ORDER BY t.updated_at DESC LIMIT 200"#
+           ORDER BY t.updated_at DESC LIMIT $1 OFFSET $2"#
     } else {
         r#"SELECT t.id, t.chat_id, t.number, t.creator_id, t.category_id, tc.name AS category_name,
                   t.title, t.status, t.visibility, t.protected_by_superadmin,
@@ -940,9 +966,14 @@ pub async fn list_admin_tickets(
            FROM tickets t
            LEFT JOIN ticket_categories tc ON tc.id = t.category_id
            WHERE t.protected_by_superadmin = FALSE
-           ORDER BY t.updated_at DESC LIMIT 200"#
+           ORDER BY t.updated_at DESC LIMIT $1 OFFSET $2"#
     };
-    let rows = sqlx::query(sql).fetch_all(&s.db).await.map_err(internal)?;
+    let rows = sqlx::query(sql)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&s.db)
+        .await
+        .map_err(internal)?;
     rows.into_iter()
         .map(ticket_from_join_row)
         .collect::<Result<Vec<_>, (StatusCode, String)>>()
@@ -1060,6 +1091,8 @@ async fn list_tickets_with_where(
     where_sql: &str,
     user_id: Uuid,
     include_category: bool,
+    limit: i64,
+    offset: i64,
 ) -> Result<Vec<TicketOut>, (StatusCode, String)> {
     let category_select = if include_category {
         "tc.name"
@@ -1073,10 +1106,12 @@ async fn list_tickets_with_where(
            FROM tickets t
            LEFT JOIN ticket_categories tc ON tc.id = t.category_id
            {where_sql}
-           ORDER BY t.updated_at DESC LIMIT 100"#
+           ORDER BY t.updated_at DESC LIMIT $2 OFFSET $3"#
     );
     let rows = sqlx::query(&sql)
         .bind(user_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&state.db)
         .await
         .map_err(internal)?;

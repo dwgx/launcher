@@ -46,10 +46,10 @@
                 {% if c.is_enabled %}<span class="badge badge-outline badge-sm">启用</span>{% else %}<span class="badge badge-error badge-sm">停用</span>{% endif %}
               </div>
             </div>
-            <input name="name" value="{{ c.name }}" class="input input-bordered input-xs w-full">
-            <textarea name="description" class="textarea textarea-bordered textarea-xs min-h-14">{{ c.description }}</textarea>
+            <input name="name" value="{{ c.name }}" aria-label="分类名称：{{ c.name }}" class="input input-bordered input-xs w-full">
+            <textarea name="description" aria-label="分类描述：{{ c.name }}" class="textarea textarea-bordered textarea-xs min-h-14">{{ c.description }}</textarea>
             <div class="grid grid-cols-[1fr_auto] gap-2 items-center">
-              <input name="sort_order" type="number" value="{{ c.sort_order }}" class="input input-bordered input-xs">
+              <input name="sort_order" type="number" value="{{ c.sort_order }}" aria-label="排序权重：{{ c.name }}" class="input input-bordered input-xs">
               <label class="label cursor-pointer gap-2">
                 <input name="is_enabled" type="checkbox" class="checkbox checkbox-xs" {% if c.is_enabled %}checked{% endif %}>
                 <span class="label-text text-xs">启用</span>
@@ -63,7 +63,7 @@
     </div>
   </div>
 
-  <div class="card bg-base-100 shadow">
+  <div class="card bg-base-100 shadow min-w-0">
     <div class="card-body">
       <div class="flex items-center justify-between mb-3">
         <h2 class="card-title text-base">工单</h2>
@@ -103,7 +103,7 @@
               <td>
                 <div class="flex flex-col gap-1">
                   <form method="post" action="/admin/tickets/{{ t.id }}/status" class="join">
-                    <select name="status" class="select select-bordered select-xs join-item">
+                    <select name="status" class="select select-bordered select-xs join-item" aria-label="工单状态">
                       <option value="open" {% if t.status == "open" %}selected{% endif %}>处理中</option>
                       <option value="pending" {% if t.status == "pending" %}selected{% endif %}>待处理</option>
                       <option value="resolved" {% if t.status == "resolved" %}selected{% endif %}>已解决</option>
@@ -112,7 +112,7 @@
                     <button class="btn btn-xs join-item">设置</button>
                   </form>
                   <form method="post" action="/admin/tickets/{{ t.id }}/visibility" class="join">
-                    <select name="visibility" class="select select-bordered select-xs join-item">
+                    <select name="visibility" class="select select-bordered select-xs join-item" aria-label="工单可见性">
                       <option value="private" {% if t.visibility == "private" %}selected{% endif %}>私密</option>
                       <option value="public" {% if t.visibility == "public" %}selected{% endif %}>公开</option>
                     </select>

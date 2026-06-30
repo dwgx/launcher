@@ -20,10 +20,23 @@ public:
     void init(IDWriteFactory* dwrite) { dwrite_ = dwrite; }
     void release() { formats_.clear(); dwrite_ = nullptr; }
 
+    // 现代 UI 字体（参考 AgentScope 字体系统）：
+    //   拉丁/数字/界面文字 → "Segoe UI Variable Text"（Win11 原生可变字体，干净现代）
+    //   中文/CJK 字形       → DirectWrite 系统字体回退自动落到 Microsoft YaHei UI
+    // 历史代码大量硬编码 L"Microsoft YaHei UI"，这里统一改写成现代 UI 字体，
+    // 一处改全局生效；显式请求别的字体（Segoe UI Emoji / Cascadia Code）不受影响。
+    static const wchar_t* preferredUiFace() { return L"Segoe UI Variable Text"; }
+
     // size_dip = pt * 96/72；weight 默认 NORMAL，bold = 700。
     IDWriteTextFormat* format(const wchar_t* face, float size_dip,
                               DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL,
                               DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL) {
+        // 把旧的硬编码 UI 字体重定向到现代 UI 字体栈。
+        if (face && (wcscmp(face, L"Microsoft YaHei UI") == 0
+                  || wcscmp(face, L"Microsoft YaHei") == 0
+                  || wcscmp(face, L"Segoe UI") == 0)) {
+            face = preferredUiFace();
+        }
         Key k{ face ? face : L"", (int)(size_dip * 100.0f + 0.5f), (int)weight, (int)style };
         auto it = formats_.find(k);
         if (it != formats_.end()) return it->second.Get();

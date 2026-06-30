@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-  <div class="card bg-base-100 shadow">
+  <div class="card bg-base-100 shadow min-w-0">
     <div class="card-body">
       <div class="flex items-center justify-between mb-3">
         <h2 class="card-title text-base">后台操作者</h2>
@@ -20,7 +20,7 @@
               <td>{{ op.display_name }}</td>
               <td><span class="badge badge-outline badge-sm">{{ op.role_label }}</span></td>
               <td>{% if op.enabled %}<span class="badge badge-active badge-sm">启用</span>{% else %}<span class="badge badge-revoked badge-sm">停用</span>{% endif %}</td>
-              <td class="text-xs opacity-70 max-w-sm">{{ op.note }}</td>
+              <td class="text-xs opacity-70"><div class="max-w-sm cell-wrap">{{ op.note }}</div></td>
               <td class="font-mono text-xs opacity-70">{{ op.last_login_at }}</td>
               <td class="font-mono text-xs opacity-70">{{ op.updated_at }}</td>
             </tr>
@@ -34,7 +34,7 @@
     </div>
   </div>
 
-  <div class="card bg-base-100 shadow">
+  <div class="card bg-base-100 shadow min-w-0">
     <div class="card-body">
       <h2 class="card-title text-base">新增或修改</h2>
       <form method="post" action="/admin/operators" class="space-y-3">

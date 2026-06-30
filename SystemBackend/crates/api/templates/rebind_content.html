@@ -28,8 +28,8 @@
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3 text-xs mt-3">
-        <div><span class="opacity-60">old:</span> <code class="font-mono">{{ r.old }}</code></div>
-        <div><span class="opacity-60">new:</span> <code class="font-mono text-orange-400">{{ r.new }}</code></div>
+        <div><span class="opacity-60">old:</span> <code class="font-mono break-all">{{ r.old }}</code></div>
+        <div><span class="opacity-60">new:</span> <code class="font-mono text-orange-400 break-all">{{ r.new }}</code></div>
       </div>
       {% if !r.reason.is_empty() %}
       <div class="text-sm mt-2"><span class="opacity-60">用户理由：</span>{{ r.reason }}</div>

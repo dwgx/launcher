@@ -115,11 +115,11 @@ b4ef216  feat: Step 6 Chat 简化版 + Step 7 Modals 4 个
 
 ---
 
-## 1. 后端服务器（154.40.36.22）
+## 1. 后端服务器（<DEPLOY_HOST>）
 
 | 项 | 值 |
 |---|---|
-| HTTPS 端点 | https://154.40.36.22:1337 |
+| HTTPS 端点 | https://<DEPLOY_HOST>:1337 |
 | TLS 证书 | Let's Encrypt IP cert，`/opt/systembackend/certs/{fullchain,privkey}.pem` |
 | systemd unit | `systembackend.service` (active, enabled) |
 | Bind | 0.0.0.0:1337 |
@@ -377,10 +377,10 @@ production 不再依赖 Skia。`third_party/skia/` 已 gitignore（~250MB 预编
 
 ```bash
 # SSH key 已设置 — 不需密码
-ssh -i ~/.ssh/launcher_deploy root@154.40.36.22
+ssh -i ~/.ssh/launcher_deploy root@<DEPLOY_HOST>
 
 # 直接在服务器改 + 编译（避免 scp 整包）：
-ssh -i ~/.ssh/launcher_deploy root@154.40.36.22 \
+ssh -i ~/.ssh/launcher_deploy root@<DEPLOY_HOST> \
   "cd /opt/systembackend/build_src/SystemBackend && \
    DBURL=\$(sed -n 's/^database_url *= *\"\(.*\)\"/\1/p' /opt/systembackend/config.toml) && \
    DATABASE_URL=\"\$DBURL\" cargo build --release -p launcher-api && \

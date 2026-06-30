@@ -89,6 +89,21 @@ inline void drawText_(ID2D1DeviceContext* ctx, std::wstring_view text,
                   DWRITE_MEASURING_MODE_NATURAL);
 }
 
+// 单行文本 —— IDWriteTextFormat 默认 WORD_WRAPPING_WRAP，任何宽度不足的
+// 按钮/标签/徽章在长文案（英/日）下会折到第二行被裁掉。UI chrome（非正文）
+// 一律走这个：临时关掉换行，画完恢复（format 对象是 TextCache 共享缓存的）。
+inline void drawTextNoWrap(ID2D1DeviceContext* ctx, std::wstring_view text,
+                           IDWriteTextFormat* fmt, float x, float y, float w, float h,
+                           ID2D1Brush* b,
+                           DWRITE_TEXT_ALIGNMENT halign = DWRITE_TEXT_ALIGNMENT_LEADING,
+                           DWRITE_PARAGRAPH_ALIGNMENT valign = DWRITE_PARAGRAPH_ALIGNMENT_NEAR) {
+    if (!fmt || !b || text.empty()) return;
+    DWRITE_WORD_WRAPPING old_wrap = fmt->GetWordWrapping();
+    fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    drawText_(ctx, text, fmt, x, y, w, h, b, halign, valign);
+    fmt->SetWordWrapping(old_wrap);
+}
+
 inline void drawLine(ID2D1DeviceContext* ctx, float x1, float y1, float x2, float y2,
                      ID2D1Brush* b, float thick = 1.0f,
                      ID2D1StrokeStyle* style = nullptr) {

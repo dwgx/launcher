@@ -41,6 +41,22 @@ struct Pack {
 extern std::vector<Pack> g_packs;
 extern std::mutex        g_packs_mtx;
 
+// 内置分组的 canonical 名 —— 这是与后端约定的【数据标识】，不是 UI 文案，
+// 永不本地化（后端按此 name 存"我的表情"pack）。显示层用 tr("pack.*") 另取译文，
+// 逻辑判定一律走 is_system 标志或 isMyStickersPack()，禁止把这些字面量当 UI 文本。
+constexpr const wchar_t* kSysEmojiName   = L"系统 emoji";
+constexpr const wchar_t* kMyStickersName = L"我的表情";
+
+// 是否"我的表情"分组：本地 placeholder（is_owner 且无 backend id）或后端同名 pack。
+inline bool isMyStickersPack(const Pack& p) {
+    return !p.is_system && p.name == kMyStickersName;
+}
+
+// UI 显示名 —— 内置分组（系统 emoji / 我的表情）的 name 是 canonical 数据标识，
+// 不能直接画到界面（英文/日文用户会看到中文）。显示层一律走此函数取译文；
+// 普通用户自建 pack 用其真实 name。
+std::wstring packDisplayName(const Pack& p);
+
 // 系统 emoji 是本地伪 pack（无 backend id）— 排序时跟 backend pack 一起拖。
 // 我们在 persist 里单独存 system pack 的 sort_order（默认 0 = 最左）。
 constexpr int kSystemEmojiOrder = 0;

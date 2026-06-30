@@ -16,7 +16,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use launcher_shared::hashing;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use sqlx::Row;
 use std::sync::Arc;
 use std::time;
@@ -202,36 +202,15 @@ fn parse_admin_cookie_value(state: &AppState, value: &str) -> Option<AdminSessio
 
 pub(crate) async fn admin_session(headers: &HeaderMap, state: &AppState) -> Option<AdminSession> {
     let raw = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())?;
-    let (session, legacy_bootstrap) = raw.split(';').find_map(|part| {
+    let session = raw.split(';').find_map(|part| {
         let part = part.trim();
         let (name, value) = part.split_once('=')?;
         if name != ADMIN_COOKIE {
             return None;
         }
-        if let Some(session) = parse_admin_cookie_value(state, value) {
-            return Some((session, false));
-        }
-        validate_legacy_admin_cookie_value(state, value).then(|| {
-            (
-                AdminSession {
-                    username: "bootstrap".into(),
-                    user_id: None,
-                    display_name: "Bootstrap Owner".into(),
-                    role: "owner".into(),
-                    bootstrap: true,
-                },
-                true,
-            )
-        })
+        parse_admin_cookie_value(state, value)
     })?;
     if session.bootstrap {
-        if legacy_bootstrap {
-            let _ = sqlx::query(
-                "INSERT INTO audit_log (actor, action, target, metadata) VALUES ('bootstrap-owner', 'admin.legacy_cookie', 'bootstrap', NULL)",
-            )
-            .execute(&state.db)
-            .await;
-        }
         return Some(session);
     }
     let row = sqlx::query(
@@ -264,28 +243,6 @@ pub(crate) async fn admin_session(headers: &HeaderMap, state: &AppState) -> Opti
         role,
         ..session
     })
-}
-
-fn legacy_admin_cookie_value(state: &AppState, issued_at: i64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"launcher.admin.session.v1");
-    hasher.update(state.cfg.admin_password.as_bytes());
-    hasher.update(issued_at.to_string().as_bytes());
-    format!("{}:{}", issued_at, hex::encode(hasher.finalize()))
-}
-
-fn validate_legacy_admin_cookie_value(state: &AppState, value: &str) -> bool {
-    let Some((issued_at_raw, _sig)) = value.split_once(':') else {
-        return false;
-    };
-    let Ok(issued_at) = issued_at_raw.parse::<i64>() else {
-        return false;
-    };
-    let now = Utc::now().timestamp();
-    if issued_at > now || now.saturating_sub(issued_at) > ADMIN_COOKIE_MAX_AGE {
-        return false;
-    }
-    value == legacy_admin_cookie_value(state, issued_at)
 }
 
 pub(crate) fn admin_login_redirect() -> Response {

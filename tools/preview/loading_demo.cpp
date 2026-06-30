@@ -1368,7 +1368,7 @@ void requestSharePack(int idx) {
         if (r.ok()) {
             std::string sn = net::jsonStr(r.body, "short_name");
             // 拷到剪贴板
-            std::string url = "https://154.40.36.22:1337/sticker/" + sn;
+            std::string url = "https://127.0.0.1:1337/sticker/" + sn;
             int n = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
             std::wstring wu(n > 0 ? n - 1 : 0, 0);
             if (n > 0) MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wu.data(), n);
@@ -2819,7 +2819,7 @@ void enterLoadingStage() {
     // auto-login 时滚动日志启动 — 用 timer 推每 0.3s 一行
     if (g_skip_auth_after_loading) {
         g_login_log.clear();
-        logLine(L"正在连接 154.40.36.22:1337");
+        logLine(L"正在连接服务器…");
         SetTimer(g_hwnd, 0xB1, 300, nullptr);
     }
 }
@@ -3176,7 +3176,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         PostMessageW(a->h, WM_APP + 2, 1, 0);
                     } else {
                         // 把 body 写到 error_msg（截 80 字）
-                        std::string err = r.body.empty() ? "网络错误（无法连接 154.40.36.22:1337）"
+                        std::string err = r.body.empty() ? "网络错误（无法连接服务器）"
                                                           : r.body;
                         if (err.size() > 80) err = err.substr(0, 80);
                         int n = MultiByteToWideChar(CP_UTF8, 0, err.c_str(), -1, nullptr, 0);

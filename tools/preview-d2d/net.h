@@ -19,8 +19,26 @@
 
 namespace launcher::d2d::net {
 
-constexpr const wchar_t* kDefaultHost = L"154.40.36.22";
-constexpr INTERNET_PORT kDefaultPort = 1337;
+// 默认连接 host 由编译期注入，避免把生产地址写死进源码。
+// 发布构建：build_d2d.bat 用 /DLAUNCHER_DEFAULT_HOST=L"..." 从环境变量注入。
+// 运行期仍可用 LAUNCHER_API_HOST 环境变量覆盖（见下方 endpoint()）。
+#ifndef LAUNCHER_DEFAULT_HOST
+#define LAUNCHER_DEFAULT_HOST L"127.0.0.1"
+#endif
+
+// 默认 scheme：1 = https，0 = http。编译期可用 /DLAUNCHER_DEFAULT_SECURE=0 注入。
+// 运行期仍可用 LAUNCHER_API_SCHEME 环境变量覆盖（见下方 endpoint()）。
+#ifndef LAUNCHER_DEFAULT_SECURE
+#define LAUNCHER_DEFAULT_SECURE 1
+#endif
+
+// 默认端口：编译期可用 /DLAUNCHER_DEFAULT_PORT=1337 注入。
+#ifndef LAUNCHER_DEFAULT_PORT
+#define LAUNCHER_DEFAULT_PORT 1337
+#endif
+
+constexpr const wchar_t* kDefaultHost = LAUNCHER_DEFAULT_HOST;
+constexpr INTERNET_PORT kDefaultPort = LAUNCHER_DEFAULT_PORT;
 constexpr const wchar_t* kUserAgent = L"Launcher-D2D/0.1";
 
 struct Resp {
@@ -32,7 +50,7 @@ struct Resp {
 struct Endpoint {
     std::wstring host = kDefaultHost;
     INTERNET_PORT port = kDefaultPort;
-    bool secure = true;
+    bool secure = (LAUNCHER_DEFAULT_SECURE != 0);
     bool allow_insecure_tls = false;
 };
 
@@ -57,7 +75,10 @@ inline Endpoint endpoint() {
         }
         wchar_t scheme[16]{};
         DWORD sn = GetEnvironmentVariableW(L"LAUNCHER_API_SCHEME", scheme, (DWORD)(sizeof(scheme) / sizeof(scheme[0])));
-        if (sn > 0 && _wcsicmp(scheme, L"http") == 0) out.secure = false;
+        if (sn > 0) {
+            if (_wcsicmp(scheme, L"http") == 0) out.secure = false;
+            else if (_wcsicmp(scheme, L"https") == 0) out.secure = true;
+        }
         wchar_t insecure[16]{};
         DWORD in = GetEnvironmentVariableW(L"LAUNCHER_ALLOW_INSECURE_TLS", insecure, (DWORD)(sizeof(insecure) / sizeof(insecure[0])));
         if (in > 0 && in < (sizeof(insecure) / sizeof(insecure[0]))) {

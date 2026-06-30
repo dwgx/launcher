@@ -32,6 +32,7 @@
 #include "render/stroke_cache.h"
 #include "render/image_cache.h"
 #include "render/gif_cache.h"
+#include "render/emoji_cache.h"
 
 namespace launcher::d2d {
 
@@ -76,6 +77,7 @@ public:
     StrokeCache& strokes()  { return strokes_; }
     ImageCache&  images()   { return images_; }
     GifCache&    gifs()     { return gifs_; }
+    EmojiCache&  emojis()   { return emojis_; }
 
 private:
     void initD3D();
@@ -117,6 +119,7 @@ private:
     StrokeCache  strokes_;
     ImageCache   images_;
     GifCache     gifs_;
+    EmojiCache   emojis_;
 
     int  pending_w_{};
     int  pending_h_{};

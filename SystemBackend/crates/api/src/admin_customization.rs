@@ -143,9 +143,7 @@ pub struct OperatorForm {
     pub note: Option<String>,
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
+use crate::error::internal_msg as internal;
 
 fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
     ts.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -291,6 +289,7 @@ pub(crate) async fn write_audit(
     .bind(metadata)
     .execute(&state.db)
     .await;
+    crate::audit::event(&actor.name, action, target);
 }
 
 fn clean_slug_like(input: &str, max: usize) -> String {

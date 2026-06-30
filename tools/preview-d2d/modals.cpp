@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <cstdio>
@@ -45,6 +46,10 @@ SearchState       g_search;
 
 static void closeMsgMenu();
 static void closeUserMenu();
+// 互斥：打开任一 modal 前先关掉其它已开的 modal/卡片，避免双窗口叠加
+// （例：先点头像开资料卡，再点分享表情包卡片，两个卡片会同时浮在屏上）。
+// 定义在文件末尾（所有 close 函数之后），此处前置声明供各 openX() 调用。
+void dismissAllModals();
 
 namespace {
 
@@ -148,7 +153,7 @@ void paintDim(D2DApp& app, float W, float H, float t) {
 
 // Primary button with pressed/hover states.
 void drawPrimaryBtn(D2DApp& app, float x, float y, float w, float h,
-                    const wchar_t* label, float op,
+                    std::wstring_view label, float op,
                     std::function<void()> click, bool danger = false) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
@@ -175,7 +180,7 @@ void drawPrimaryBtn(D2DApp& app, float x, float y, float w, float h,
 
 // Ghost button with outline and transparent background.
 void drawGhostBtn(D2DApp& app, float x, float y, float w, float h,
-                  const wchar_t* label, float op,
+                  std::wstring_view label, float op,
                   std::function<void()> click) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
@@ -196,7 +201,7 @@ void drawGhostBtn(D2DApp& app, float x, float y, float w, float h,
 
 // Shared InputBox rendering for modal fields.
 void drawField(D2DApp& app, InputBox& box, float x, float y, float w, float h,
-               const wchar_t* placeholder, bool focused, float op) {
+               std::wstring_view placeholder, bool focused, float op) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
     auto& br = app.brushes();
@@ -296,6 +301,7 @@ bool hasBlockingModalOpen() {
 
 // ============== ChangePw ==============
 void openChangePw() {
+    dismissAllModals();
     g_change_pw.open = true;
     g_change_pw.old_pw.password = true;
     g_change_pw.new_pw.password = true;
@@ -316,13 +322,13 @@ static void closeChangePw() {
 static void submitChangePw(HWND hwnd) {
     if (g_change_pw.busy) return;
     if (g_change_pw.old_pw.text.empty() || g_change_pw.new_pw.text.empty()) {
-        g_change_pw.error_msg = L"密码不能为空"; return;
+        g_change_pw.error_msg = trW("pw.empty"); return;
     }
     if (g_change_pw.new_pw.text != g_change_pw.repeat_pw.text) {
-        g_change_pw.error_msg = L"New passwords do not match"; return;
+        g_change_pw.error_msg = trW("pw.mismatch"); return;
     }
     if (g_change_pw.new_pw.text.size() < 6) {
-        g_change_pw.error_msg = L"New password must be at least 6 chars"; return;
+        g_change_pw.error_msg = trW("pw.too_short"); return;
     }
     g_change_pw.error_msg.clear();
     g_change_pw.busy = true;
@@ -338,11 +344,14 @@ static void submitChangePw(HWND hwnd) {
             if (resp.ok()) g_pw_pending_error.clear();
             else {
                 std::string m = net::jsonStr(resp.body, "error");
-                if (m.empty()) m = "Password change failed";
-                int n = MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, nullptr, 0);
-                std::wstring w(n > 0 ? n - 1 : 0, 0);
-                if (n > 0) MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, w.data(), n);
-                g_pw_pending_error = w;
+                if (m.empty()) {
+                    g_pw_pending_error = trW("pw.change_failed");
+                } else {
+                    int n = MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, nullptr, 0);
+                    std::wstring w(n > 0 ? n - 1 : 0, 0);
+                    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, m.c_str(), -1, w.data(), n);
+                    g_pw_pending_error = w;
+                }
             }
         }
         PostMessageW(a->hwnd, WM_APP + 4, resp.ok() ? 1 : 0, 0);
@@ -364,7 +373,7 @@ void onChangePwResult(bool success) {
         stages::g_auth_card_y.start(12, 0, 0.45f, 0.05f, curve::easeOutQuint);
     } else {
         g_change_pw.error_msg = g_pw_pending_error.empty()
-            ? L"Password change failed" : g_pw_pending_error;
+            ? trW("pw.change_failed") : g_pw_pending_error;
     }
 }
 
@@ -386,22 +395,22 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-    prim::drawText_(ctx, L"Change password", h1,
+    prim::drawText_(ctx, trW("profile.change_pw"), h1,
                     cx + 30, cy + 28, cw - 60, 24,
                     br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"Sign in again after password change", sub,
+    prim::drawText_(ctx, trW("pw.signin_again_hint"), sub,
                     cx + 30, cy + 56, cw - 60, 18,
                     br.solidA(pal.text_muted, t));
 
     float fy = cy + 90;
     drawField(app, g_change_pw.old_pw, cx + 30, fy, cw - 60, 40,
-              L"当前密码", g_change_pw.focus == 0, t);
+              trW("pw.current"), g_change_pw.focus == 0, t);
     fy += 50;
     drawField(app, g_change_pw.new_pw, cx + 30, fy, cw - 60, 40,
-              L"New password (at least 6 chars)", g_change_pw.focus == 1, t);
+              trW("pw.new_label"), g_change_pw.focus == 1, t);
     fy += 50;
     drawField(app, g_change_pw.repeat_pw, cx + 30, fy, cw - 60, 40,
-              L"Repeat new password", g_change_pw.focus == 2, t);
+              trW("pw.repeat_label"), g_change_pw.focus == 2, t);
     fy += 56;
 
     hit(g_change_pw.old_pw.bounds, [](){ g_change_pw.focus = 0;
@@ -423,7 +432,7 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
 
     // 按钮
     float by = cy + ch - 56;
-    drawGhostBtn(app, cx + 30, by, 130, 38, L"取消", t,
+    drawGhostBtn(app, cx + 30, by, 130, 38, trW("common.cancel"), t,
                  [](){ closeChangePw(); });
     drawPrimaryBtn(app, cx + cw - 30 - 200, by, 200, 38,
                    g_change_pw.busy ? L"Submitting..." : L"Submit", t,
@@ -490,6 +499,7 @@ void paintConfirmModal(D2DApp& app, float W, float H) {
 
 // ============== CS2 ==============
 void openCS2() {
+    dismissAllModals();
     g_cs2.open = true;
     g_cs2.t.start(0, 1, 0.30f, 0, curve::easeOutQuint);
     // Start embedded WebView2 Steam store widget.
@@ -579,8 +589,8 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
                          br.solidA(0xC96442, t));
         }
         auto* sub_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-        prim::drawText_(ctx, webview::runtimeAvailable() ? L"Runtime ready" :
-                              L"WebView2 Runtime missing. Install Edge WebView2.",
+        prim::drawText_(ctx, webview::runtimeAvailable() ? trW("webview.runtime_ready") :
+                              trW("webview.no_runtime"),
                         sub_fmt,
                         cx + 24, cover_y + cover_h - 28, cw - 48, 18,
                         br.solidA(0xFFFFFF, t * 0.85f));
@@ -608,11 +618,12 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     drawPrimaryBtn(app, cx + 24, cy + ch - 56, 200, 40,
                    L"Launch CS2", t, [](){ launchCS2(); });
     drawGhostBtn(app, cx + 240, cy + ch - 56, 160, 40,
-                 L"商店页面", t, [](){ openCS2Store(); });
+                 trW("launch.store_page"), t, [](){ openCS2Store(); });
 }
 
 // ============== History ==============
 void openHistory() {
+    dismissAllModals();
     g_history.open = true;
     g_history.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
     if (!g_session_token.empty()) {
@@ -642,16 +653,20 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    prim::drawText_(ctx, L"登录历史", h1,
+    prim::drawText_(ctx, trW("acc.history"), h1,
                     cx + 24, cy + 22, cw - 48, 22,
                     br.solidA(pal.text, t));
     if (!g_history.loaded) {
-        prim::drawText_(ctx, L"Loading...", sub,
+        prim::drawText_(ctx, trW("common.loading"), sub,
                         cx + 24, cy + 50, cw - 48, 18,
                         br.solidA(pal.text_muted, t));
     } else {
-        wchar_t info[64];
-        swprintf_s(info, L"%d records, 5 per page", (int)g_history.rows.size());
+        std::wstring info = trW("history.records_fmt");
+        {
+            auto p = info.find(L"{n}");
+            if (p != std::wstring::npos)
+                info.replace(p, 3, std::to_wstring((int)g_history.rows.size()));
+        }
         prim::drawText_(ctx, info, sub,
                         cx + 24, cy + 50, cw - 48, 18,
                         br.solidA(pal.text_muted, t));
@@ -678,9 +693,11 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
             float ry = cy + 90 + (i - begin) * 50;
             prim::fillRR(ctx, cx + 20, ry, cw - 40, 40, 8.0f,
                          br.solidA(pal.surface, t));
+            // 成功 = 绿点，失败 = 红点（之前恒为绿，看不出失败登录）。
+            uint32_t dot = g_history.rows[i].success ? 0x4ADE80 : 0xE34B4B;
             prim::fillCircle(ctx, cx + 36, ry + 20, 6,
-                             br.solidA(0x4ADE80, t));
-            prim::drawText_(ctx, g_history.rows[i], row_fmt,
+                             br.solidA(dot, t));
+            prim::drawText_(ctx, g_history.rows[i].text, row_fmt,
                             cx + 56, ry + 11, cw - 96, 18,
                             br.solidA(pal.text, t));
         }
@@ -699,7 +716,7 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     }
 
     drawGhostBtn(app, cx + cw - 24 - 100, cy + ch - 52, 100, 36,
-                 L"关闭", t, [](){ closeHistory(); });
+                 trW("common.close"), t, [](){ closeHistory(); });
 
     // History rows replace the placeholders after loading.
     if (g_history.loaded && !g_history.rows.empty()) {
@@ -728,21 +745,44 @@ void onHistoryResult(const std::string& body) {
         auto cb = net::findJsonObjectEnd(body, ob);
         if (cb == std::string::npos) break;
         std::string obj = body.substr(ob, cb - ob + 1);
-        std::string ts = net::jsonStr(obj, "ts");
-        std::string ip = net::jsonStr(obj, "ip");
-        std::string geo = net::jsonStr(obj, "geo");
-        // Keep the timestamp compact.
-        if (ts.size() > 16) ts.resize(16);
-        for (auto& c : ts) if (c == 'T') c = ' ';
-        std::wstring row = utf8w(ts) + L"  ·  " + utf8w(ip);
-        if (!geo.empty()) row += L"  ·  " + utf8w(geo);
-        g_history.rows.push_back(row);
+        // 服务端字段名（profile.rs LoginEntry）：occurred_at(epoch i64)/success(bool)/
+        // failure_reason/remote_ip/geo_country/geo_city —— 不是旧的 ts/ip/geo。
+        long long occurred = net::jsonInt(obj, "occurred_at");
+        std::string ip = net::jsonStr(obj, "remote_ip");
+        std::string country = net::jsonStr(obj, "geo_country");
+        std::string city = net::jsonStr(obj, "geo_city");
+        std::string fail = net::jsonStr(obj, "failure_reason");
+        // success 是 JSON bool：直接判字面量（jsonStr/jsonInt 读不准 bool）。
+        bool ok = true;
+        {
+            size_t b = 0, e = 0;
+            if (net::jsonValueRange(obj, "success", b, e))
+                ok = obj.compare(b, 4, "true") == 0;
+        }
+        // epoch 秒 → "YYYY-MM-DD HH:MM" 本地时间。
+        std::wstring tsw;
+        if (occurred > 0) {
+            time_t tt = (time_t)occurred;
+            struct tm lt{};
+            localtime_s(&lt, &tt);
+            wchar_t buf[32];
+            wcsftime(buf, 32, L"%Y-%m-%d %H:%M", &lt);
+            tsw = buf;
+        }
+        std::wstring row = tsw;
+        if (!ip.empty())      row += (row.empty() ? L"" : L"  ·  ") + utf8w(ip);
+        std::string geo = country;
+        if (!city.empty())    geo = city + (country.empty() ? "" : ", " + country);
+        if (!geo.empty())     row += L"  ·  " + utf8w(geo);
+        if (!ok && !fail.empty()) row += L"  ·  " + utf8w(fail);
+        g_history.rows.push_back({ row, ok });
         pos = cb + 1;
     }
 }
 
 // ============== AddTag ==============
 void openAddTag() {
+    dismissAllModals();
     g_addtag.open = true;
     g_addtag.input.text.clear();
     g_addtag.input.cursor = 0;
@@ -761,8 +801,8 @@ static void submitAddTag(HWND hwnd) {
     std::wstring tag = g_addtag.input.text;
     while (!tag.empty() && (tag.front() == L' ' || tag.front() == L'\t')) tag.erase(tag.begin());
     while (!tag.empty() && (tag.back()  == L' ' || tag.back()  == L'\t')) tag.pop_back();
-    if (tag.empty()) { g_addtag.error_msg = L"Tag cannot be empty"; return; }
-    if (tag.size() > 24) { g_addtag.error_msg = L"Tag must be 24 chars or fewer"; return; }
+    if (tag.empty()) { g_addtag.error_msg = trW("addtag.empty"); return; }
+    if (tag.size() > 24) { g_addtag.error_msg = trW("addtag.too_long"); return; }
     g_addtag.error_msg.clear();
     g_addtag.busy = true;
     fetch::addTag(hwnd, tag);
@@ -775,9 +815,9 @@ void onAddTagResult(bool success, int status) {
         // tag list 重拉
         fetch::userTags(GetActiveWindow());
     } else {
-        if (status == 409) g_addtag.error_msg = L"Tag already exists";
-        else if (status == 429) g_addtag.error_msg = L"Tag limit reached (20)";
-        else g_addtag.error_msg = L"Failed to add tag";
+        if (status == 409) g_addtag.error_msg = trW("addtag.exists");
+        else if (status == 429) g_addtag.error_msg = trW("addtag.limit");
+        else g_addtag.error_msg = trW("addtag.failed");
     }
 }
 
@@ -799,10 +839,10 @@ void paintAddTagModal(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    prim::drawText_(ctx, L"Add tag", h1,
+    prim::drawText_(ctx, trW("addtag.title"), h1,
                     cx + 30, cy + 22, cw - 60, 22,
                     br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"Up to 24 chars; max 20 tags", sub,
+    prim::drawText_(ctx, trW("addtag.hint"), sub,
                     cx + 30, cy + 50, cw - 60, 18,
                     br.solidA(pal.text_muted, t));
 
@@ -817,7 +857,7 @@ void paintAddTagModal(D2DApp& app, float W, float H) {
     }
 
     float by = cy + ch - 52;
-    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t,
+    drawGhostBtn(app, cx + 30, by, 120, 36, trW("common.cancel"), t,
                  [](){ closeAddTag(); });
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    g_addtag.busy ? L"Adding..." : L"Add", t,
@@ -826,6 +866,7 @@ void paintAddTagModal(D2DApp& app, float W, float H) {
 
 // ============== CreatePack ==============
 void openCreatePack() {
+    dismissAllModals();
     g_createpack.open = true;
     g_createpack.input.text.clear();
     g_createpack.input.cursor = 0;
@@ -841,9 +882,9 @@ static void closeCreatePack() {
 static void submitCreatePack(HWND hwnd) {
     if (g_createpack.busy) return;
     std::wstring name = g_createpack.input.text;
-    if (name.empty()) { g_createpack.error_msg = L"请输入分组名"; return; }
-    if (name.size() > 24) { g_createpack.error_msg = L"Name must be 24 chars or fewer"; return; }
-    if (g_session_token.empty()) { g_createpack.error_msg = L"Please sign in first"; return; }
+    if (name.empty()) { g_createpack.error_msg = trW("createpack.name_required"); return; }
+    if (name.size() > 24) { g_createpack.error_msg = trW("createpack.too_long"); return; }
+    if (g_session_token.empty()) { g_createpack.error_msg = trW("createpack.signin_required"); return; }
     g_createpack.busy = true;
     struct A { std::wstring n; HWND h; };
     auto* a = new A{ name, hwnd };
@@ -859,7 +900,7 @@ static void submitCreatePack(HWND hwnd) {
 void onCreatePackResult(bool success) {
     g_createpack.busy = false;
     if (success) closeCreatePack();
-    else g_createpack.error_msg = L"创建失败";
+    else g_createpack.error_msg = trW("createpack.failed");
 }
 void paintCreatePackModal(D2DApp& app, float W, float H) {
     if (!g_createpack.open && g_createpack.t.value() < 0.001f) return;
@@ -877,10 +918,10 @@ void paintCreatePackModal(D2DApp& app, float W, float H) {
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    prim::drawText_(ctx, L"Create pack", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"Pack name, up to 24 chars", sub, cx + 30, cy + 50, cw - 60, 18,
+    prim::drawText_(ctx, trW("createpack.title"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, trW("createpack.hint"), sub, cx + 30, cy + 50, cw - 60, 18,
                     br.solidA(pal.text_muted, t));
-    drawField(app, g_createpack.input, cx + 30, cy + 80, cw - 60, 40, L"Pack name", true, t);
+    drawField(app, g_createpack.input, cx + 30, cy + 80, cw - 60, 40, trW("createpack.placeholder"), true, t);
     hit(g_createpack.input.bounds, [](){}, true);
     if (!g_createpack.error_msg.empty()) {
         prim::drawText_(ctx, g_createpack.error_msg, sub,
@@ -888,7 +929,7 @@ void paintCreatePackModal(D2DApp& app, float W, float H) {
                         br.solidA(0xE34B4B, t));
     }
     float by = cy + ch - 52;
-    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeCreatePack(); });
+    drawGhostBtn(app, cx + 30, by, 120, 36, trW("common.cancel"), t, [](){ closeCreatePack(); });
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    g_createpack.busy ? L"Creating..." : L"Create", t,
                    [hwnd = GetActiveWindow()](){ submitCreatePack(hwnd); });
@@ -896,6 +937,7 @@ void paintCreatePackModal(D2DApp& app, float W, float H) {
 
 // ============== RenamePack ==============
 void openRenamePack(const std::string& pack_id, const std::wstring& orig_name) {
+    dismissAllModals();
     g_renamepack.open = true;
     g_renamepack.pack_id = pack_id;
     g_renamepack.orig_name = orig_name;
@@ -913,8 +955,8 @@ static void closeRenamePack() {
 static void submitRenamePack(HWND hwnd) {
     if (g_renamepack.busy) return;
     std::wstring name = g_renamepack.input.text;
-    if (name.empty()) { g_renamepack.error_msg = L"Pack name cannot be empty"; return; }
-    if (name.size() > 24) { g_renamepack.error_msg = L"Name must be 24 chars or fewer"; return; }
+    if (name.empty()) { g_renamepack.error_msg = trW("renamepack.empty"); return; }
+    if (name.size() > 24) { g_renamepack.error_msg = trW("renamepack.too_long"); return; }
     g_renamepack.busy = true;
     struct A { std::string id; std::wstring n; HWND h; };
     auto* a = new A{ g_renamepack.pack_id, name, hwnd };
@@ -931,11 +973,11 @@ static void submitRenamePack(HWND hwnd) {
 void onRenamePackResult(bool success) {
     g_renamepack.busy = false;
     if (success) closeRenamePack();
-    else g_renamepack.error_msg = L"Rename failed";
+    else g_renamepack.error_msg = trW("renamepack.failed");
 }
 // ============== UserProfile modal ==============
 void openUserProfile(const std::wstring& uid_or_nickname) {
-    closeContextMenus();
+    dismissAllModals();  // 互斥：先关其它浮层，避免与表情包卡片等叠加
     g_user_profile.open = true;
     g_user_profile.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
     if (isSelfProfileKey(uid_or_nickname)) {
@@ -1006,12 +1048,12 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     auto* mt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
 
     if (!peer.loaded) {
-        prim::drawText_(ctx, L"Loading...", sub,
+        prim::drawText_(ctx, trW("common.loading"), sub,
                         cx, cy + 200, cw, 20,
                         br.solidA(pal.text_muted, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
     } else if (!peer.err.empty()) {
-        prim::drawText_(ctx, L"获取失败", h1,
+        prim::drawText_(ctx, trW("profile.fetch_failed"), h1,
                         cx, cy + 180, cw, 24,
                         br.solidA(pal.text, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1029,12 +1071,12 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
                         DWRITE_TEXT_ALIGNMENT_CENTER);
         // Online status dot and label.
         {
-            const wchar_t* st_label = L"离线";
+            std::wstring st_label = trW("status.offline");
             uint32_t st_color = 0xFF6B6A67;
-            if (peer.status == L"online")  { st_label = L"在线"; st_color = 0xFF4ADE80; }
-            else if (peer.status == L"busy"){ st_label = L"繁忙"; st_color = 0xFFE34B4B; }
-            else if (peer.status == L"away"){ st_label = L"离开"; st_color = 0xFFF5A524; }
-            else if (peer.status == L"sleep"){st_label = L"睡眠"; st_color = 0xFF8B7BD9; }
+            if (peer.status == L"online")  { st_label = trW("status.online"); st_color = 0xFF4ADE80; }
+            else if (peer.status == L"busy"){ st_label = trW("status.busy"); st_color = 0xFFE34B4B; }
+            else if (peer.status == L"away"){ st_label = trW("status.away"); st_color = 0xFFF5A524; }
+            else if (peer.status == L"sleep"){st_label = trW("status.sleep"); st_color = 0xFF8B7BD9; }
             float dot_x = cx + cw * 0.5f - 36, dot_y = cy + 184;
             prim::fillCircle(ctx, dot_x, dot_y + 4, 4, br.solidA(st_color, t));
             prim::drawText_(ctx, st_label, mt,
@@ -1088,7 +1130,7 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
         }
         // bio
         if (!peer.bio.empty()) {
-            prim::drawText_(ctx, L"Bio", mt,
+            prim::drawText_(ctx, trW("profile.bio"), mt,
                             cx + 24, cy + 296, cw - 48, 16,
                             br.solidA(pal.text_muted, t));
             prim::fillRR(ctx, cx + 24, cy + 316, cw - 48, 80, 8.0f,
@@ -1111,11 +1153,12 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     hit(close_btn, [](){ closeUserProfile(); }, true);
 
     drawGhostBtn(app, cx + 30, cy + ch - 48, cw - 60, 36,
-                 L"关闭", t, [](){ closeUserProfile(); });
+                 trW("common.close"), t, [](){ closeUserProfile(); });
 }
 
 // ============== EditStatusText modal ==============
 void openEditStatusText() {
+    dismissAllModals();
     g_edit_status.open = true;
     g_edit_status.input.text = g_user.status_text;
     g_edit_status.input.cursor = (int)g_user.status_text.size();
@@ -1151,7 +1194,7 @@ void onEditStatusTextResult(bool success) {
     g_edit_status.busy = false;
     if (!success) {
         fetch::myProfile(GetActiveWindow());
-        toast::show(L"保存失败，已重新拉取资料");
+        toast::show(trW("toast.save_fail_refetch"));
     }
 }
 void paintEditStatusTextModal(D2DApp& app, float W, float H) {
@@ -1170,15 +1213,15 @@ void paintEditStatusTextModal(D2DApp& app, float W, float H) {
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    prim::drawText_(ctx, L"Edit status", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"Short status, up to 80 chars", sub,
+    prim::drawText_(ctx, trW("status.edit_title"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, trW("status.edit_hint"), sub,
                     cx + 30, cy + 50, cw - 60, 18, br.solidA(pal.text_muted, t));
     drawField(app, g_edit_status.input, cx + 30, cy + 80, cw - 60, 40,
-              L"What are you up to?", true, t);
+              trW("status.placeholder"), true, t);
     hit(g_edit_status.input.bounds, [](){}, true);
     float by = cy + ch - 52;
     std::wstring cancel = trW("common.cancel");
-    std::wstring save = g_edit_status.busy ? std::wstring(L"Saving...") : trW("common.save");
+    std::wstring save = g_edit_status.busy ? trW("status.saving") : trW("common.save");
     drawGhostBtn(app, cx + 30, by, 120, 36, cancel.c_str(), t, [](){ closeEditStatusText(); });
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    save.c_str(), t,
@@ -1187,6 +1230,7 @@ void paintEditStatusTextModal(D2DApp& app, float W, float H) {
 
 // ============== EditBio modal ==============
 void openEditBio() {
+    dismissAllModals();
     g_edit_bio.open = true;
     g_edit_bio.input.text = g_user.bio;
     g_edit_bio.input.cursor = (int)g_user.bio.size();
@@ -1213,7 +1257,7 @@ void onEditBioResult(bool success) {
     g_edit_bio.busy = false;
     if (!success) {
         fetch::myProfile(GetActiveWindow());
-        toast::show(L"保存失败，已重新拉取资料");
+        toast::show(trW("toast.save_fail_refetch"));
     }
 }
 void paintEditBioModal(D2DApp& app, float W, float H) {
@@ -1231,14 +1275,14 @@ void paintEditBioModal(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     prim::drawText_(ctx, trW("profile.bio"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
-    prim::drawText_(ctx, L"Short bio, up to 240 chars", sub,
+    prim::drawText_(ctx, trW("bio.edit_hint"), sub,
                     cx + 30, cy + 50, cw - 60, 18, br.solidA(pal.text_muted, t));
     drawField(app, g_edit_bio.input, cx + 30, cy + 80, cw - 60, 140,
-              L"Tell people about yourself", true, t);
+              trW("bio.placeholder"), true, t);
     hit(g_edit_bio.input.bounds, [](){}, true);
     float by = cy + ch - 52;
     std::wstring cancel = trW("common.cancel");
-    std::wstring save = g_edit_bio.busy ? std::wstring(L"Saving...") : trW("common.save");
+    std::wstring save = g_edit_bio.busy ? trW("status.saving") : trW("common.save");
     drawGhostBtn(app, cx + 30, by, 120, 36, cancel.c_str(), t, [](){ closeEditBio(); });
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    save.c_str(), t,
@@ -1269,6 +1313,7 @@ std::wstring buildVideoHtml(const std::wstring& src) {
 }
 
 void openVideoPlayer(const std::wstring& src) {
+    dismissAllModals();
     g_webview_modal.open = true;
     g_webview_modal.title = src;
     g_webview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
@@ -1282,6 +1327,7 @@ void openVideoPlayer(const std::wstring& src) {
 }
 
 void openWebPage(const std::wstring& url) {
+    dismissAllModals();
     g_webview_modal.open = true;
     g_webview_modal.title = url;
     g_webview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
@@ -1319,7 +1365,7 @@ void paintWebViewModal(D2DApp& app, float W, float H) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(11.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
-    prim::drawText_(ctx, L"Web", h1,
+    prim::drawText_(ctx, trW("web.title"), h1,
                     cx + 16, cy + 12, 200, 22,
                     br.solidA(pal.text, t),
                     DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -1353,13 +1399,13 @@ void paintWebViewModal(D2DApp& app, float W, float H) {
         prim::fillRR(ctx, cx + 8, cy + bar_h, cw - 16, ch - bar_h - 8, 8.0f,
                      br.solidA(pal.surface, t));
         if (!webview::runtimeAvailable()) {
-            prim::drawText_(ctx, L"WebView2 Runtime missing. Install Edge WebView2.",
+            prim::drawText_(ctx, trW("webview.no_runtime"),
                             sub,
                             cx, cy + ch * 0.5f, cw, 22,
                             br.solidA(pal.text_muted, t),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
         } else {
-            prim::drawText_(ctx, L"Loading...", sub,
+            prim::drawText_(ctx, trW("common.loading"), sub,
                             cx, cy + ch * 0.5f, cw, 22,
                             br.solidA(pal.text_muted, t),
                             DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1382,10 +1428,10 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
-    prim::drawText_(ctx, L"重命名表情包", h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, trW("renamepack.title"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
     prim::drawText_(ctx, g_renamepack.orig_name, sub, cx + 30, cy + 50, cw - 60, 18,
                     br.solidA(pal.text_muted, t));
-    drawField(app, g_renamepack.input, cx + 30, cy + 80, cw - 60, 40, L"New name", true, t);
+    drawField(app, g_renamepack.input, cx + 30, cy + 80, cw - 60, 40, trW("renamepack.placeholder"), true, t);
     hit(g_renamepack.input.bounds, [](){}, true);
     if (!g_renamepack.error_msg.empty()) {
         prim::drawText_(ctx, g_renamepack.error_msg, sub,
@@ -1393,7 +1439,7 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
                         br.solidA(0xE34B4B, t));
     }
     float by = cy + ch - 52;
-    drawGhostBtn(app, cx + 30, by, 120, 36, L"取消", t, [](){ closeRenamePack(); });
+    drawGhostBtn(app, cx + 30, by, 120, 36, trW("common.cancel"), t, [](){ closeRenamePack(); });
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    g_renamepack.busy ? L"Saving..." : L"Save", t,
                    [hwnd = GetActiveWindow()](){ submitRenamePack(hwnd); });
@@ -1465,6 +1511,7 @@ static int64_t muteDurationSeconds() {
 
 void openMuteUser(const std::wstring& target_user_id, const std::wstring& target_label) {
     if (target_user_id.empty()) return;
+    dismissAllModals();
     g_mute_user.open = true;
     g_mute_user.busy = false;
     g_mute_user.target_user_id = target_user_id;
@@ -1487,11 +1534,11 @@ static void closeMuteUser() {
 static void submitMuteUser(HWND hwnd) {
     if (g_mute_user.busy) return;
     if (g_mute_user.chat_id.empty()) {
-        g_mute_user.error_msg = L"Channel not ready";
+        g_mute_user.error_msg = trW("mute.channel_not_ready");
         return;
     }
     if (g_mute_user.reason.text.empty()) {
-        g_mute_user.error_msg = L"请输入原因";
+        g_mute_user.error_msg = trW("mute.reason_required");
         return;
     }
     g_mute_user.busy = true;
@@ -1502,21 +1549,21 @@ static void submitMuteUser(HWND hwnd) {
 void onMuteUserResult(bool success) {
     g_mute_user.busy = false;
     if (success) {
-        toast::show(L"禁言已提交");
+        toast::show(trW("mute.submitted"));
         closeMuteUser();
     } else {
         std::lock_guard<std::mutex> lk(fetch::g_moderation_mtx);
         g_mute_user.error_msg = fetch::g_moderation_member.error.empty()
-            ? L"禁言失败" : fetch::g_moderation_member.error;
+            ? trW("mute.failed") : fetch::g_moderation_member.error;
     }
 }
 
 void onUnmuteUserResult(bool success) {
-    if (success) toast::show(L"已解除禁言");
+    if (success) toast::show(trW("mute.unmuted"));
     else {
         std::lock_guard<std::mutex> lk(fetch::g_moderation_mtx);
         toast::show(fetch::g_moderation_member.error.empty()
-            ? L"解除禁言失败" : fetch::g_moderation_member.error);
+            ? trW("mute.unmute_failed") : fetch::g_moderation_member.error);
     }
 }
 
@@ -1613,7 +1660,7 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
             {
                 std::lock_guard<std::mutex> lk(sticker::g_packs_mtx);
                 for (auto& p : sticker::g_packs) {
-                    if (!p.is_system && p.is_owner && p.name == L"我的表情") {
+                    if (sticker::isMyStickersPack(p)) {
                         my_pid = p.id; break;
                     }
                 }
@@ -1717,23 +1764,23 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
 
     struct Item { std::wstring label; std::function<void()> click; bool danger; bool disabled; };
     std::vector<Item> items;
-    items.push_back({ L"查看个人信息", [](){
+    items.push_back({ trW("usermenu.view_profile"), [](){
         std::wstring key = g_user_menu.profile_key;
         closeUserMenu();
         openUserProfile(key);
     }, false, false });
-    items.push_back({ L"@提及", [](){
+    items.push_back({ trW("usermenu.mention"), [](){
         chat::addMentionToComposer(g_user_menu.profile_key, g_user_menu.label);
         closeUserMenu();
     }, false, false });
     bool self = isSelfProfileKey(g_user_menu.profile_key);
     if (g_user.is_admin && !self) {
         if (!mod.loaded) {
-            items.push_back({ L"加载管理状态...", [](){}, false, true });
+            items.push_back({ trW("usermenu.loading_mod"), [](){}, false, true });
         } else if (!mod.ok) {
-            items.push_back({ mod.error.empty() ? L"管理状态加载失败" : mod.error, [](){}, false, true });
+            items.push_back({ mod.error.empty() ? trW("usermenu.mod_load_failed") : mod.error, [](){}, false, true });
         } else if (mod.active) {
-            items.push_back({ L"解除禁言", [](){
+            items.push_back({ trW("usermenu.unmute"), [](){
                 std::string chat_id = chat::activeChatId();
                 if (!chat_id.empty()) {
                     fetch::unmuteUser(GetActiveWindow(), chat_id,
@@ -1742,7 +1789,7 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
                 closeUserMenu();
             }, false, !mod.can_unmute });
         } else {
-            items.push_back({ L"禁言", [](){
+            items.push_back({ trW("usermenu.mute"), [](){
                 std::wstring key = g_user_menu.profile_key;
                 std::wstring label = g_user_menu.label;
                 closeUserMenu();
@@ -1751,7 +1798,14 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
         }
     }
 
+    auto* menu_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
+    // 菜单宽度按最宽项实测（"Loading moderation status..." / 日文长状态会超出 190 固定宽）。
     float mw = 190.0f;
+    for (const auto& it : items) {
+        float need = measureW(app, it.label, menu_fmt) + 32.0f;  // 左右各 ~16 padding
+        if (need > mw) mw = need;
+    }
+    if (mw > 360.0f) mw = 360.0f;  // 上限，超长状态文末尾省略
     float row = 32.0f;
     float mh = 12.0f + row * (float)items.size() + 12.0f;
     float mx = (float)g_user_menu.anchor.x;
@@ -1766,14 +1820,14 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
 
     prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);
-    auto* fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
     for (size_t i = 0; i < items.size(); ++i) {
         float y = my + 8 + row * (float)i;
         LayoutRect r{ mx + 6, y, mw - 12, row };
         bool hov = !items[i].disabled && r.contains(g_mouse);
         if (hov) prim::fillRR(ctx, r.x, r.y, r.w, r.h, 6, br.solidA(pal.primary, 0.12f * t));
         uint32_t color = items[i].disabled ? pal.text_muted : (items[i].danger ? 0xFFE8795C : pal.text);
-        prim::drawText_(ctx, items[i].label, fmt, r.x + 10, r.y + 8, r.w - 20, 16,
+        std::wstring lbl = fitText(app, items[i].label, menu_fmt, r.w - 20);
+        prim::drawTextNoWrap(ctx, lbl, menu_fmt, r.x + 10, r.y + 8, r.w - 20, 16,
                         br.solidA(color, items[i].disabled ? 0.55f * t : t));
         if (!items[i].disabled) hit(r, items[i].click, true);
     }
@@ -1794,13 +1848,17 @@ void paintMuteUserModal(D2DApp& app, float W, float H) {
     prim::strokeRR(ctx, cx, cy, cw, ch, 14, br.solidA(pal.divider, t), 1.0f);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-    prim::drawText_(ctx, L"禁言用户", h1, cx + 28, cy + 22, cw - 56, 24, br.solidA(pal.text, t));
-    std::wstring line = L"目标：" + g_mute_user.target_label;
+    prim::drawText_(ctx, trW("mute.title"), h1, cx + 28, cy + 22, cw - 56, 24, br.solidA(pal.text, t));
+    std::wstring line = trW("mute.target");
+    {
+        auto p = line.find(L"{name}");
+        if (p != std::wstring::npos) line.replace(p, 6, g_mute_user.target_label);
+    }
     prim::drawText_(ctx, line, sub, cx + 28, cy + 52, cw - 56, 18, br.solidA(pal.text_muted, t));
 
     drawField(app, g_mute_user.duration, cx + 28, cy + 86, 120, 38, L"30", true, t);
     hit(g_mute_user.duration.bounds, [](){ g_mute_user.focus = 0; }, true);
-    const wchar_t* units[] = { L"秒", L"分钟", L"小时", L"天" };
+    const std::wstring units[] = { trW("mute.unit_sec"), trW("mute.unit_min"), trW("mute.unit_hour"), trW("mute.unit_day") };
     float ux = cx + 160;
     for (int i = 0; i < 4; ++i) {
         LayoutRect r{ ux + i * 66.0f, cy + 88, 58, 32 };
@@ -1813,7 +1871,7 @@ void paintMuteUserModal(D2DApp& app, float W, float H) {
                         DWRITE_TEXT_ALIGNMENT_CENTER);
         hit(r, [i](){ g_mute_user.unit = i; }, true);
     }
-    drawField(app, g_mute_user.reason, cx + 28, cy + 146, cw - 56, 108, L"原因", true, t);
+    drawField(app, g_mute_user.reason, cx + 28, cy + 146, cw - 56, 108, trW("mute.reason_placeholder"), true, t);
     hit(g_mute_user.reason.bounds, [](){ g_mute_user.focus = 1; }, true);
 
     if (!g_mute_user.error_msg.empty()) {
@@ -1821,14 +1879,15 @@ void paintMuteUserModal(D2DApp& app, float W, float H) {
                         br.solidA(0xFFE8795C, t));
     }
     float by = cy + ch - 54;
-    drawGhostBtn(app, cx + 28, by, 120, 36, L"取消", t, [](){ closeMuteUser(); });
+    drawGhostBtn(app, cx + 28, by, 120, 36, trW("common.cancel"), t, [](){ closeMuteUser(); });
     drawPrimaryBtn(app, cx + cw - 188, by, 160, 36,
-                   g_mute_user.busy ? L"提交中..." : L"确认禁言", t,
+                   g_mute_user.busy ? trW("mute.submitting") : trW("mute.confirm"), t,
                    [hwnd = GetActiveWindow()](){ submitMuteUser(hwnd); });
 }
 
 // ============== PackPreview modal ==============
 void openPackPreviewModal(const std::string& short_name) {
+    dismissAllModals();  // 互斥：先关资料卡等浮层，避免与本卡片叠加
     g_pack_preview_modal.open = true;
     g_pack_preview_modal.short_name = short_name;
     g_pack_preview_modal.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
@@ -1864,12 +1923,12 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
         pv = sticker::g_pack_preview;
     }
     if (!pv.loaded) {
-        prim::drawText_(ctx, L"Loading...", sub,
+        prim::drawText_(ctx, trW("common.loading"), sub,
                         cx, cy + ch * 0.5f - 12, cw, 24,
                         br.solidA(pal.text_muted, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
     } else if (!pv.err.empty()) {
-        prim::drawText_(ctx, L"无法加载", h1,
+        prim::drawText_(ctx, trW("pack.cant_load"), h1,
                         cx, cy + 30, cw, 24,
                         br.solidA(pal.text, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -1881,15 +1940,20 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
                         DWRITE_TEXT_ALIGNMENT_CENTER);
     } else {
         // Title and creator.
-        prim::drawText_(ctx, pv.name.empty() ? L"分享的表情包" : pv.name, h1,
+        prim::drawText_(ctx, pv.name.empty() ? trW("pack.share_card_title") : pv.name, h1,
                         cx + 30, cy + 22, cw - 60, 30,
                         br.solidA(pal.text, t));
         std::wstring meta;
-        if (!pv.creator_name.empty()) meta = L"by " + pv.creator_name;
-        else meta = L"分享的表情包";
-        wchar_t buf[64];
-        swprintf_s(buf, L"%ls - installed %d times", meta.c_str(), pv.install_count);
-        prim::drawText_(ctx, buf, mt,
+        if (!pv.creator_name.empty()) meta = trW("pack.by_prefix") + pv.creator_name;
+        else meta = trW("pack.share_card_title");
+        std::wstring installed = trW("pack.installed_count");
+        {
+            auto p = installed.find(L"{n}");
+            if (p != std::wstring::npos)
+                installed.replace(p, 3, std::to_wstring(pv.install_count));
+        }
+        std::wstring info = meta + L" - " + installed;
+        prim::drawText_(ctx, info, mt,
                         cx + 30, cy + 54, cw - 60, 18,
                         br.solidA(pal.text_muted, t));
 
@@ -1914,8 +1978,12 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
                 }
             }
             if ((int)pv.sticker_paths.size() > max_show) {
-                wchar_t mw[32];
-                swprintf_s(mw, L"+ %d more", (int)pv.sticker_paths.size() - max_show);
+                std::wstring mw = trW("pack.more_count");
+                {
+                    auto p = mw.find(L"{n}");
+                    if (p != std::wstring::npos)
+                        mw.replace(p, 3, std::to_wstring((int)pv.sticker_paths.size() - max_show));
+                }
                 prim::drawText_(ctx, mw, mt,
                                 cx + 30, cy + 88 + 3 * (cell + 6) + 4, cw - 60, 18,
                                 br.solidA(pal.text_muted, t),
@@ -1924,18 +1992,18 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
         }
 
         float by = cy + ch - 56;
-        drawGhostBtn(app, cx + 30, by, 130, 38, L"取消", t,
+        drawGhostBtn(app, cx + 30, by, 130, 38, trW("common.cancel"), t,
                      [](){ closePackPreview(); });
         if (pv.already_installed) {
             drawGhostBtn(app, cx + cw - 30 - 200, by, 200, 38,
-                         L"Installed", t, [](){
+                         trW("pack.installed"), t, [](){
                             closePackPreview();
-                            toast::show(L"Pack already installed");
+                            toast::show(trW("pack.already_installed"));
                          });
         } else {
             std::string sn = pv.short_name;
             drawPrimaryBtn(app, cx + cw - 30 - 200, by, 200, 38,
-                           L"添加分组", t, [sn](){
+                           trW("pack.add_group"), t, [sn](){
                                 sticker::installPackByShort(GetActiveWindow(), sn);
                                 closePackPreview();
                            });
@@ -1955,6 +2023,7 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
 
 // ============== Search modal (Ctrl+F) ==============
 void openSearch() {
+    dismissAllModals();
     g_search.open = true;
     g_search.input.text.clear();
     g_search.input.cursor = 0;
@@ -2095,7 +2164,7 @@ void paintSearchModal(D2DApp& app, float W, float H) {
     auto* row_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
     auto* meta = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.0f));
 
-    prim::drawText_(ctx, L"搜索消息", h1,
+    prim::drawText_(ctx, trW("search.title"), h1,
                     cx + 24, cy + 22, cw - 48, 22,
                     br.solidA(pal.text, t));
     wchar_t hint_buf[64];
@@ -2317,6 +2386,27 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         return true;
     }
     return false;
+}
+
+// 关掉当前所有打开的 modal/卡片（含上下文菜单），供 openX() 在打开新窗口前调用，
+// 实现“同一时刻只有一个浮层”。逐个复用各自 close 函数以保留收起动画/副作用
+// （如 CS2 关 WebView、用户卡清状态）。
+void dismissAllModals() {
+    if (g_change_pw.open)          closeChangePw();
+    if (g_confirm.open)            closeConfirm();
+    if (g_cs2.open)                closeCS2();
+    if (g_history.open)            closeHistory();
+    if (g_addtag.open)             closeAddTag();
+    if (g_createpack.open)         closeCreatePack();
+    if (g_renamepack.open)         closeRenamePack();
+    if (g_user_profile.open)       closeUserProfile();
+    if (g_edit_status.open)        closeEditStatusText();
+    if (g_edit_bio.open)           closeEditBio();
+    if (g_webview_modal.open)      closeWebViewModal();
+    if (g_mute_user.open)          closeMuteUser();
+    if (g_pack_preview_modal.open) closePackPreview();
+    if (g_search.open)             closeSearch();
+    closeContextMenus();  // msg menu + user menu
 }
 
 }  // namespace launcher::d2d::modal

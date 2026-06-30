@@ -2,12 +2,17 @@
 # 之后所有 ssh/scp 用 key，不再走密码
 
 param(
-    [string]$Host_ = '154.40.36.22',
+    [string]$Host_ = $env:LAUNCHER_DEPLOY_HOST,
     [int]$Port = 22,
     [string]$User = 'root'
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($Host_)) {
+    Write-Error 'Host 未指定。用 -Host_ 传入，或设置环境变量 $env:LAUNCHER_DEPLOY_HOST（见 .deploy.local）。'
+    exit 1
+}
 
 $keyDir  = Join-Path $env:USERPROFILE '.ssh'
 $keyPath = Join-Path $keyDir 'launcher_deploy'

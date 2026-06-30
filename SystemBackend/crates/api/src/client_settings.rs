@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 fn valid_key(key: &str) -> bool {
     let len = key.chars().count();

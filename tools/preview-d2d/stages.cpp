@@ -7,6 +7,7 @@
 #include "auth.h"
 #include "ui_main.h"
 #include "render/primitives.h"
+#include "i18n.h"
 
 #include <cmath>
 #include <algorithm>
@@ -297,7 +298,7 @@ static void paintLoading(D2DApp& app, float W, float H) {
 
     auto* fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     if (fmt) {
-        prim::drawText_(ctx, L"连接中…", fmt,
+        prim::drawText_(ctx, trW("loading.connecting"), fmt,
                         cx, cy + ch - 42.0f, cw, 24.0f,
                         br.solidA(pal.text_muted, opacity),
                         DWRITE_TEXT_ALIGNMENT_CENTER);

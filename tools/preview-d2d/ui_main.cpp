@@ -21,6 +21,7 @@
 #include "render/primitives.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <commdlg.h>
 #include <ShlObj.h>
@@ -533,10 +534,11 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     float fx = cx + 22 + ar * 2 + 18;
     std::wstring home_name = fitText(app, g_user.nickname, h1, cw - (fx - cx) - 22.0f);
     prim::drawText_(ctx, home_name, h1,
-                    fx, cy + 24, cw - (fx - cx) - 22, 30,
+                    fx, cy + 20, cw - (fx - cx) - 22, 32,
                     br.solidA(pal.text, op));
+    // status 行下移到 cy+62：22pt 名字行高约 30，避免长名描边与 Online 文字相挤
     prim::drawText_(ctx, statusLabel(g_status), sub,
-                    fx, cy + 56, cw - (fx - cx) - 22, 18,
+                    fx, cy + 62, cw - (fx - cx) - 22, 18,
                     br.solidA(statusColor(g_status), op));
 
     // 3 stat 卡（订阅 / 时间 / PC 名）— 时间精确到秒 + 时区 + VPN/国家
@@ -592,7 +594,13 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
             else if (s.label == trW("home.device_tag")) val_size = ptToDip(8.0f);
             auto* val_fmt2 = app.texts().format(L"Microsoft YaHei UI", val_size,
                                                  DWRITE_FONT_WEIGHT_BOLD);
-            prim::drawText_(ctx, s.val.c_str(), val_fmt2,
+            // 机器码很长（12 段 hex），时间可能带时区+国家后缀 — 都强制单行 + 末尾省略，
+            // 避免在卡片里折成两行错位。
+            std::wstring val_disp = s.val;
+            if (s.label == trW("home.device_tag") || s.label == trW("home.time")) {
+                val_disp = fitText(app, s.val, val_fmt2, sw_ - 32);
+            }
+            prim::drawTextNoWrap(ctx, val_disp.c_str(), val_fmt2,
                             spx + 16, sy_ + 38, sw_ - 32, 28,
                             br.solidA(pal.text, op));
         }
@@ -612,7 +620,7 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     bool empty_real = tags.empty() && g_session_token.empty();
     if (empty_real) {
-        tags = { L"CS2", L"Premier 18k", L"东京机房" };
+        tags = { L"CS2", L"Premier 18k", trW("home.sample_tag_room") };
     }
     for (auto& tag : tags) {
         float max_chip_w = (std::max)(96.0f, cw - 54.0f);
@@ -643,17 +651,22 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         chipx += tw + 8;
         if (chipx > cx + cw - 80) break;
     }
-    // + 添加 chip
+    // + 添加 chip — 文案随语言变长（英 "+ Add tag" 比中 "+ 添加" 宽），
+    // 用 ceil 后的实测宽 + 左右 12px padding，并对内部 draw 关掉换行，避免裁成两行。
     if (!empty_real) {
         std::wstring add = trW("home.add_tag");
-        float aw_ = measureW(app, add, chip_fmt) + 20;
+        float pad = 12.0f;
+        float text_w = std::ceil(measureW(app, add, chip_fmt)) + 1.0f;
+        float aw_ = text_w + pad * 2;
         LayoutRect addr{ chipx, chipy, aw_, 26 };
         bool ahov = addr.contains(g_mouse);
         prim::strokeRR(ctx, chipx, chipy, aw_, 26, 13,
                        br.solidA(pal.primary, op * (ahov ? 1.0f : 0.6f)));
+        chip_fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         prim::drawText_(ctx, add, chip_fmt,
-                        chipx + 10, chipy + 5, aw_ - 20, 16,
+                        chipx + pad, chipy + 5, text_w, 16,
                         br.solidA(pal.primary, op));
+        chip_fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         hit(addr, [](){ modal::openAddTag(); }, true);
     }
 }
@@ -668,7 +681,7 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
-    prim::drawText_(ctx, L"启动游戏", h1,
+    prim::drawText_(ctx, trW("launch.title"), h1,
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
 
@@ -703,7 +716,7 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawText_(ctx, L"Counter-Strike 2", gn_fmt,
                     cx + 16, cy + lift + 96, 240 - 32, 24,
                     br.solidA(0xFFFFFF, op));
-    prim::drawText_(ctx, L"点击查看 / 启动", sub,
+    prim::drawText_(ctx, trW("launch.click_hint"), sub,
                     cx + 16, cy + lift + 118, 240 - 32, 16,
                     br.solidA(0xFFFFFF, op * 0.78f));
     // 中央 ▶ (hover 才显)
@@ -730,10 +743,10 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
                                         DWRITE_FONT_WEIGHT_BOLD);
     auto* meta = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
 
-    prim::drawText_(ctx, L"市场", h1,
+    prim::drawText_(ctx, trW("market.title"), h1,
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
-    prim::drawText_(ctx, L"CS2 .cfg / 配置 / 模板", sub,
+    prim::drawText_(ctx, trW("market.sub"), sub,
                     ax + 32, ay + 64, aw - 64, 22,
                     br.solidA(pal.text_muted, op));
 
@@ -745,7 +758,7 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
         market_loaded = fetch::g_market_loaded;
     }
     if (listings.empty()) {
-        prim::drawText_(ctx, market_loaded ? L"暂无商品" : L"商品加载中…", sub,
+        prim::drawText_(ctx, market_loaded ? trW("market.empty") : trW("market.loading"), sub,
                         ax + 32, ay + 100, aw - 64, 22,
                         br.solidA(pal.text_muted, op));
         return;
@@ -772,10 +785,12 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
         prim::drawText_(ctx, listings[i].summary, meta,
                         cx + 16, cy + 42, card_w - 32, 36,
                         br.solidA(pal.text_muted, op));
-        wchar_t price_buf[32];
-        swprintf_s(price_buf, L"%d 积分  ·  by %.16ls",
-                   listings[i].price, listings[i].seller.c_str());
-        prim::drawText_(ctx, price_buf, meta,
+        std::wstring price_str = trW("market.price");
+        if (auto pn = price_str.find(L"{n}"); pn != std::wstring::npos)
+            price_str.replace(pn, 3, std::to_wstring(listings[i].price));
+        if (auto ps = price_str.find(L"{seller}"); ps != std::wstring::npos)
+            price_str.replace(ps, 8, listings[i].seller.substr(0, 16));
+        prim::drawText_(ctx, price_str, meta,
                         cx + 16, cy + card_h - 26, card_w - 32, 18,
                         br.solidA(pal.primary, op));
     }
@@ -790,7 +805,7 @@ void paintCloudView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(22.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
-    prim::drawText_(ctx, L"云端", h1,
+    prim::drawText_(ctx, trW("menu.cloud"), h1,
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
     // 大空状态卡
@@ -799,7 +814,7 @@ void paintCloudView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::strokeRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.divider, op));
     icons::drawIcon(app, icons::Name::Cloud, cx + cw * 0.5f - 28, cy + ch * 0.4f - 28, 56,
                     fadeArgb(pal.text_faint, op));
-    prim::drawText_(ctx, L"云端同步暂未启用", sub,
+    prim::drawText_(ctx, trW("cloud.disabled"), sub,
                     cx, cy + ch * 0.4f + 36, cw, 22,
                     br.solidA(pal.text_muted, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -816,14 +831,14 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
     auto* lab_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
                                        DWRITE_FONT_WEIGHT_BOLD);
-    prim::drawText_(ctx, L"设置", h1,
+    prim::drawText_(ctx, trW("menu.settings"), h1,
                     ax + 32, ay + 28, aw - 64, 36,
                     br.solidA(pal.text, op));
 
     float vx = ax + 32, sy_ = ay + 80;
 
     // 主题 seg control — pill 滑块 tween
-    prim::drawText_(ctx, L"主题", lab_fmt,
+    prim::drawText_(ctx, trW("settings.theme"), lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
     sy_ += 24;
     float seg_w = 240, seg_h = 36;
@@ -838,11 +853,11 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     float theme_pill_x = vx + g_seg_theme_x.value();
     prim::fillRR(ctx, theme_pill_x + 2, sy_ + 2, pill_w_t - 4, seg_h - 4, 6.0f,
                  br.solidA(pal.card, op));
-    prim::drawText_(ctx, L"亮", sub,
+    prim::drawText_(ctx, trW("settings.theme_light"), sub,
                     vx, sy_ + 9, pill_w_t, 18,
                     br.solidA(g_dark ? pal.text_muted : pal.text, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
-    prim::drawText_(ctx, L"暗", sub,
+    prim::drawText_(ctx, trW("settings.theme_dark"), sub,
                     vx + pill_w_t, sy_ + 9, pill_w_t, 18,
                     br.solidA(g_dark ? pal.text : pal.text_muted, op),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -853,7 +868,7 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     sy_ += seg_h + 28;
 
     // 语言 seg control (3 段) — pill 滑块 tween
-    prim::drawText_(ctx, L"语言", lab_fmt,
+    prim::drawText_(ctx, trW("settings.language"), lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
     sy_ += 24;
     float lseg_w = 360;
@@ -882,7 +897,7 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     sy_ += seg_h + 28;
 
     // 关于
-    prim::drawText_(ctx, L"关于", lab_fmt,
+    prim::drawText_(ctx, trW("settings.about"), lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
     sy_ += 24;
     prim::drawText_(ctx, L"Launcher  v0.1.0  ·  D2D + DComp pipeline", sub,

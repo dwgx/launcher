@@ -175,6 +175,14 @@ void appendMedia(const std::wstring& path);
 // 公共：把消息追加到当前频道，并且如果此频道用户在底部就自动跟随到底
 void appendLocalMessage(Msg msg);
 
+// 切换账号（登录成功）时清空所有频道消息缓存，避免上一个账号的
+// "me" 消息在新账号下仍然右对齐（render-time self 判定靠当前 user_id）。
+void resetForAccount();
+
+// 判定一条消息是否属于"当前登录用户"。不再只看 m.from==L"me" 字面量，
+// 而是把 author_key 与当前 g_user_id/uid/username 比对，避免跨账号污染。
+bool isSelfMessage(const Msg& m);
+
 // 公共：按 server_id/client_msg_id 合并；没有重复时追加到指定频道
 bool appendOrMergeMessage(const std::wstring& slug, Msg msg);
 
@@ -183,9 +191,6 @@ bool appendOrMergeMessage(const std::wstring& slug, Msg msg);
 void focusMessage(const std::wstring& slug, int64_t server_id);
 
 // 拉某频道历史消息 (GET /api/chat/history?session_token=&chat_id=) → WM_APP+45
-void appendLocalMessage(Msg msg);
-bool appendOrMergeMessage(const std::wstring& slug, Msg msg);
-void focusMessage(const std::wstring& slug, int64_t server_id);
 void fetchHistory(HWND notify, const std::wstring& slug);
 
 // 主线程 WM_APP+45 调 — 把后台拉到的历史 merge 到 streamFor(slug)

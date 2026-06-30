@@ -204,7 +204,7 @@
     <p class="text-xs opacity-60 mb-4">这里只做软删除，会把当前消息标记为 <code>deleted_at = now()</code>。数量：<span class="font-mono text-orange-300">{{ c.message_count }}</span>。</p>
     <form method="post" action="/admin/channels/{{ c.id }}/clear" class="flex justify-end gap-2">
       <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('clear-{{ c.id }}').close()">取消</button>
-      <button class="btn btn-sm" style="background:#B14444;color:#fff;border:0;">确认清空</button>
+      <button class="btn btn-sm btn-danger">确认清空</button>
     </form>
   </div>
   <form method="dialog" class="modal-backdrop"><button>close</button></form>

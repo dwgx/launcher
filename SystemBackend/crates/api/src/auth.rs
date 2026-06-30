@@ -242,6 +242,9 @@ pub struct LoginResp {
     pub subscription_tier: Option<String>,
     pub subscription_expires: Option<i64>,
     pub user_id: String,
+    /// 当前机器 HWID 是否与已绑定 HWID 一致。
+    /// false = 换了机器仍允许登录（为了能发工单/重绑申请），但功能受限。
+    pub hwid_ok: bool,
 }
 
 pub async fn login(
@@ -287,6 +290,8 @@ pub async fn login(
                 entry.count += 1;
             }
         }
+        // 注意：login_history.user_id 是 UUID NOT NULL（见 migrations/0003_user_profile.sql），
+        // 未知用户没有对应 user_id，无法插入 login_history，因此这里不记录失败行，仅计数限流。
         (StatusCode::UNAUTHORIZED, "invalid credentials".into())
     })?;
 
@@ -296,6 +301,18 @@ pub async fn login(
                 entry.count += 1;
             }
         }
+        // 记 login_history：密码错误的失败登录。此时已有 row.id，可写入 user_id。
+        sqlx::query!(
+            r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
+               VALUES ($1, false, $2, $3, $4)"#,
+            row.id,
+            &req.hwid_hex[..16.min(req.hwid_hex.len())],
+            req.client_ver,
+            Some("bad_password")
+        )
+        .execute(&s.db)
+        .await
+        .ok();
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
     }
 
@@ -307,11 +324,12 @@ pub async fn login(
     }
 
     let hwid_salted = hashing::salt_hwid(&req.hwid_hex, b"launcher.hwid.salt.v1");
-    match &row.hwid_bound {
-        Some(bound) if bound != &hwid_salted => {
-            return Err((StatusCode::FORBIDDEN, "hwid mismatch".into()));
-        }
+    // HWID 不匹配不再拒绝登录：换机/重装的用户仍要能进来发工单、走重绑流程。
+    // 不匹配时保留原 hwid_bound（不覆盖），并把 hwid_ok=false 回给客户端做功能限制。
+    let hwid_ok = match &row.hwid_bound {
+        Some(bound) => bound == &hwid_salted,
         None => {
+            // 首次登录：绑定当前 HWID
             sqlx::query!(
                 "UPDATE users SET hwid_bound = $1 WHERE id = $2",
                 hwid_salted,
@@ -320,9 +338,9 @@ pub async fn login(
             .execute(&s.db)
             .await
             .map_err(internal)?;
+            true
         }
-        _ => {}
-    }
+    };
 
     let now = Utc::now();
     let token = Uuid::new_v4().to_string();
@@ -340,6 +358,19 @@ pub async fn login(
     .await
     .map_err(internal)?;
 
+    // 记 login_history：成功，但 HWID 不匹配时 failure_reason 标记 hwid_mismatch 以便审计
+    sqlx::query!(
+        r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
+           VALUES ($1, true, $2, $3, $4)"#,
+        row.id,
+        &req.hwid_hex[..16.min(req.hwid_hex.len())],
+        req.client_ver,
+        if hwid_ok { None } else { Some("hwid_mismatch") }
+    )
+    .execute(&s.db)
+    .await
+    .ok();
+
     let tier_str = row.subscription_tier.clone();
     let exp_unix = row.subscription_expires_at.map(|t| t.timestamp());
 
@@ -349,6 +380,7 @@ pub async fn login(
         subscription_tier: tier_str,
         subscription_expires: exp_unix,
         user_id: row.id.to_string(),
+        hwid_ok,
     }))
 }
 
@@ -368,9 +400,7 @@ pub async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 #[allow(dead_code)]
 fn _unused(_e: AppError, _t: Tier) {}

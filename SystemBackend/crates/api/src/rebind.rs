@@ -187,6 +187,7 @@ pub async fn admin_approve(
         &actor.name, id.to_string(),
         serde_json::json!({"user_id": row.user_id.to_string()}))
         .execute(&s.db).await.ok();
+    crate::audit::event(&actor.name, "hwid_rebind.approve", &id.to_string());
 
     Ok(Json(RebindResp {
         request_id: id.to_string(),
@@ -227,6 +228,7 @@ pub async fn admin_deny(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'hwid_rebind.deny', $2, NULL)",
         &actor.name, id.to_string())
         .execute(&s.db).await.ok();
+    crate::audit::event(&actor.name, "hwid_rebind.deny", &id.to_string());
 
     Ok(Json(RebindResp {
         request_id: id.to_string(),
@@ -234,9 +236,7 @@ pub async fn admin_deny(
     }))
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 // ---------------- admin SSR ----------------
 pub struct RebindRowVm {
@@ -359,6 +359,7 @@ async fn form_approve(
         let _ = sqlx::query!(
             "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'hwid_rebind.approve',$2,NULL)",
             &actor.name, id.to_string()).execute(&s.db).await;
+        crate::audit::event(&actor.name, "hwid_rebind.approve", &id.to_string());
     }
     axum::response::Redirect::to("/admin/rebind?ok=approve").into_response()
 }
@@ -381,5 +382,6 @@ async fn form_deny(
     let _ = sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'hwid_rebind.deny',$2,NULL)",
         &actor.name, id.to_string()).execute(&s.db).await;
+    crate::audit::event(&actor.name, "hwid_rebind.deny", &id.to_string());
     axum::response::Redirect::to("/admin/rebind?ok=deny").into_response()
 }

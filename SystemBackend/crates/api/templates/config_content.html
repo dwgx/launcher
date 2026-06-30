@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
-  <div class="card bg-base-100 shadow">
+  <div class="card bg-base-100 shadow min-w-0">
     <div class="card-body">
       <div class="flex items-center justify-between gap-3 mb-3">
         <h2 class="card-title text-base">配置项</h2>
@@ -27,7 +27,7 @@
               <td><span class="badge badge-outline badge-sm">{{ e.category }}</span></td>
               <td>
                 <div class="font-medium">{{ e.label }}</div>
-                <div class="text-xs opacity-60 max-w-md">{{ e.description }}</div>
+                <div class="text-xs opacity-60 max-w-md cell-wrap">{{ e.description }}</div>
               </td>
               <td>
                 <div class="font-mono text-xs max-w-sm truncate">{{ e.value_text }}</div>
@@ -66,7 +66,7 @@
     </div>
   </div>
 
-  <div class="card bg-base-100 shadow">
+  <div class="card bg-base-100 shadow min-w-0">
     <div class="card-body">
       <h2 class="card-title text-base">新增或修改</h2>
       <form id="config-form" method="post" action="/admin/config" class="space-y-3">

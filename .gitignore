@@ -98,3 +98,20 @@ coverage/
 tmp/
 *.tmp
 *~
+
+# sqlx 离线缓存（构建在服务器侧连真库校验，不入库）
+SystemBackend/.sqlx/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
+# 本地构建产物 / 临时计划
+tools/preview-d2d/build_out.txt
+tools/preview-d2d/_build.cmd
+.claude_fix_plan.md
+.claude_*_plan.md
+
+# 本地启动脚本（含家里云内网地址，属本地环境配置，勿入公开仓库）
+tools/preview-d2d/run-multi.bat
+tools/preview-d2d/启动-连homecloud.bat

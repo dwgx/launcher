@@ -214,7 +214,7 @@ if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
     if ($Target -eq 'audit') {
         if ($deployHost) { $BaseUrl = "http://$deployHost`:1338" }
     } elseif ($Target -eq 'production') {
-        $BaseUrl = 'https://154.40.36.22:1337'
+        if ($deployHost) { $BaseUrl = "https://$deployHost`:1337" }
     }
 }
 $script:ResolvedBaseUrl = $BaseUrl

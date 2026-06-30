@@ -9,6 +9,7 @@
 #include <atomic>
 #include <vector>
 #include <mutex>
+#include "i18n.h"
 
 namespace launcher::d2d {
 
@@ -24,6 +25,7 @@ struct UserInfo {
     bool is_admin = false;
     int level = 1;
     bool subscribed = false;
+    bool hwid_ok = true;                // 当前机器 HWID 是否匹配绑定；false = 换机登录，功能受限
     std::wstring status_text;          // 自定义状态消息（48 字以内）
     std::wstring bio;                   // 个人签名（240 字以内）
 };
@@ -60,13 +62,13 @@ inline const wchar_t* statusKey(UserStatus s) {
     default:                  return L"offline";
     }
 }
-inline const wchar_t* statusLabel(UserStatus s) {
+inline std::wstring statusLabel(UserStatus s) {
     switch (s) {
-    case UserStatus::Online:  return L"在线";
-    case UserStatus::Busy:    return L"繁忙";
-    case UserStatus::Away:    return L"离开";
-    case UserStatus::Sleep:   return L"睡眠";
-    default:                  return L"离线";
+    case UserStatus::Online:  return trW("status.online");
+    case UserStatus::Busy:    return trW("status.busy");
+    case UserStatus::Away:    return trW("status.away");
+    case UserStatus::Sleep:   return trW("status.sleep");
+    default:                  return trW("status.offline");
     }
 }
 

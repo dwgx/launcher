@@ -28,5 +28,5 @@
 - Windows 客户端：`cmd /c tools\preview-d2d\build_d2d.bat`
 - 后端编译：在 VPS 或有 PostgreSQL schema 的环境中设置 `DATABASE_URL` 后运行 `cargo build --release -p launcher-api -p launcher-signer`
 - 后端服务：`systemctl status systembackend --no-pager -l`
-- 公网 API：`curl -k https://154.40.36.22:1337/api/market/categories`
+- 公网 API：`curl -k https://<DEPLOY_HOST>:1337/api/market/categories`
 - Git 卫生：`git diff --check` 和 `git status --short`

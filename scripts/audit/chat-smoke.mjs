@@ -15,6 +15,8 @@ const reportStartedAt = nowIso();
 const userPrefix = runId.length > 28 ? runId.slice(0, 28) : runId;
 const chatUserCount = Math.max(4, Math.min(12, Number.parseInt(process.env.LAUNCHER_CHAT_USERS || '5', 10) || 5));
 const adminKey = process.env.LAUNCHER_AUDIT_ADMIN_KEY || '';
+// 生产开 require_invite_code 时，注册需带有效邀请码（max_uses 要够覆盖 chatUserCount）。
+const inviteCode = process.env.LAUNCHER_AUDIT_INVITE_CODE || '';
 
 const users = Array.from({ length: chatUserCount }, (_, i) => ({
   username: `${userPrefix}_c${String.fromCharCode(97 + i)}`,
@@ -37,7 +39,13 @@ function isProductionUrl(raw) {
     return false;
   }
   const host = url.hostname.toLowerCase();
-  return host === '154.40.36.22' || host === 'launcher.dwgx.com';
+  // 生产 host 列表从环境变量读，避免把真实地址写死进源码。
+  // 逗号分隔，例如：LAUNCHER_PROD_HOSTS="1.2.3.4,example.com"
+  const prodHosts = (process.env.LAUNCHER_PROD_HOSTS || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return prodHosts.includes(host);
 }
 
 if (isProductionUrl(base)) {
@@ -274,7 +282,7 @@ async function main() {
           email: null,
           hwid_hex: u.hwid,
           client_ver: 'chat-smoke',
-          invite_code: null,
+          invite_code: inviteCode || null,
         },
       });
       u.token = reg.session_token;

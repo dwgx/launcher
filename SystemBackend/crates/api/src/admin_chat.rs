@@ -82,9 +82,7 @@ struct AdminSender {
     uid: String,
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
+use crate::error::internal_msg as internal;
 
 fn notice(q: &ChatPageQuery) -> Option<ui::AdminNotice> {
     match (q.ok.as_deref(), q.err.as_deref()) {
@@ -524,6 +522,7 @@ async fn insert_admin_message(
     .execute(&state.db)
     .await
     .ok();
+    crate::audit::event(actor_name, "admin.chat_send", &chat_id.to_string());
     Ok(())
 }
 

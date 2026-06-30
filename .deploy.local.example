@@ -8,6 +8,8 @@
 # key_path   = 部署用 SSH key 路径（脚本会自动生成）
 # remote_dir = 二进制 + 配置部署路径
 # service    = systemd unit 名
+# health_host     = 部署后健康检查的 host（默认用 host；若证书按域名签发，填域名以通过 TLS 校验）
+# health_insecure = "1" 时健康检查用 curl -k 跳过 TLS 校验（默认 "0"，做完整校验）
 
 host       = "<homecloud-host-or-ip>"
 port       = "22"
@@ -16,3 +18,5 @@ password   = ""
 key_path   = "$HOME\\.ssh\\launcher_deploy"
 remote_dir = "/opt/systembackend"
 service    = "systembackend"
+# health_host     = "<deploy-domain>"
+# health_insecure = "0"

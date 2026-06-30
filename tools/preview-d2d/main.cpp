@@ -51,6 +51,47 @@ static std::string envStringA(const char* name) {
     return std::string(buf, n);
 }
 
+// 单实例锁。产品不允许多开：第二个实例检测到锁后弹窗提醒，前置已有窗口并退出。
+// 测试期可设环境变量 LAUNCHER_ALLOW_MULTI=1 绕过（仅开发用，发布版不要设）。
+// 返回值契约：nullptr = 已有实例在跑、本进程应退出；其它（含 INVALID_HANDLE_VALUE
+// 与有效 HANDLE）= 应继续运行。持有的 HANDLE 留到进程退出由 OS 回收。
+static HANDLE acquireSingleInstance() {
+    if (!envStringA("LAUNCHER_ALLOW_MULTI").empty()) return INVALID_HANDLE_VALUE;  // 显式放行多开
+    // Local\ 前缀：锁限定在当前登录会话内，不跨用户/远程会话，符合“同一用户不重复开”的语义
+    HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\LauncherD2D.SingleInstance.v1");
+    if (!m) return INVALID_HANDLE_VALUE;  // 创建失败：宁可放行也不误锁死用户
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // 已有实例：先把它的窗口拉到前台，再弹窗告知用户已在运行
+        HWND prev = FindWindowW(L"LauncherD2DPreview", nullptr);
+        if (prev) {
+            if (IsIconic(prev)) ShowWindow(prev, SW_RESTORE);
+            SetForegroundWindow(prev);
+        }
+        // 弹窗文案本地化：守卫早于 g_lang 加载，这里独立取语言（用户偏好优先，回退系统语言）
+        Lang lang = (Lang)persist::loadLang((int)detectSystemLang());
+        const wchar_t* title;
+        const wchar_t* body;
+        switch (lang) {
+            case Lang::ZhCN:
+                title = L"Launcher 已在运行";
+                body  = L"Launcher 已经打开了，不能重复启动。\n已为你切换到正在运行的窗口。";
+                break;
+            case Lang::JaJP:
+                title = L"Launcher は既に起動しています";
+                body  = L"Launcher はすでに開いています。多重起動はできません。\n実行中のウィンドウに切り替えました。";
+                break;
+            default:
+                title = L"Launcher is already running";
+                body  = L"Launcher is already open and cannot be launched twice.\nSwitched you to the running window.";
+                break;
+        }
+        MessageBoxW(prev, body, title, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        CloseHandle(m);
+        return nullptr;
+    }
+    return m;  // 首个实例，拿到锁
+}
+
 static std::wstring utf8ToWMain(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -123,8 +164,8 @@ static void leaveInvalidSession(HWND hwnd, bool clear_persisted, bool show_toast
     }
     if (show_toast) {
         toast::show(clear_persisted
-            ? L"登录已过期，请重新登录"
-            : L"无法验证登录状态，请重新登录");
+            ? trW("session.expired")
+            : trW("session.cannot_verify"));
     }
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -287,15 +328,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp && p && !p->empty()) {
                 g_avatar_path = *p;
                 g_app.images().invalidate();
-                toast::show(L"头像已同步到云端 ✓");
+                toast::show(trW("toast.avatar_synced"));
             } else {
-                toast::show(L"头像上传失败");
+                toast::show(trW("toast.avatar_upload_fail"));
             }
             return 0;
         }
         case WM_APP + 4: {                     // ChangePw result
             modal::onChangePwResult(wp != 0);
-            if (wp) toast::show(L"密码已修改，请重新登录");
+            if (wp) toast::show(trW("toast.pw_changed"));
             return 0;
         }
         case WM_APP + 5: {                     // Chat official channels result
@@ -322,7 +363,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 19: {                    // pack create result
             modal::onCreatePackResult(wp != 0);
             if (wp) {
-                toast::show(L"表情包已创建");
+                toast::show(trW("toast.pack_created"));
                 // 立即重拉 packs 列表，新 pack 出现在 picker（不用重启客户端）
                 sticker::fetchMyPacks(hwnd);
             }
@@ -330,7 +371,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 20: {                    // pack rename result
             modal::onRenamePackResult(wp != 0);
-            if (wp) toast::show(L"已重命名");
+            if (wp) toast::show(trW("toast.renamed"));
             return 0;
         }
         case WM_APP + 21: {                    // chat picker → 新建表情包
@@ -347,7 +388,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp && p && !p->empty()) {
                 g_avatar_path = *p;
                 g_app.images().invalidate();   // 强制下次重新解码
-                toast::show(L"头像已从云端同步 ✓");
+                toast::show(trW("toast.avatar_cloud_synced"));
             } else {
                 g_avatar_path.clear();
                 g_app.images().invalidate();
@@ -382,26 +423,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         }
                         CloseClipboard();
                     }
-                    toast::show(L"分享链接已复制到剪贴板 ✓");
+                    toast::show(trW("toast.shared_done"));
                 } else {
-                    toast::show(L"已取消分享");
+                    toast::show(trW("toast.share_canceled"));
                 }
                 // 不重拉 packs（避免 active tab 索引错乱）— sharePack 内部已写回 short_name
-            } else toast::show(L"分享失败");
+            } else toast::show(trW("toast.share_fail"));
             return 0;
         }
         case WM_APP + 27: {                    // pack delete result
             if (wp) {
-                toast::show(L"已删除表情包");
+                toast::show(trW("toast.pack_deleted"));
                 sticker::fetchMyPacks(hwnd);    // 立即刷新 picker 让 pack 消失
-            } else toast::show(L"删除失败");
+            } else toast::show(trW("toast.delete_fail"));
             return 0;
         }
         case WM_APP + 28: {                    // pack install result
             if (wp) {
-                toast::show(L"已安装表情包");
+                toast::show(trW("toast.pack_installed"));
                 sticker::fetchMyPacks(hwnd);
-            } else toast::show(L"安装失败");
+            } else toast::show(trW("toast.install_fail"));
             return 0;
         }
         case WM_APP + 30: {                    // login history result; lp = std::string*
@@ -419,12 +460,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (payload) {
                 std::string id_copy = payload->id;
                 std::wstring nm_copy = payload->name;
-                modal::openConfirm(L"删除表情包",
-                    L"确认删除「" + nm_copy + L"」？分享出去的也会失效。",
+                std::wstring msg = trW("confirm.delete_pack_msg");
+                auto p = msg.find(L"{name}");
+                if (p != std::wstring::npos) msg.replace(p, 6, nm_copy);
+                modal::openConfirm(trW("confirm.delete_pack_title"),
+                    msg,
                     [id_copy](){
                         sticker::deletePack(GetActiveWindow(), id_copy);
                     },
-                    L"删除", L"取消", true);
+                    trW("picker.delete"), trW("common.cancel"), true);
             }
             return 0;
         }
@@ -433,10 +477,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 29: {                    // sticker import 完成；wp=成功数 lp=pack_id
             std::unique_ptr<std::string> pid((std::string*)lp);
-            wchar_t buf[64];
             if (wp > 0) {
-                swprintf_s(buf, L"已导入 %d 张表情 ✓", (int)wp);
-                toast::show(buf);
+                std::wstring msg = trW("toast.imported");
+                auto p = msg.find(L"{n}");
+                if (p != std::wstring::npos) msg.replace(p, 3, std::to_wstring((int)wp));
+                toast::show(msg);
                 // 切 picker active tab 到这个 pack（让用户立刻看到导入的图）
                 if (pid) {
                     int idx = -1;
@@ -452,7 +497,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     }
                 }
             } else {
-                toast::show(L"未上传任何文件（检查文件夹）");
+                toast::show(trW("toast.no_files_uploaded"));
             }
             return 0;
         }
@@ -461,7 +506,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (pid && !pid->empty()) {
                 int total = sticker::totalUserStickers();
                 if (total >= 50) {
-                    toast::show(L"已达上限（50/用户）— 删些再导入");
+                    toast::show(trW("toast.over_limit_import"));
                     return 0;
                 }
                 sticker::importFromFolderUi(hwnd, *pid);
@@ -481,7 +526,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 41: {                    // chat picker → 我的表情想导入
-            toast::show(L"请先切到/新建一个表情包分组再导入");
+            toast::show(trW("toast.pick_group_first"));
             return 0;
         }
         case WM_APP + 45: {                    // chat history fetched (lp = std::wstring* slug)
@@ -500,12 +545,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 43: {                    // sticker 导出完成 (wp = success count)
-            wchar_t buf[64];
             if (wp > 0) {
-                swprintf_s(buf, L"已导出 %d 张到目标文件夹 ✓", (int)wp);
-                toast::show(buf);
+                std::wstring msg = trW("toast.exported_n");
+                auto p = msg.find(L"{n}");
+                if (p != std::wstring::npos) msg.replace(p, 3, std::to_wstring((int)wp));
+                toast::show(msg);
             } else {
-                toast::show(L"导出失败（文件夹无法访问）");
+                toast::show(trW("toast.export_fail"));
             }
             return 0;
         }
@@ -513,7 +559,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 48: {                    // 拖拽排序云端写入完成
-            if (wp == 0) toast::show(L"排序保存失败（仅本地）");
+            if (wp == 0) toast::show(trW("toast.reorder_fail"));
             return 0;
         }
         case WM_APP + 49: {                    // chat 链接卡片点击 → 弹 PackPreview (wp = std::string* short)
@@ -567,8 +613,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (payload) {
                 std::string id_copy = payload->id;
                 std::wstring nm_copy = payload->name;
-                modal::openConfirm(L"卸载表情包",
-                    L"确认卸载「" + nm_copy + L"」？只是从你的列表移除，不影响别人。",
+                std::wstring msg = trW("confirm.uninstall_pack_msg");
+                auto p = msg.find(L"{name}");
+                if (p != std::wstring::npos) msg.replace(p, 6, nm_copy);
+                modal::openConfirm(trW("confirm.uninstall_pack_title"),
+                    msg,
                     [id_copy](){
                         // 卸载（uninstall）
                         struct A { std::string id; HWND h; };
@@ -590,7 +639,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             return 0;
                         }, a, 0, nullptr);
                     },
-                    L"卸载", L"取消", true);
+                    trW("picker.uninstall"), trW("common.cancel"), true);
             }
             return 0;
         }
@@ -619,7 +668,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 modal::onEditStatusTextResult(ok);
                 modal::onEditBioResult(ok);
             }
-            if (wp) toast::show(L"已保存");
+            if (wp) toast::show(trW("toast.saved"));
             return 0;
         }
         case WM_APP + 36: {                    // peer profile fetched
@@ -673,9 +722,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+    // 单实例守卫：已有实例在跑则前置它并退出（测试可用 LAUNCHER_ALLOW_MULTI=1 绕过）
+    HANDLE single_instance = acquireSingleInstance();
+    if (single_instance == nullptr) return 0;
+
     // 加载持久化设置
     g_dark = persist::loadTheme(true);
-    int lang = persist::loadLang((int)Lang::ZhCN);
+    int lang = persist::loadLang((int)detectSystemLang());
     if (lang >= 0 && lang <= 2) g_lang = (Lang)lang;
     readSteamInfo();
 

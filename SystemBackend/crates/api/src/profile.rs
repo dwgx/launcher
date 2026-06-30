@@ -28,9 +28,7 @@ async fn auth_user(state: &AppState, token: &str) -> Result<Uuid, (StatusCode, S
     .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
+use crate::error::internal;
 
 async fn rate_limit_seconds(state: &AppState, key: &str) -> i32 {
     sqlx::query_scalar!("SELECT seconds FROM rate_limits WHERE key=$1", key)

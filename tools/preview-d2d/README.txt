@@ -17,7 +17,7 @@ GDI+ Preview (tools/preview/) 的 1:1 D2D 移植，业务逻辑全部保留。
 
 后端
 ----
-连接 https://154.40.36.22:1337 (production)。
+连接 https://<DEPLOY_HOST>:1337 (production)。
 
   POST /api/auth/login              真后端登录（含邀请码注册）
   POST /api/auth/logout             退出登录清 session

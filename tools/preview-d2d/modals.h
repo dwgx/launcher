@@ -60,8 +60,9 @@ void paintCS2Modal(D2DApp& app, float W, float H);
 struct HistoryState {
     bool open = false;
     Tween t;
-    // 拉真 /api/profile/login-history 后填这个；每行 = "时间 | OK | IP | 地理"
-    std::vector<std::wstring> rows;
+    // 拉真 /api/profile/login-history 后填这个；每行 = "时间 · IP · 地理"
+    struct Row { std::wstring text; bool success = true; };
+    std::vector<Row> rows;
     bool loaded = false;
     int  page = 0;     // 5 行/页
 };

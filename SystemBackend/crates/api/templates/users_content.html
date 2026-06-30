@@ -5,13 +5,21 @@
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="card-title text-base">全部用户</h2>
-        <p class="text-xs opacity-60 mt-1">最近 200 个 · 操作菜单可改资料 / 重置密码（强制断开所有 session）</p>
+        <p class="text-xs opacity-60 mt-1">共 {{ total }} 个用户 · 第 {{ page }}/{{ total_pages }} 页 · 操作菜单可改资料 / 重置密码（强制断开所有 session）</p>
       </div>
       <span class="badge badge-outline">{{ users.len() }}</span>
     </div>
-    <div class="overflow-x-auto">
+    <form method="get" action="/admin/users" class="flex items-center gap-2 mb-4">
+      <input type="text" name="q" value="{{ search }}" placeholder="搜索 UID / 用户名 / 昵称" aria-label="搜索用户"
+             class="input input-bordered input-sm w-full max-w-md">
+      <button type="submit" class="btn btn-primary btn-sm">搜索</button>
+      {% if search != "" %}
+      <a href="/admin/users" class="btn btn-ghost btn-sm">清除</a>
+      {% endif %}
+    </form>
+    <div class="overflow-x-auto rounded-lg border border-base-300/40 max-h-[calc(100vh-220px)] overflow-y-auto">
       <table class="table table-zebra table-sm">
-        <thead>
+        <thead class="sticky top-0 z-10 bg-base-200/95 backdrop-blur">
           <tr>
             <th>UID</th>
             <th>用户名</th>
@@ -20,15 +28,20 @@
             <th>订阅</th>
             <th>注册时间</th>
             <th>邀请码</th>
-            <th class="w-44">操作</th>
+            <th>HWID</th>
+            <th class="text-right">操作</th>
           </tr>
         </thead>
         <tbody>
           {% for u in users %}
           <tr class="hover">
             <td class="font-mono text-orange-400">{{ u.uid }}</td>
-            <td class="font-medium">{{ u.username }}</td>
-            <td>{{ u.nickname }}</td>
+            <td class="align-top" title="{{ u.username }}">
+              <span class="font-medium block whitespace-normal break-all leading-snug line-clamp-2 max-w-[14rem]">{{ u.username }}</span>
+            </td>
+            <td class="align-top" title="{{ u.nickname }}">
+              <span class="block whitespace-normal break-all leading-snug line-clamp-2 max-w-[14rem]">{{ u.nickname }}</span>
+            </td>
             <td>
               <div class="flex items-center gap-1.5 min-w-max whitespace-nowrap">
                 {% if u.role == "admin" %}
@@ -52,21 +65,49 @@
               <span class="badge badge-primary badge-sm">{{ u.tier }}</span>
               {% endif %}
             </td>
-            <td class="text-xs opacity-70 font-mono">{{ u.created }}</td>
+            <td class="text-xs opacity-70 font-mono whitespace-nowrap">{{ u.created }}</td>
             <td class="font-mono text-xs opacity-60">{{ u.invite_code }}</td>
-            <td class="space-x-1 whitespace-nowrap">
-              <button class="btn btn-xs btn-ghost"
-                      onclick="document.getElementById('edit_{{ u.id }}').showModal()">编辑</button>
-              <button class="btn btn-xs btn-ghost text-rose-400"
-                      onclick="document.getElementById('pw_{{ u.id }}').showModal()">重置密码</button>
-              <button class="btn btn-xs btn-ghost text-rose-500"
-                      onclick="document.getElementById('del_{{ u.id }}').showModal()">删除</button>
+            <td class="text-xs whitespace-nowrap">
+              {% if u.hwid_bound %}
+                <span class="badge badge-sm" style="background:#2C8A6E;color:#fff">已绑定</span>
+                <span class="font-mono opacity-60">{{ u.hwid_fp }}</span>
+              {% else %}
+                <span class="badge badge-ghost badge-sm">未绑定</span>
+              {% endif %}
+            </td>
+            <td class="text-right">
+              <div class="dropdown dropdown-end">
+                <div tabindex="0" role="button" class="btn btn-xs btn-ghost" aria-label="用户操作菜单">操作 ▾</div>
+                <ul tabindex="0" class="dropdown-content menu menu-sm z-20 mt-1 w-36 rounded-box bg-base-200 p-1 shadow-lg border border-base-300/40">
+                  <li><a onclick="document.getElementById('edit_{{ u.id }}').showModal()">编辑资料</a></li>
+                  <li><a class="text-rose-400" onclick="document.getElementById('pw_{{ u.id }}').showModal()">重置密码</a></li>
+                  <li><a class="text-amber-400" onclick="document.getElementById('hwid_{{ u.id }}').showModal()">重置 HWID</a></li>
+                  <li><a class="text-rose-500" onclick="document.getElementById('del_{{ u.id }}').showModal()">删除用户</a></li>
+                </ul>
+              </div>
             </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
+    {% if total_pages > 1 %}
+    <div class="flex justify-center mt-4">
+      <div class="join">
+        {% if page > 1 %}
+        <a href="/admin/users?q={{ search }}&page={{ page - 1 }}" class="join-item btn btn-sm">上一页</a>
+        {% else %}
+        <button class="join-item btn btn-sm btn-disabled" disabled>上一页</button>
+        {% endif %}
+        <span class="join-item btn btn-sm btn-ghost pointer-events-none">第 {{ page }}/{{ total_pages }} 页</span>
+        {% if page < total_pages %}
+        <a href="/admin/users?q={{ search }}&page={{ page + 1 }}" class="join-item btn btn-sm">下一页</a>
+        {% else %}
+        <button class="join-item btn btn-sm btn-disabled" disabled>下一页</button>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -74,7 +115,7 @@
 {% for u in users %}
 <dialog id="edit_{{ u.id }}" class="modal">
   <div class="modal-box max-w-md">
-    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
+    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2" aria-label="关闭对话框">✕</button></form>
     <h3 class="font-bold text-lg">编辑用户资料</h3>
     <p class="text-xs opacity-60 mt-1 mb-4 font-mono">{{ u.username }} · UID {{ u.uid }}</p>
     <form method="post" action="/admin/users/{{ u.id }}/edit" class="space-y-3">
@@ -126,7 +167,7 @@
 
 <dialog id="del_{{ u.id }}" class="modal">
   <div class="modal-box max-w-md">
-    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
+    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2" aria-label="关闭对话框">✕</button></form>
     <h3 class="font-bold text-lg text-rose-500">⚠ 删除用户（不可恢复）</h3>
     <p class="text-xs opacity-70 mt-2 mb-3">
       用户 <span class="font-mono font-bold">{{ u.username }}</span> · UID
@@ -148,8 +189,7 @@
       <div class="modal-action">
         <button type="button" class="btn btn-ghost"
                 onclick="document.getElementById('del_{{ u.id }}').close()">取消</button>
-        <button id="del_btn_{{ u.id }}" disabled class="btn"
-                style="background:#B14444;color:#fff">永久删除</button>
+        <button id="del_btn_{{ u.id }}" disabled class="btn btn-danger">永久删除</button>
       </div>
     </form>
   </div>
@@ -158,7 +198,7 @@
 
 <dialog id="pw_{{ u.id }}" class="modal">
   <div class="modal-box max-w-md">
-    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button></form>
+    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2" aria-label="关闭对话框">✕</button></form>
     <h3 class="font-bold text-lg text-rose-400">重置密码</h3>
     <p class="text-xs opacity-60 mt-1 mb-4">
       用户 <span class="font-mono">{{ u.username }}</span> · UID <span class="font-mono">{{ u.uid }}</span><br>
@@ -174,7 +214,29 @@
       <div class="modal-action">
         <button type="button" class="btn btn-ghost"
                 onclick="document.getElementById('pw_{{ u.id }}').close()">取消</button>
-        <button class="btn" style="background:#B14444;color:#fff">确认重置</button>
+        <button class="btn btn-danger">确认重置</button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<dialog id="hwid_{{ u.id }}" class="modal">
+  <div class="modal-box max-w-md">
+    <form method="dialog"><button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2" aria-label="关闭对话框">✕</button></form>
+    <h3 class="font-bold text-lg text-amber-400">重置 HWID 绑定</h3>
+    <p class="text-xs opacity-70 mt-2 mb-3">
+      用户 <span class="font-mono">{{ u.username }}</span> · UID <span class="font-mono">{{ u.uid }}</span><br>
+      当前指纹：<span class="font-mono opacity-80">{{ u.hwid_fp }}</span> ·
+      上次变更：<span class="font-mono opacity-60">{{ u.hwid_changed }}</span><br>
+      <span class="text-amber-400/80">重置后清除已绑定 HWID，该用户下次任意机器登录将自动绑定新硬件。</span>
+    </p>
+    <form method="post" action="/admin/users/{{ u.id }}/reset-hwid"
+          onsubmit="return confirm('确认重置 {{ u.username }} 的 HWID 绑定？')" class="space-y-3">
+      <div class="modal-action">
+        <button type="button" class="btn btn-ghost"
+                onclick="document.getElementById('hwid_{{ u.id }}').close()">取消</button>
+        <button class="btn btn-warning">确认重置 HWID</button>
       </div>
     </form>
   </div>

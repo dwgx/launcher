@@ -10,6 +10,7 @@
 #include "user_state.h"
 #include "chat.h"
 #include "fetch.h"
+#include "i18n.h"
 
 #include <memory>
 #include <deque>
@@ -249,11 +250,27 @@ void drain() {
             std::wstring duration = utf8ToW(net::jsonStr(data, "duration_label"));
             std::wstring line;
             if (event_type == "member_muted") {
-                line = target_label + L" 被 " + mod_label + L" 神犬了";
-                if (!reason.empty()) line += L"： " + reason;
-                if (!duration.empty()) line += L"（" + duration + L"）";
+                line = trW("ws.muted");
+                if (auto pt = line.find(L"{target}"); pt != std::wstring::npos)
+                    line.replace(pt, 8, target_label);
+                if (auto pm = line.find(L"{mod}"); pm != std::wstring::npos)
+                    line.replace(pm, 5, mod_label);
+                if (!reason.empty()) {
+                    std::wstring r = trW("ws.mute_reason");
+                    if (auto pr = r.find(L"{reason}"); pr != std::wstring::npos)
+                        r.replace(pr, 8, reason);
+                    line += r;
+                }
+                if (!duration.empty()) {
+                    std::wstring d = trW("ws.mute_duration");
+                    if (auto pd = d.find(L"{duration}"); pd != std::wstring::npos)
+                        d.replace(pd, 10, duration);
+                    line += d;
+                }
             } else {
-                line = target_label + L" 被解除禁言";
+                line = trW("ws.unmuted");
+                if (auto pt = line.find(L"{target}"); pt != std::wstring::npos)
+                    line.replace(pt, 8, target_label);
             }
             for (auto& c : chat::g_channels) {
                 if (c.id == chat_id) {

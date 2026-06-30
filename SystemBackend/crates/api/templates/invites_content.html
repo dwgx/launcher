@@ -54,7 +54,7 @@
                 {% else %}<span class="badge badge-exhausted badge-sm">用完</span>
                 {% endif %}
               </td>
-              <td class="text-xs opacity-70 max-w-xs truncate">{{ it.note }}</td>
+              <td class="text-xs opacity-70"><div class="max-w-xs truncate">{{ it.note }}</div></td>
               <td class="text-xs opacity-60 font-mono whitespace-nowrap">{{ it.created }}</td>
               <td>
                 {% if it.status == "active" %}

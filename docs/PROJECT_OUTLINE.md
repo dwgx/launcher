@@ -9,7 +9,7 @@ Launcher 当前要做的不是从零搭一个启动器，而是把已经成型�
 - 当前可运行客户端在 `tools/preview-d2d/`，构建脚本是 `tools/preview-d2d/build_d2d.bat`。
 - `src/` 是 CMake + Skia/Clay 的产品化骨架，但不是现在可运行交付物。
 - `SystemBackend/` 是真实后端，使用 Rust、axum、PostgreSQL、sqlx migrations 和 systemd。
-- 客户端网络目标写在 `tools/preview-d2d/net.h`，当前指向 `154.40.36.22:1337`。
+- 客户端网络目标写在 `tools/preview-d2d/net.h`，当前指向 `<DEPLOY_HOST>:1337`。
 - `tools/preview/` 和 `tools/preview-skia/` 是历史预览和渲染参考，不是最终交付，但在 parity 完成前有保留价值。
 
 ## 产品目标

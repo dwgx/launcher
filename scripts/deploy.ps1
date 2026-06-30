@@ -228,4 +228,8 @@ chown -R systembackend:systembackend __REMOTE_DIR__
 }
 
 Write-Host '== restart service ==' -ForegroundColor Cyan
-Invoke-Remote "systemctl restart $svc && sleep 3 && systemctl status $svc --no-pager -l && curl -k --max-time 10 https://$($h):1337/api/market/categories >/dev/null"
+# 健康检查默认做 TLS 校验。证书与连接地址不匹配（如用 IP 连域名证书）时，
+# 在 .deploy.local 设 health_host 指向证书匹配的域名，或显式设 health_insecure = "1"。
+$healthHost = if ($conf['health_host']) { $conf['health_host'] } else { $h }
+$curlFlags = if ($conf['health_insecure'] -eq '1') { '-k --max-time 10' } else { '--max-time 10' }
+Invoke-Remote "systemctl restart $svc && sleep 3 && systemctl status $svc --no-pager -l && curl $curlFlags https://$($healthHost):1337/api/market/categories >/dev/null"

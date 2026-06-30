@@ -3,6 +3,7 @@
 #include "fetch.h"
 #include "net.h"
 #include "user_state.h"
+#include "i18n.h"
 
 #include <memory>
 #include <mutex>
@@ -566,7 +567,7 @@ void peerProfile(HWND notify, const std::wstring& uid_or_nickname) {
             next.loaded = true;
             next.loading = false;
         } else {
-            next.err = utf8ToW(r.body.empty() ? "无法连接" : r.body.substr(0, 80));
+            next.err = r.body.empty() ? trW("auth.err_no_server") : utf8ToW(r.body.substr(0, 80));
             next.loaded = true;
             next.loading = false;
         }

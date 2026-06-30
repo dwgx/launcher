@@ -70,7 +70,7 @@ node .\scripts\audit\api-smoke.mjs
 只读 smoke：
 
 ```powershell
-$env:LAUNCHER_AUDIT_BASE = "https://154.40.36.22:1337"
+$env:LAUNCHER_AUDIT_BASE = "https://<DEPLOY_HOST>:1337"
 $env:LAUNCHER_AUDIT_MODE = "readonly"
 $env:LAUNCHER_AUDIT_INSECURE_TLS = "1"
 node .\scripts\audit\api-smoke.mjs
@@ -84,7 +84,20 @@ $env:LAUNCHER_AUDIT_JSON_PATH = "$env:TEMP\launcher-api-smoke.json"
 node .\scripts\audit\api-smoke.mjs
 ```
 
-## 4. 覆盖范围
+## 4. 工单 smoke 单独运行
+
+工单系统全流程（分类 → 建单 → 列表 → 详情 → 用户/管理员回复 → 时序校验）：
+
+```powershell
+$env:LAUNCHER_AUDIT_BASE = "http://<host>:1338"
+$env:LAUNCHER_AUDIT_ADMIN_KEY = "<admin_password>"   # 不设则跳过管理员视图/回复用例
+node .\scripts\audit\ticket-smoke.mjs
+```
+
+JSON 输出同 api-smoke：设 `LAUNCHER_AUDIT_JSON=1` 或 `LAUNCHER_AUDIT_JSON_PATH`。
+生产 host 通过 `LAUNCHER_AUDIT_PROD_HOSTS` 列入后会被拒绝运行（写入型，仅隔离环境）。
+
+## 5. 覆盖范围
 
 写入型 smoke 覆盖：
 
@@ -96,13 +109,22 @@ node .\scripts\audit\api-smoke.mjs
 - sticker pack owner 权限、pack get/add/remove/delete
 - market categories、listing、purchase、review guard
 
+工单 smoke 覆盖：
+
+- 分类列举（普通用户只见 enabled）
+- 建单（私有/公开）、空标题/正文拒绝
+- 列表：我的（含私有+公开）/ 公开（隐藏私有）/ 管理员（见私有，需 admin 角色）
+- 详情含开单首条消息
+- 用户 + 管理员经 `chat/send` 回复，校验消息按 id 升序
+- 非法工单 id 被 access 守卫拦截（400/403/404）
+
 只读 smoke 覆盖：
 
 - `GET /api/market/categories`
 - `GET /api/market/listings?limit=5`
 - `GET /admin`
 
-## 5. 清理
+## 6. 清理
 
 手动清理隔离环境中某个 run id：
 

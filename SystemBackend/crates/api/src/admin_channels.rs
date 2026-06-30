@@ -526,6 +526,7 @@ async fn rename_submit(
     .bind(serde_json::json!({ "title": title }))
     .execute(&s.db)
     .await;
+    crate::audit::event(&actor.name, "admin.channel_rename", &id.to_string());
     Redirect::to("/admin/channels?ok=rename").into_response()
 }
 
@@ -559,6 +560,7 @@ async fn clear_messages(
     .bind(serde_json::json!({ "soft_deleted": n }))
     .execute(&s.db)
     .await;
+    crate::audit::event(&actor.name, "admin.channel_clear", &id.to_string());
     Redirect::to("/admin/channels?ok=clear").into_response()
 }
 

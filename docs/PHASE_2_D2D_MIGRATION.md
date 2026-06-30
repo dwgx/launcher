@@ -78,7 +78,7 @@
 
 | 模块 | 文件 | 状态 |
 |---|---|---|
-| 后端 (Rust + axum) | `SystemBackend/` | ✅ 部署在 154.40.36.22 production |
+| 后端 (Rust + axum) | `SystemBackend/` | ✅ 部署在 <DEPLOY_HOST> production |
 | WinHTTP 客户端 | `tools/preview/net.inl` | ✅ HTTP + WS 都跑通了 |
 | 注册表持久化 | `loading_demo.cpp::persist::*` | ✅ 30 候选路径 + DPAPI |
 | HWID 计算 | `loading_demo.cpp::hwidHex()` | ✅ ComputerName + UserName + VolSerial → SHA256 |
@@ -362,7 +362,7 @@ tools/preview-d2d/
 - 表情包分组 create/rename/share/delete 后端 + 客户端逻辑都全
 - user_tags / 头像云同步全套都通
 
-**Backend 不要碰**。已经部署在 154.40.36.22:1337 production，跑得好好的。
+**Backend 不要碰**。已经部署在 <DEPLOY_HOST>:1337 production，跑得好好的。
 
 ---
 
