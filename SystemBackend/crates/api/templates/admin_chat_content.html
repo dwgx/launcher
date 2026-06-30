@@ -1,123 +1,285 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="grid gap-4 xl:grid-cols-[320px_1fr]">
-  <div class="card bg-base-100 shadow">
-    <div class="card-body">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="card-title text-base">频道列表</h2>
-        <span class="badge badge-outline">{{ channels.len() }}</span>
-      </div>
-      <div class="space-y-2">
-        {% for c in channels %}
-        <a href="/admin/chat?chat_id={{ c.id }}"
-           class="block rounded-lg border border-base-300/60 p-3 hover:bg-orange-500/10 {% if c.active %}nav-active{% endif %}">
-          <div class="flex items-center justify-between gap-2">
-            <div class="font-medium">{{ c.display_title }}</div>
+<style>
+  /* 聊天控制台：占满视口高度的双栏工作台，左频道导轨 + 右消息台 */
+  .chat-console {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 1rem;
+    height: calc(100vh - 14.5rem);
+    min-height: 30rem;
+  }
+  @media (max-width: 1024px) {
+    .chat-console { grid-template-columns: 1fr; height: auto; }
+    .chat-rail { max-height: 22rem; }
+  }
+  .chat-pane {
+    background: rgba(41, 35, 31, 0.94);
+    border: 1px solid rgba(104, 91, 80, 0.68);
+    border-radius: var(--rounded-box);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 12px 32px -16px rgba(0,0,0,.5);
+    backdrop-filter: blur(6px);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .chat-pane-head {
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid rgba(104, 91, 80, 0.5);
+    flex-shrink: 0;
+  }
+  .chat-rail-list { overflow-y: auto; padding: 0.5rem; flex: 1; min-height: 0; }
+  /* 频道导轨条目 */
+  .chan-item {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.55rem 0.6rem;
+    border-radius: 0.6rem;
+    border: 1px solid transparent;
+    transition: background .12s, border-color .12s;
+  }
+  .chan-item:hover { background: rgba(217,119,87,.10); }
+  .chan-item.is-active {
+    background: linear-gradient(90deg, rgba(217,119,87,.18), rgba(217,119,87,.06) 75%, transparent);
+    border-color: rgba(217,119,87,.35);
+    box-shadow: inset 3px 0 0 #D97757;
+  }
+  .chan-avatar {
+    width: 2.1rem; height: 2.1rem; flex-shrink: 0;
+    border-radius: 0.55rem;
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 1rem;
+    background: linear-gradient(150deg, rgba(217,119,87,.85), rgba(150,78,55,.85));
+    color: #fff;
+    box-shadow: 0 4px 12px -6px rgba(217,119,87,.6);
+  }
+  .chat-stream {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 1.1rem 1.25rem;
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+  /* 消息行：头像 + 气泡 */
+  .msg-row { display: flex; gap: 0.75rem; align-items: flex-start; }
+  .msg-avatar {
+    width: 2.3rem; height: 2.3rem; flex-shrink: 0;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font-weight: 700; text-transform: uppercase;
+    background: linear-gradient(150deg, #3a322b, #2a2420);
+    border: 1px solid rgba(217,119,87,.4);
+    color: #E5A07F;
+  }
+  .msg-body { min-width: 0; flex: 1; }
+  .msg-bubble {
+    background: rgba(31,27,23,.55);
+    border: 1px solid rgba(104, 91, 80, 0.45);
+    border-radius: 0.2rem 0.7rem 0.7rem 0.7rem;
+    padding: 0.6rem 0.8rem;
+    display: inline-block;
+    max-width: 100%;
+  }
+  .msg-row.is-system { justify-content: center; }
+  .msg-row.is-system .msg-bubble {
+    background: rgba(217,119,87,.10);
+    border-color: rgba(217,119,87,.35);
+    border-radius: 0.7rem;
+    text-align: center;
+    color: #E5A07F;
+    font-size: .82rem;
+  }
+  .msg-row.is-deleted { opacity: .55; }
+  .msg-reply-ref {
+    border-left: 2px solid rgba(217,119,87,.6);
+    padding-left: .5rem; margin-bottom: .35rem;
+    font-size: .72rem; opacity: .7;
+  }
+  /* 底部发送栏 */
+  .chat-composer {
+    flex-shrink: 0;
+    border-top: 1px solid rgba(104, 91, 80, 0.5);
+    padding: 0.85rem 1rem;
+    background: rgba(31,27,23,.4);
+  }
+  .composer-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+  .composer-meta { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; }
+  .composer-send-row { display: flex; gap: 0.6rem; align-items: end; }
+  .empty-stream {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: .75rem; opacity: .5; text-align: center; padding: 2rem;
+  }
+  .empty-stream .empty-glyph {
+    width: 3.5rem; height: 3.5rem; border-radius: 1rem;
+    display: grid; place-items: center; font-size: 1.6rem;
+    background: rgba(217,119,87,.12); color: #E5A07F;
+  }
+</style>
+
+<div class="chat-console">
+  {# ============ 左：频道导轨 ============ #}
+  <aside class="chat-pane chat-rail">
+    <div class="chat-pane-head flex items-center justify-between">
+      <span class="font-semibold text-sm tracking-wide">频道</span>
+      <span class="badge badge-outline badge-sm">{{ channels.len() }}</span>
+    </div>
+    <div class="chat-rail-list">
+      {% for c in channels %}
+      <a href="/admin/chat?chat_id={{ c.id }}"
+         class="chan-item {% if c.active %}is-active{% endif %}"
+         {% if c.active %}aria-current="page"{% endif %}>
+        <span class="chan-avatar">#</span>
+        <span class="min-w-0 flex-1">
+          <span class="flex items-center gap-1.5">
+            <span class="font-medium truncate">{{ c.display_title }}</span>
+            {% if c.is_official %}
+              <span class="badge badge-active badge-xs shrink-0">官方</span>
+            {% endif %}
+          </span>
+          <span class="flex items-center gap-2 text-[11px] opacity-60 mt-0.5">
+            <span>{{ c.group_label_zh }}</span>
+            <span>·</span>
+            <span>{{ c.message_count }} 条</span>
+          </span>
+        </span>
+      </a>
+      {% endfor %}
+      {% if channels.is_empty() %}
+      <div class="text-center opacity-40 py-8 text-sm">暂无频道</div>
+      {% endif %}
+    </div>
+  </aside>
+
+  {# ============ 右：消息台 ============ #}
+  <section class="chat-pane">
+    {% if selected.is_some() %}
+    {% let c = selected.as_ref().unwrap() %}
+    {# --- 头部 --- #}
+    <header class="chat-pane-head flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="chan-avatar">#</span>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <h2 class="font-semibold text-base truncate">{{ c.display_title }}</h2>
             {% if c.is_official %}
               <span class="badge badge-active badge-sm">官方</span>
             {% else %}
               <span class="badge badge-outline badge-sm">自建</span>
             {% endif %}
           </div>
-          <div class="mt-1 flex flex-wrap gap-2 text-xs opacity-70">
-            <span>{{ c.group_label_zh }}</span>
-            <span>{{ c.message_count }} 条</span>
-          </div>
-          <div class="mt-1 text-[11px] opacity-60">
-            权限 {{ c.write_policy_label }} · 最后活跃 {{ c.last_at }}
-          </div>
-        </a>
-        {% endfor %}
-        {% if channels.is_empty() %}
-        <div class="text-center opacity-40 py-6">暂无频道</div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="space-y-4 min-w-0">
-    <div class="card bg-base-100 shadow">
-      <div class="card-body">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            {% if selected.is_some() %}
-              {% let c = selected.as_ref().unwrap() %}
-              <h2 class="card-title text-base">{{ c.display_title }}</h2>
-              <div class="text-xs opacity-60 font-mono">频道 ID {{ c.id }}</div>
-            {% else %}
-              <h2 class="card-title text-base">未选择频道</h2>
-              <div class="text-xs opacity-60">请先从左侧选择一个频道</div>
-            {% endif %}
-          </div>
-          <div class="text-right text-xs opacity-70">
-            <div>发送身份：<span class="font-semibold text-orange-300">SuperAdmin</span></div>
-            <div class="font-mono">UID {{ superadmin_uid }} · {{ superadmin_id }}</div>
+          <div class="flex flex-wrap items-center gap-2 text-[11px] opacity-60 mt-0.5">
+            <span class="badge badge-outline badge-xs">{{ c.write_policy_label }}</span>
+            <span class="font-mono">ID {{ c.id }}</span>
           </div>
         </div>
       </div>
-    </div>
+      <div class="flex items-center gap-2.5">
+        <div class="text-right text-xs">
+          <div class="opacity-60">发送身份</div>
+          <div class="font-semibold text-orange-300">SuperAdmin</div>
+          <div class="font-mono opacity-50 text-[10px]">UID {{ superadmin_uid }}</div>
+        </div>
+        <span class="msg-avatar" title="SuperAdmin · {{ superadmin_id }}">S</span>
+      </div>
+    </header>
 
-    {% if selected.is_some() %}
-    {% let c = selected.as_ref().unwrap() %}
-    <div class="card bg-base-100 shadow">
-      <div class="card-body">
-        <h2 class="card-title text-base">发送消息</h2>
-        <form method="post" action="/admin/chat/send" class="grid gap-3 lg:grid-cols-[160px_120px_1fr_auto]">
-          <input type="hidden" name="chat_id" value="{{ c.id }}">
+    {# --- 消息流 --- #}
+    {% if messages.is_empty() %}
+    <div class="empty-stream">
+      <span class="empty-glyph" aria-hidden="true">✦</span>
+      <div>
+        <div class="font-medium">当前频道暂无消息</div>
+        <div class="text-xs mt-1">在下方以 SuperAdmin 身份发送第一条消息</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="chat-stream" id="chat-stream">
+      {% for m in messages %}
+      {% if m.msg_type_label == "系统消息" %}
+      <div class="msg-row is-system {% if m.deleted %}is-deleted{% endif %}">
+        <div class="msg-bubble">
+          <div class="flex items-center justify-center gap-2 text-[11px] opacity-70 mb-0.5">
+            <span>系统消息</span>
+            <span class="font-mono">#{{ m.id }} · {{ m.created_at }}</span>
+            {% if m.deleted %}<span class="badge badge-error badge-xs">已删除</span>{% endif %}
+          </div>
+          <div class="whitespace-pre-wrap leading-6">{{ m.text }}</div>
+        </div>
+      </div>
+      {% else %}
+      <div class="msg-row {% if m.deleted %}is-deleted{% endif %}">
+        <span class="msg-avatar">{{ m.sender.chars().next().unwrap_or('?') }}</span>
+        <div class="msg-body">
+          <div class="flex flex-wrap items-center gap-2 mb-1">
+            <span class="font-semibold text-sm">{{ m.sender }}</span>
+            {% if m.role_label != "" %}<span class="badge badge-sm">{{ m.role_label }}</span>{% endif %}
+            <span class="badge badge-outline badge-xs">{{ m.msg_type_label }}</span>
+            {% if m.edited %}<span class="badge badge-xs">已编辑</span>{% endif %}
+            {% if m.deleted %}<span class="badge badge-error badge-xs">已删除</span>{% endif %}
+            <span class="font-mono text-[11px] opacity-50">#{{ m.id }} · {{ m.created_at }}</span>
+          </div>
+          {% if m.reply_to != "-" %}
+          <div class="msg-reply-ref">回复 {{ m.reply_to }}</div>
+          {% endif %}
+          <div class="msg-bubble whitespace-pre-wrap text-sm leading-6">{{ m.text }}</div>
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {# --- 底部发送栏 --- #}
+    <form method="post" action="/admin/chat/send" class="chat-composer">
+      <input type="hidden" name="chat_id" value="{{ c.id }}">
+      <div class="composer-grid">
+        <label class="form-control">
+          <textarea name="text" class="textarea textarea-bordered min-h-20" maxlength="4000" required
+                    placeholder="以 SuperAdmin 身份发送到 #{{ c.display_title }}…"></textarea>
+        </label>
+        <div class="composer-meta">
           <label class="form-control">
-            <span class="label-text text-xs">消息类型</span>
+            <span class="label-text text-xs opacity-70">消息类型</span>
             <select name="msg_type" class="select select-bordered select-sm">
               <option value="text">普通文本</option>
               <option value="system">系统消息</option>
             </select>
           </label>
           <label class="form-control">
-            <span class="label-text text-xs">回复消息 ID</span>
-            <input name="reply_to_id" class="input input-bordered input-sm" inputmode="numeric" placeholder="可选">
+            <span class="label-text text-xs opacity-70">回复消息 ID（可选）</span>
+            <input name="reply_to_id" class="input input-bordered input-sm" inputmode="numeric" placeholder="如 #1024 的 1024">
           </label>
-          <label class="form-control">
-            <span class="label-text text-xs">内容</span>
-            <textarea name="text" class="textarea textarea-bordered min-h-24" maxlength="4000" required placeholder="输入要发送到当前频道的内容"></textarea>
-          </label>
-          <div class="flex items-end">
-            <button class="btn btn-primary btn-sm w-full lg:w-28">发送</button>
+          <div class="composer-send-row ml-auto">
+            <button class="btn btn-primary btn-sm px-6">发送</button>
           </div>
-        </form>
+        </div>
       </div>
-    </div>
-
-    <div class="card bg-base-100 shadow">
-      <div class="card-body">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="card-title text-base">最近消息</h2>
-          <span class="badge badge-outline">{{ messages.len() }}</span>
-        </div>
-        <div class="space-y-3 max-h-[56vh] overflow-y-auto pr-1">
-          {% for m in messages %}
-          <div class="rounded-lg border border-base-300/60 p-3 {% if m.deleted %}opacity-60{% endif %}">
-            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="font-semibold">{{ m.sender }}</span>
-                {% if m.role_label != "" %}<span class="badge badge-sm">{{ m.role_label }}</span>{% endif %}
-                <span class="badge badge-outline badge-xs">{{ m.msg_type_label }}</span>
-                {% if m.edited %}<span class="badge badge-xs">已编辑</span>{% endif %}
-                {% if m.deleted %}<span class="badge badge-error badge-xs">已删除</span>{% endif %}
-              </div>
-              <div class="font-mono text-xs opacity-60">#{{ m.id }} · {{ m.created_at }}</div>
-            </div>
-            {% if m.reply_to != "-" %}
-            <div class="text-xs opacity-60 mb-1">回复 {{ m.reply_to }}</div>
-            {% endif %}
-            <div class="whitespace-pre-wrap text-sm leading-6">{{ m.text }}</div>
-          </div>
-          {% endfor %}
-          {% if messages.is_empty() %}
-          <div class="text-center opacity-40 py-8">当前频道暂无消息</div>
-          {% endif %}
-        </div>
+    </form>
+    {% else %}
+    {# --- 未选频道：占位 --- #}
+    <div class="empty-stream">
+      <span class="empty-glyph" aria-hidden="true">▣</span>
+      <div>
+        <div class="font-medium text-base">未选择频道</div>
+        <div class="text-sm mt-1">从左侧频道导轨选择一个频道，开始查看消息并以 SuperAdmin 身份发送</div>
       </div>
     </div>
     {% endif %}
-  </div>
+  </section>
 </div>
+
+{% if selected.is_some() %}
+<script>
+  // 进入频道时把消息流滚到底（最新消息）
+  (function () {
+    var s = document.getElementById('chat-stream');
+    if (s) s.scrollTop = s.scrollHeight;
+  })();
+</script>
+{% endif %}
 {% endblock %}

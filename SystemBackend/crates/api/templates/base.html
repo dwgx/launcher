@@ -330,6 +330,32 @@
   .label.cursor-pointer {
     padding-block: .35rem;
   }
+  /* 自定义滚动条：替换浏览器默认灰色控件，贴合暖色暗主题。
+     覆盖整页 + 所有 overflow 容器（表格横向、消息流纵向等）。 */
+  * {
+    scrollbar-width: thin;                                  /* Firefox */
+    scrollbar-color: rgba(217,119,87,.55) transparent;
+  }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track {
+    background: rgba(31,27,23,.4);
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(217,119,87,.62), rgba(180,90,64,.62));
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(228,132,100,.85), rgba(196,102,74,.85));
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:active {
+    background: #D97757;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-corner { background: transparent; }
 </style>
 </head>
 <body class="min-h-screen">
