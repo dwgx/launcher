@@ -13,6 +13,22 @@
 - 客户端主线当前是 `tools/preview-d2d/`，不是 `src/` 的 CMake/Skia 骨架。不要误删 `tools/preview/`，除非已完成 parity 并经过验证。
 - 每次收尾前检查 `git status --short`，只提交应该进仓库的源码、文档、脚本和 migration。
 
+## 家里云生产部署
+
+- 生产后端跑在家里云（局域网），systemd 服务 `systembackend.service`，监听 `0.0.0.0:1337`，工作目录 `/opt/systembackend`，运行二进制 `/opt/systembackend/systembackend`，运行用户 `systembackend`。
+- 数据库是本机 PostgreSQL（`127.0.0.1:15433`，库 `helix_prod`），连接串在 `/opt/systembackend/config.toml` 的 `database_url`。
+- **后台 HTML 模板由 Askama 在编译期嵌入二进制**：改 `SystemBackend/crates/api/templates/*.html` 后，仅 `git pull` 或同步源码不会生效，**必须在服务器上带 `DATABASE_URL` 重新 `cargo build --release -p launcher-api`、替换 `/opt/systembackend/systembackend` 并 `systemctl restart systembackend`**。bin 名是 `systembackend`，不是 `launcher-api`。
+- 服务器无 git 仓库，更新走 `scripts/deploy.ps1`（打包本地→上传 `build_src`→连库构建→装二进制→重启），或等价的 rsync/sftp 同步源码到 `/opt/systembackend/build_src/SystemBackend/` 后照上面构建。
+- 部署流程参考 `scripts/deploy.ps1` 顶部注释。
+
+## 凭据与安全（所有 AI / agent 必须遵守）
+
+- **SSH 连接信息和密码只记录在本地、被 gitignore 的 `CLAUDE.md` 里，绝不写入 `AGENTS.md` 或任何被 git 跟踪的文件**——本仓库是公开仓库，AGENTS.md 会被发布。
+- 连接家里云做部署前，从 `CLAUDE.md` 读取凭据；若 `CLAUDE.md` 不存在或无凭据，停下来问用户，不要猜测或硬编码。
+- **改动生产（替换二进制、重启服务、跑 migration、删数据）前必须向用户确认**，并先备份将被覆盖的二进制/数据；构建到临时位置、验证成功后再替换线上，失败保留旧版可回滚。
+- 不要把家里云内网地址、SSH 密码、数据库连接串、`config.toml` 内容回显到提交、PR、或会被发布的文档里。含内网地址的本地启动脚本（`tools/preview-d2d/run-multi.bat`、`启动-连homecloud.bat`）已 gitignore，保持如此。
+- 未经用户明确授权，不得在家里云上做与当前任务无关的操作。
+
 ## 推荐读序
 
 1. `README.md`
