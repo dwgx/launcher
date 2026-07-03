@@ -115,23 +115,27 @@ fn sign(key: &PathBuf, in_toml: &PathBuf, out_helix: &PathBuf) -> anyhow::Result
     };
 
     for g in cfg.games {
-        let hash = if let Some(fp) = &g.file_path {
-            blake3::hash(&fs::read(fp)?).as_bytes().to_vec()
-        } else {
-            vec![]
-        };
+        // 每个分发条目都必须有可校验的 BLAKE3 file_hash：只有 download_url 而无本地
+        // file_path 时，签出的 manifest 会带空 hash，客户端便无法把下载的二进制绑定到
+        // 签名上，MITM / CDN 掉包即可在有效签名下被接受（D1）。这里直接拒绝签名。
+        let file_path = g.file_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "game '{}' has download_url but no file_path: refusing to sign a manifest \
+                 with an empty file_hash (would allow tampered binaries under a valid signature)",
+                g.game_id
+            )
+        })?;
+        let bytes = fs::read(file_path).map_err(|e| {
+            anyhow::anyhow!("game '{}': cannot read file_path '{}': {}", g.game_id, file_path, e)
+        })?;
+        let hash = blake3::hash(&bytes).as_bytes().to_vec();
         sub.games.push(p::GameEntry {
             game_id: g.game_id,
             display_name: g.display_name,
             version: g.version,
             download_url: g.download_url,
             file_hash: hash,
-            size_bytes: g
-                .file_path
-                .as_ref()
-                .and_then(|p| fs::metadata(p).ok())
-                .map(|m| m.len())
-                .unwrap_or(0),
+            size_bytes: bytes.len() as u64,
             launch: Some(p::LaunchConfig {
                 executable: g.executable,
                 args: g.args.unwrap_or_default(),

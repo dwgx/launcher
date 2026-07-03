@@ -13,10 +13,11 @@
      卡片 / sidebar 之间有温柔的层级差，配 Claude Desktop 同源橙主色 */
   [data-theme="launcher"] {
     color-scheme: dark;
-    --b1: 20.3% 0.012 67.3;    /* #1f1b17 */
-    --b2: 25.2% 0.014 67.0;    /* #29231f */
-    --b3: 34.4% 0.017 65.6;    /* #40372f */
-    --bc: 93.6% 0.025 84.6;    /* #f2ebdd */
+    /* 对齐 desktop 前端 tools/preview-d2d/palette.h kDark，统一两端质感 */
+    --b1: 17.8% 0.006 66;      /* bg     #1A1816 */
+    --b2: 21.2% 0.006 66;      /* surface #201E1B */
+    --b3: 32.8% 0.009 64;      /* divider #36322D */
+    --bc: 93.6% 0.018 84;      /* text   #F5F1EA */
     --p:  62.7% 0.149 43.0;    /* #d97757 */
     --pf: 56.6% 0.145 43.0;
     --pc: 98% 0 0;
@@ -35,16 +36,16 @@
     --rounded-badge: 0.4rem;
   }
   html, body {
-    color: #F2EBDD;
-    background: #1F1B17;
+    color: #F5F1EA;
+    background: #1A1816;
   }
   body {
     font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system,
                  'Source Han Sans CN', 'Microsoft YaHei UI', 'BIZ UDPGothic', sans-serif;
     background:
-      radial-gradient(1200px 600px at 90% -10%, rgba(217,119,87,.06), transparent 60%),
-      radial-gradient(800px 400px at -10% 110%, rgba(217,119,87,.04), transparent 50%),
-      #1F1B17;
+      radial-gradient(1100px 560px at 92% -12%, rgba(217,119,87,.045), transparent 58%),
+      radial-gradient(760px 380px at -8% 112%, rgba(217,119,87,.03), transparent 50%),
+      #1A1816;
     background-attachment: fixed;
   }
   /* sidebar item active 态 */
@@ -54,21 +55,21 @@
     font-weight: 600;
     box-shadow: inset 3px 0 0 #D97757;
   }
-  /* 卡片质感：subtle 边 + 半透明 + 阴影 */
+  /* 卡片质感：对齐 palette.h — card #242220, divider #36322D, 克制阴影 */
   .card { backdrop-filter: blur(6px); }
   .card.bg-base-100 {
-    background: rgba(41, 35, 31, 0.94) !important;
-    color: #F2EBDD;
-    border: 1px solid rgba(104, 91, 80, 0.68);
-    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 12px 32px -16px rgba(0,0,0,.5);
+    background: #242220 !important;
+    color: #F5F1EA;
+    border: 1px solid #36322D;
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.025) inset, 0 6px 20px -14px rgba(0,0,0,.6);
   }
   .stats { background: transparent; box-shadow: none; }
   .stats > .stat {
-    background: rgba(41, 35, 31, 0.94);
-    color: #F2EBDD;
-    border: 1px solid rgba(104, 91, 80, 0.68);
+    background: #242220;
+    color: #F5F1EA;
+    border: 1px solid #36322D;
     border-radius: var(--rounded-box);
-    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.03) inset, 0 8px 24px -16px rgba(0,0,0,.5);
+    box-shadow: 0 1px 0 hsl(36 30% 100% / 0.025) inset, 0 6px 18px -14px rgba(0,0,0,.55);
   }
   /* 表头单色淡橙 + 吸顶 */
   table thead th {
@@ -163,15 +164,15 @@
   .badge-exhausted{ background: #5A554F; color: #fff; }
   /* navbar / footer 透明感 */
   .navbar.bg-base-100 {
-    background: rgba(31, 27, 23, 0.94) !important;
-    color: #F2EBDD;
+    background: rgba(26, 24, 22, 0.92) !important;
+    color: #F5F1EA;
     backdrop-filter: blur(8px);
-    border-bottom: 1px solid rgba(104, 91, 80, 0.7);
+    border-bottom: 1px solid #36322D;
   }
   aside {
-    background: rgba(31, 27, 23, 0.98) !important;
-    color: #F2EBDD;
-    backdrop-filter: blur(8px);
+    background: #1A1816 !important;
+    color: #F5F1EA;
+    border-color: #36322D !important;
   }
   aside .menu a {
     color: #DED2C3;
@@ -206,12 +207,12 @@
     background: linear-gradient(180deg, #D29D43, #C0813E);
   }
   .input, .select, .textarea {
-    background: rgba(31, 27, 23, 0.92) !important;
-    color: #F8EFE2 !important;
-    border-color: rgba(139, 121, 104, 0.8) !important;
+    background: #1C1A18 !important;
+    color: #F5F1EA !important;
+    border-color: #463F38 !important;
   }
   .input::placeholder, .textarea::placeholder {
-    color: #AFA193;
+    color: #8A837A;
   }
   .input:focus, .select:focus {
     outline: none;
