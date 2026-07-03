@@ -115,3 +115,11 @@ tools/preview-d2d/_build.cmd
 # 本地启动脚本（含家里云内网地址，属本地环境配置，勿入公开仓库）
 tools/preview-d2d/run-multi.bat
 tools/preview-d2d/启动-连homecloud.bat
+
+# smoke v2 local artifacts
+tmp/smoke/.logs/
+tmp/smoke/.admin_key
+tmp/smoke/*.json
+
+# MkDocs 构建产物
+/site/
