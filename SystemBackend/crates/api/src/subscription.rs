@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -30,7 +31,10 @@ pub async fn list_for_user(
     )
     .fetch_optional(&s.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| {
+        tracing::error!("db error: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+    })?
     .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))?;
 
     let rows = sqlx::query!(
@@ -40,7 +44,10 @@ pub async fn list_for_user(
     )
     .fetch_all(&s.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| {
+        tracing::error!("db error: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+    })?;
 
     let cdn = &s.cfg.cdn_base;
     let v = rows

@@ -161,20 +161,35 @@ pub async fn register(
     .await
     .map_err(internal)?;
 
-    // 5.5 消费邀请码：use_count++ + 写 invite_code_uses
+    // 5.5 消费邀请码：原子条件自增。
+    // 早先第 88 行的 SELECT ... FOR UPDATE 只在语句结束、连接归还池时短暂持锁，起不到防并发作用，
+    // 两个并发注册可能都通过 use_count 检查。这里用单条带 use_count < max_uses 的条件 UPDATE，
+    // Postgres 行锁会串行化对同一码的更新并在锁内重新求值配额，rows_affected 为 0 即表示抢码失败。
+    // 由于用户行已在上一步创建，失败时做补偿删除并返回 403。
     if let Some(code) = &used_invite_code {
-        sqlx::query!(
+        let consumed = sqlx::query!(
             r#"UPDATE invite_codes
                   SET use_count = use_count + 1,
                       used_at   = now(),
                       used_by   = $2
-                  WHERE code = $1"#,
+                  WHERE code = $1
+                    AND use_count < max_uses
+                    AND revoked_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > now())"#,
             code,
             row.id
         )
         .execute(&s.db)
         .await
         .map_err(internal)?;
+        if consumed.rows_affected() == 0 {
+            // 抢码失败（并发耗尽/刚被撤销/过期）——回滚已创建的用户。
+            sqlx::query!("DELETE FROM users WHERE id = $1", row.id)
+                .execute(&s.db)
+                .await
+                .ok();
+            return Err((StatusCode::FORBIDDEN, "invite_code exhausted".into()));
+        }
         sqlx::query!(
             "INSERT INTO invite_code_uses (code, user_id) VALUES ($1, $2)",
             code,
@@ -251,9 +266,18 @@ pub async fn login(
     State(s): State<Arc<AppState>>,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, (StatusCode, String)> {
+    // H-2: Validate hwid_hex upfront to prevent UTF-8 boundary panic on slicing
+    if req.hwid_hex.len() != 64 || !req.hwid_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "invalid hwid".into()));
+    }
+
     // Brute-force lockout: 5 failures within 15 min triggers 15 min cooldown
     {
         let mut map = s.login_attempts.lock().unwrap();
+        // M-3: Evict stale entries to prevent unbounded memory growth
+        if map.len() > 10_000 {
+            map.retain(|_, v| v.first_at.elapsed() < time::Duration::from_secs(1800));
+        }
         let entry =
             map.entry(req.username.clone())
                 .or_insert_with(|| crate::state::LoginAttemptEntry {
@@ -273,40 +297,38 @@ pub async fn login(
                 format!("login locked, retry in {}s", remaining.as_secs()),
             ));
         }
+        // M-1: Increment optimistically BEFORE releasing the lock to prevent concurrent bypass
+        entry.count += 1;
     }
 
-    let row = sqlx::query!(
+    let row_opt = sqlx::query!(
         r#"SELECT id, password_hash, hwid_bound, subscription_tier, subscription_expires_at
            FROM users WHERE username_hash = $1"#,
         hashing::salt_hwid(&req.username, b"launcher.user.salt.v1"),
     )
     .fetch_optional(&s.db)
     .await
-    .map_err(internal)?
-    .ok_or_else(|| {
-        // Count failed attempts even for unknown users (prevents user enumeration via timing)
-        if let Ok(mut map) = s.login_attempts.lock() {
-            if let Some(entry) = map.get_mut(&req.username) {
-                entry.count += 1;
-            }
+    .map_err(internal)?;
+
+    let row = match row_opt {
+        Some(r) => r,
+        None => {
+            // M-2: Run dummy argon2 verify to prevent timing oracle (user enumeration)
+            const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+            let _ = hashing::verify_password("x", DUMMY_HASH);
+            // 注意：login_history.user_id 是 UUID NOT NULL（见 migrations/0003_user_profile.sql），
+            // 未知用户没有对应 user_id，无法插入 login_history，因此这里不记录失败行，仅计数限流。
+            return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
         }
-        // 注意：login_history.user_id 是 UUID NOT NULL（见 migrations/0003_user_profile.sql），
-        // 未知用户没有对应 user_id，无法插入 login_history，因此这里不记录失败行，仅计数限流。
-        (StatusCode::UNAUTHORIZED, "invalid credentials".into())
-    })?;
+    };
 
     if !hashing::verify_password(&req.password, &row.password_hash).map_err(internal)? {
-        if let Ok(mut map) = s.login_attempts.lock() {
-            if let Some(entry) = map.get_mut(&req.username) {
-                entry.count += 1;
-            }
-        }
         // 记 login_history：密码错误的失败登录。此时已有 row.id，可写入 user_id。
         sqlx::query!(
             r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
                VALUES ($1, false, $2, $3, $4)"#,
             row.id,
-            &req.hwid_hex[..16.min(req.hwid_hex.len())],
+            &req.hwid_hex[..16],
             req.client_ver,
             Some("bad_password")
         )
@@ -363,7 +385,7 @@ pub async fn login(
         r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
            VALUES ($1, true, $2, $3, $4)"#,
         row.id,
-        &req.hwid_hex[..16.min(req.hwid_hex.len())],
+        &req.hwid_hex[..16],
         req.client_ver,
         if hwid_ok { None } else { Some("hwid_mismatch") }
     )

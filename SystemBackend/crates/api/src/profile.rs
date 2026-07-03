@@ -8,7 +8,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::Utc;
 use launcher_shared::hashing;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -134,29 +133,21 @@ pub async fn change_nickname(
         return Err((StatusCode::BAD_REQUEST, "nickname length 1-24".into()));
     }
 
-    let cooldown = rate_limit_seconds(&s, "nickname_change").await as i64;
-    let last = sqlx::query_scalar!("SELECT nickname_changed_at FROM users WHERE id=$1", uid)
-        .fetch_one(&s.db)
-        .await
-        .map_err(internal)?;
-    if let Some(prev) = last {
-        let elapsed = Utc::now().timestamp() - prev.timestamp();
-        if elapsed < cooldown {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                format!("cooldown {} seconds remaining", cooldown - elapsed),
-            ));
-        }
-    }
-
-    sqlx::query!(
-        "UPDATE users SET nickname=$1, nickname_changed_at=now() WHERE id=$2",
-        trimmed,
-        uid
+    let cooldown = rate_limit_seconds(&s, "nickname_change").await as f64;
+    let result = sqlx::query(
+        "UPDATE users SET nickname = $1, nickname_changed_at = now()
+         WHERE id = $2
+         AND (nickname_changed_at IS NULL OR EXTRACT(EPOCH FROM now() - nickname_changed_at) >= $3)",
     )
+    .bind(trimmed)
+    .bind(uid)
+    .bind(cooldown)
     .execute(&s.db)
     .await
     .map_err(internal)?;
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "nickname cooldown active".into()));
+    }
 
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'profile.nickname', $2, $3)",

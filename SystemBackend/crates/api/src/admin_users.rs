@@ -23,6 +23,66 @@ pub struct AdminAuth {
 }
 
 use crate::error::internal;
+use crate::admin_customization::AdminActor;
+
+// ---------------- privilege-boundary guards ----------------
+// admin.users.manage 是个宽授权（admin operator 也有），但把用户提成
+// owner/super_admin、或重置一个「绑定了高权 operator」的用户密码，都会跨越
+// admin→owner 边界。这两个动作必须收紧到只有 owner actor 才能做。
+
+/// 需要提权到 owner/super_admin 的角色写入吗？是则要求 actor 为 owner。
+const PRIVILEGED_ROLES: &[&str] = &["owner", "super_admin"];
+
+fn is_owner(actor: &AdminActor) -> bool {
+    actor.role == "owner"
+}
+
+/// B1: 拦截「非 owner 把用户角色写成 owner/super_admin」。
+/// role 为 None 或普通角色时放行；只有目标角色是高权且 actor 非 owner 时拒绝。
+fn guard_role_assignment(
+    actor: &AdminActor,
+    role: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(r) = role {
+        if PRIVILEGED_ROLES.contains(&r) && !is_owner(actor) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "只有 owner 可以把用户提升为 owner/super_admin".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// B2: 拦截「非 owner 重置一个绑定了高权 admin_operator(owner/admin) 的用户密码」，
+/// 否则可通过重置该用户密码再登录 /admin 冒充 owner/admin。
+async fn guard_target_not_privileged_operator(
+    s: &AppState,
+    actor: &AdminActor,
+    target_user_id: Uuid,
+) -> Result<(), (StatusCode, String)> {
+    if is_owner(actor) {
+        return Ok(());
+    }
+    // 运行时查询（非编译期宏）：避免为这一条查询单独维护 .sqlx 离线缓存，
+    // 使无论服务端用 SQLX_OFFLINE 还是在线 DATABASE_URL 都能构建。
+    let linked_role: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT operator_role FROM admin_operators WHERE user_id = $1 AND enabled = TRUE",
+    )
+    .bind(target_user_id)
+    .fetch_optional(&s.db)
+    .await
+    .map_err(internal)?;
+    if let Some(role) = linked_role {
+        if role == "owner" || role == "admin" {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "只有 owner 可以操作绑定了 owner/admin operator 的账户".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 // ---------------- JSON API ----------------
 #[derive(Serialize)]
@@ -111,6 +171,8 @@ pub async fn patch_user(
             ));
         }
     }
+    // B1: 非 owner 不能把用户提成 owner/super_admin
+    guard_role_assignment(&actor, req.role.as_deref())?;
     sqlx::query!(
         r#"UPDATE users SET
             uid = COALESCE($2, uid),
@@ -154,6 +216,8 @@ pub async fn admin_reset_password(
         "admin.users.manage",
     )
     .await?;
+    // B2: 非 owner 不能重置绑定了 owner/admin operator 的账户密码
+    guard_target_not_privileged_operator(&s, &actor, id).await?;
     if req.new_password.len() < 8 {
         return Err((StatusCode::BAD_REQUEST, "password >= 8".into()));
     }
@@ -371,6 +435,12 @@ async fn user_edit_submit(
             Err(resp) => return resp,
         };
 
+    // B1: 非 owner 不能把用户提成 owner/super_admin（空串视同不改，与下方 NULLIF 一致）
+    let role_arg = form.role.as_deref().filter(|r| !r.is_empty());
+    if guard_role_assignment(&actor, role_arg).is_err() {
+        return Redirect::to("/admin/users?err=role_forbidden").into_response();
+    }
+
     let _ = sqlx::query!(
         r#"UPDATE users SET
             uid = COALESCE(NULLIF($2,''), uid),
@@ -417,6 +487,11 @@ async fn user_reset_pw_form(
             Ok(v) => v,
             Err(resp) => return resp,
         };
+
+    // B2: 非 owner 不能重置绑定了 owner/admin operator 的账户密码
+    if guard_target_not_privileged_operator(&s, &actor, id).await.is_err() {
+        return Redirect::to("/admin/users?err=target_forbidden").into_response();
+    }
 
     if form.new_password.len() < 8 {
         return Redirect::to("/admin/users?err=pw_too_short").into_response();

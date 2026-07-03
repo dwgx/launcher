@@ -1231,29 +1231,51 @@ pub async fn update_ticket_status(
     .await
     .map_err(internal)?;
     if status == "resolved" && previous_status != "resolved" {
-        grant_xp(
-            &s,
-            me,
-            "ticket_resolver",
-            20,
-            Some("ticket"),
-            Some(ticket_id.to_string()),
+        // Check: has this user already received 'ticket_resolver' XP for this ticket?
+        let already_resolver: bool = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM user_xp_events WHERE user_id = $1 AND event_type = 'ticket_resolver' AND source_id = $2)"
         )
-        .await?;
+        .bind(me)
+        .bind(ticket_id.to_string())
+        .fetch_one(&s.db)
+        .await
+        .map_err(internal)?;
+        if !already_resolver {
+            grant_xp(
+                &s,
+                me,
+                "ticket_resolver",
+                20,
+                Some("ticket"),
+                Some(ticket_id.to_string()),
+            )
+            .await?;
+        }
         if let Some(creator_id) = row
             .try_get::<Option<Uuid>, _>("creator_id")
             .map_err(internal)?
         {
             if creator_id != me {
-                grant_xp(
-                    &s,
-                    creator_id,
-                    "ticket_resolved",
-                    20,
-                    Some("ticket"),
-                    Some(ticket_id.to_string()),
+                // Check: has the creator already received 'ticket_resolved' XP for this ticket?
+                let already_resolved: bool = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM user_xp_events WHERE user_id = $1 AND event_type = 'ticket_resolved' AND source_id = $2)"
                 )
-                .await?;
+                .bind(creator_id)
+                .bind(ticket_id.to_string())
+                .fetch_one(&s.db)
+                .await
+                .map_err(internal)?;
+                if !already_resolved {
+                    grant_xp(
+                        &s,
+                        creator_id,
+                        "ticket_resolved",
+                        20,
+                        Some("ticket"),
+                        Some(ticket_id.to_string()),
+                    )
+                    .await?;
+                }
             }
         }
     }

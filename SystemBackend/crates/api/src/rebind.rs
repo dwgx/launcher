@@ -17,6 +17,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use launcher_shared::hashing;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -42,8 +43,21 @@ pub async fn submit(
     State(s): State<Arc<AppState>>,
     Json(req): Json<RebindReq>,
 ) -> Result<Json<RebindResp>, (StatusCode, String)> {
+    // M-15: validate fingerprint is exactly 64 hex chars
+    if req.new_fingerprint.len() != 64
+        || !req.new_fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid fingerprint".into()));
+    }
+    // M-15: cap parts_full/parts_diff at 32 KB serialized
+    if serde_json::to_string(&req.parts_full).unwrap_or_default().len() > 32_768
+        || serde_json::to_string(&req.parts_diff).unwrap_or_default().len() > 32_768
+    {
+        return Err((StatusCode::BAD_REQUEST, "parts payload too large".into()));
+    }
+
     let user_id: Uuid = sqlx::query_scalar!(
-        "SELECT user_id FROM sessions WHERE token = $1",
+        "SELECT user_id FROM sessions WHERE token = $1 AND expires_at > now()",
         req.session_token
     )
     .fetch_optional(&s.db)
@@ -157,6 +171,9 @@ pub async fn admin_approve(
         "admin.rebind.manage",
     )
     .await?;
+    // M-7: wrap both updates in a transaction for atomicity
+    let mut tx = s.db.begin().await.map_err(internal)?;
+
     let row = sqlx::query!(
         r#"UPDATE hwid_rebind_requests
            SET status='approved', reviewed_at=now(), reviewer=$2, review_note=$3
@@ -166,21 +183,26 @@ pub async fn admin_approve(
         &actor.name,
         body.review_note
     )
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?
     .ok_or((StatusCode::NOT_FOUND, "no pending request".into()))?;
 
+    // H-1: salt the HWID before storing, matching auth.rs login comparison
+    let salted = hashing::salt_hwid(&row.new_fingerprint, b"launcher.hwid.salt.v1");
+
     // 同时把用户的 hwid_bound 改成新 fingerprint，下次登录通过
     sqlx::query!(
         "UPDATE users SET hwid_bound = $1, hwid_last_changed_at = $2 WHERE id = $3",
-        row.new_fingerprint,
+        salted,
         chrono::Utc::now(),
         row.user_id
     )
-    .execute(&s.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal)?;
+
+    tx.commit().await.map_err(internal)?;
 
     sqlx::query!(
         "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1, 'hwid_rebind.approve', $2, $3)",
@@ -340,26 +362,40 @@ async fn form_approve(
         Err(resp) => return resp,
     };
 
+    // M-7: wrap in transaction for atomicity
+    let mut tx = match s.db.begin().await {
+        Ok(t) => t,
+        Err(_) => return axum::response::Redirect::to("/admin/rebind?err=internal").into_response(),
+    };
+
     if let Ok(Some(row)) = sqlx::query!(
         r#"UPDATE hwid_rebind_requests SET status='approved', reviewed_at=now(), reviewer=$2
            WHERE id=$1 AND status='pending' RETURNING user_id, new_fingerprint"#,
         id,
         &actor.name
     )
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await
     {
+        // H-1: salt the HWID before storing
+        let salted = hashing::salt_hwid(&row.new_fingerprint, b"launcher.hwid.salt.v1");
         let _ = sqlx::query!(
             "UPDATE users SET hwid_bound=$1, hwid_last_changed_at=now() WHERE id=$2",
-            row.new_fingerprint,
+            salted,
             row.user_id
         )
-        .execute(&s.db)
+        .execute(&mut *tx)
         .await;
+        if tx.commit().await.is_err() {
+            return axum::response::Redirect::to("/admin/rebind?err=internal").into_response();
+        }
         let _ = sqlx::query!(
             "INSERT INTO audit_log (actor, action, target, metadata) VALUES ($1,'hwid_rebind.approve',$2,NULL)",
             &actor.name, id.to_string()).execute(&s.db).await;
         crate::audit::event(&actor.name, "hwid_rebind.approve", &id.to_string());
+    } else {
+        // No row matched or query failed — rollback implicitly via drop
+        drop(tx);
     }
     axum::response::Redirect::to("/admin/rebind?ok=approve").into_response()
 }

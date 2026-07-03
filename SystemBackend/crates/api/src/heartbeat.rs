@@ -3,6 +3,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing;
 
 #[derive(Deserialize)]
 pub struct HeartbeatReq {
@@ -30,7 +31,10 @@ pub async fn heartbeat(
     )
     .fetch_optional(&s.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| {
+        tracing::error!("db error: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+    })?
     .ok_or((StatusCode::UNAUTHORIZED, "no session".into()))?;
 
     if row.expires_at < Utc::now() {

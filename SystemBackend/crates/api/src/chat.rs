@@ -501,11 +501,9 @@ async fn broadcast_chat_event(
     } else if ticket_meta_for_chat(state, chat_id).await?.is_some()
         || forum_status_for_chat(state, chat_id).await?.is_some()
     {
-        let users = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users")
-            .fetch_all(&state.db)
-            .await
-            .map_err(internal)?;
-        for uid in users {
+        // 只对当前在线用户做可见性判定后定向推送。给离线用户 push 是空操作，
+        // 因此无需扫描全表 users（否则公开主题每发一条消息 = 全用户表扫描 + N×子查询）。
+        for uid in ws::online_user_ids() {
             if can_access_chat(state, uid, chat_id).await.unwrap_or(false) {
                 ws::push_to(state, uid, payload);
             }
@@ -832,13 +830,17 @@ pub async fn create_group(
             "kind must be group or channel".into(),
         ));
     }
+    if req.member_ids.len() > 100 {
+        return Err((StatusCode::BAD_REQUEST, "too many members".into()));
+    }
     if req.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title required".into()));
     }
+    // Channels are broadcast-style (only admins post); groups are collaborative (all members write)
     let write_role = if req.kind == "channel" {
-        "user"
-    } else {
         "admin_only"
+    } else {
+        "user"
     };
     let chat = sqlx::query!(
         "INSERT INTO chats (kind, title, created_by, write_role) VALUES ($1, $2, $3, $4) RETURNING id",
@@ -1352,6 +1354,17 @@ pub async fn send(
     if !allowed_types.contains(&req.msg_type.as_str()) {
         return Err((StatusCode::BAD_REQUEST, "bad msg_type".into()));
     }
+    // payload 大小上限：消息 payload 会原样入库并经 WS 扇出（官方频道广播全体在线用户），
+    // 无上限时单条 100MB 文本消息即可放大成全网 DoS。媒体消息只应携带 media_id 引用而非内联字节，
+    // 故 32KB 对所有类型都绰绰有余。
+    const MAX_PAYLOAD_BYTES: usize = 32 * 1024;
+    let payload_len = serde_json::to_vec(&req.payload).map(|v| v.len()).unwrap_or(0);
+    if payload_len > MAX_PAYLOAD_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("payload exceeds {} bytes", MAX_PAYLOAD_BYTES),
+        ));
+    }
     ensure_can_write_chat(&s, me, req.chat_id).await?;
     let mentions = normalize_mentions(&s, req.chat_id, req.mentions).await?;
 
@@ -1403,10 +1416,17 @@ pub async fn send(
     }
 
     let row = if let Some(client_msg_id) = req.client_msg_id {
-        sqlx::query(
+        // 幂等插入：ON CONFLICT DO NOTHING 依赖唯一索引 ux_messages_client_msg
+        // (chat_id, sender_id, client_msg_id)。这补上了前面 SELECT 预检与此处 INSERT 之间的
+        // TOCTOU 窗口——并发重发时只有一条成功落库，另一条命中冲突返回 0 行，此时回查既存行
+        // 并按幂等返回，不再重复扇出、也不再报 500。
+        let inserted = sqlx::query(
             r#"INSERT INTO messages
                   (chat_id, sender_id, msg_type, payload, reply_to_id, client_msg_id, sender_device_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (chat_id, sender_id, client_msg_id)
+                 WHERE client_msg_id IS NOT NULL AND sender_id IS NOT NULL
+                 DO NOTHING
                RETURNING id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
                          client_msg_id, sender_device_id"#)
             .bind(req.chat_id)
@@ -1416,7 +1436,31 @@ pub async fn send(
             .bind(req.reply_to_id)
             .bind(client_msg_id)
             .bind(&device_id)
-            .fetch_one(&s.db).await.map_err(internal)?
+            .fetch_optional(&s.db).await.map_err(internal)?;
+        match inserted {
+            Some(r) => r,
+            None => {
+                // 并发重发的失败方：回查既存消息并幂等返回。
+                let existing = sqlx::query(
+                    r#"SELECT id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
+                              client_msg_id, sender_device_id
+                       FROM messages
+                       WHERE chat_id = $1 AND sender_id = $2 AND client_msg_id = $3"#,
+                )
+                .bind(req.chat_id)
+                .bind(me)
+                .bind(client_msg_id)
+                .fetch_one(&s.db)
+                .await
+                .map_err(internal)?;
+                let message_id: i64 = existing.try_get("id").map_err(internal)?;
+                let existing_event_id = message_event_id(&s, message_id).await?;
+                let out =
+                    message_out_from_row(&s, &existing, req.chat_id, Some(me), existing_event_id)
+                        .await?;
+                return Ok(Json(out));
+            }
+        }
     } else {
         sqlx::query(
             r#"INSERT INTO messages
@@ -1743,15 +1787,27 @@ pub async fn react(
             .flatten()
             {
                 if sender_id != me {
-                    let _ = grant_xp_event(
-                        &s,
-                        sender_id,
-                        "message_liked",
-                        2,
-                        "message",
-                        req.message_id.to_string(),
+                    // Cap: max 1 XP grant per (reactor, message) pair regardless of emoji count
+                    let already_granted = sqlx::query_scalar::<_, i64>(
+                        r#"SELECT COUNT(*) FROM user_xp_events
+                           WHERE user_id = $1 AND source_id = $2 AND event_type = 'message_liked'"#,
                     )
-                    .await;
+                    .bind(sender_id)
+                    .bind(req.message_id.to_string())
+                    .fetch_one(&s.db)
+                    .await
+                    .map_err(internal)?;
+                    if already_granted == 0 {
+                        let _ = grant_xp_event(
+                            &s,
+                            sender_id,
+                            "message_liked",
+                            2,
+                            "message",
+                            req.message_id.to_string(),
+                        )
+                        .await;
+                    }
                 }
             }
         }

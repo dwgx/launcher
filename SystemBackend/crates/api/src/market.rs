@@ -203,6 +203,12 @@ pub async fn create_listing(
     Json(req): Json<CreateReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let me = auth_user(&s, &req.session_token).await?;
+    if req.title.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "title too long".into()));
+    }
+    if req.description.as_ref().map_or(false, |d| d.len() > 4000) {
+        return Err((StatusCode::BAD_REQUEST, "description too long".into()));
+    }
     if req.price_cents < 0 || req.price_cents > 1_000_000_00 {
         return Err((StatusCode::BAD_REQUEST, "price out of range".into()));
     }
