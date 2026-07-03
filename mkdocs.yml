@@ -1,0 +1,100 @@
+# Launcher 内部技术文档站 —— MkDocs Material
+# 本地预览：  python -m mkdocs serve
+# 构建静态站：python -m mkdocs build   (输出到 site/，已 gitignore)
+# 说明见 docs/dev/doc-pipeline.md
+
+site_name: Launcher 技术文档
+site_description: Launcher D2D 客户端 + Rust 后端 —— 内部架构 / 逻辑 / 加密验证参考
+docs_dir: docs
+site_dir: site
+use_directory_urls: true
+
+theme:
+  name: material
+  language: zh
+  palette:
+    # 亮/暗双主题切换
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换到暗色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到亮色
+  features:
+    - navigation.instant      # SPA 式导航
+    - navigation.tracking     # URL 跟随锚点
+    - navigation.sections     # 侧栏分组展开
+    - navigation.top          # 回到顶部
+    - navigation.indexes      # section 首页
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy       # 代码块一键复制
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition                # !!! note / warning
+  - pymdownx.details          # 可折叠 admonition
+  - pymdownx.superfences:     # mermaid 图 + 嵌套代码块
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - footnotes
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+# 导航树由 codegraph workflow 产出后在此处补全（见 docs/dev/ 生成的页面）。
+# 每个子系统一页，加密/信任模型独立成章，全部结论标 file:line。
+nav:
+  - 首页: index.md
+  - 架构:
+      - 架构总览: architecture/index.md
+      - 端到端数据流: architecture/data-flow.md
+  - 客户端:
+      - 概览: client/index.md
+      - App 与 UI 层: client/app-ui.md
+      - 网络 / 存储 / 核心: client/net-storage-core.md
+      - 加密与原生模块: client/crypto-native.md
+  - 后端:
+      - 概览: backend/index.md
+      - 认证 / 会话 / 共享加密: backend/auth-session.md
+      - API 与管理后台: backend/api-admin.md
+  - 签名与数据:
+      - Signer / .helix / Proto: data/signer-proto.md
+      - 数据模型（Postgres）: data/data-model.md
+  - 安全与信任模型:
+      - 概览: security/index.md
+      - 加密与验证链: security/crypto-chain.md
+  - 开发参考:
+      - 构建与部署: dev/build-deploy.md
+      - 文档流水线: dev/doc-pipeline.md
+  - 工作流:
+      - Smoke / 审计: AUDIT_WORKFLOW.md
+      - 通用工作流: WORKFLOW.md

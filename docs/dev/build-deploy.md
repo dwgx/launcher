@@ -1,0 +1,90 @@
+# 构建与部署
+
+本页汇总客户端、后端、signer 的构建方式，以及后端部署到「家里云」生产环境的标准流程指针。
+
+!!! warning "秘密不入文档"
+    生产主机的 LAN IP、SSH 口令、DB 连接串、`config.toml` 内容、`admin_password`、私钥、HWID 盐**值**一律**不写入本站**。
+    这些只存在于本机的 `CLAUDE.md`（已 gitignore）与服务器本地。本页只描述**流程与工件位置**，凭据一律按名字/角色引用。
+
+## 1. 客户端（C++20 / Windows）
+
+构建系统是 CMake + vcpkg（`CMakeLists.txt`）。
+
+- 目标平台：**仅 Windows 11 x64**（`CMakeLists.txt:15-17` 对非 Windows `FATAL_ERROR`）。
+- 工具链：`CMAKE_TOOLCHAIN_FILE` 指向 `$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake`（`CMakeLists.txt:3-4`），依赖清单在 `vcpkg.json`。
+- C++ 标准：C++20，`CMAKE_CXX_EXTENSIONS OFF`（`CMakeLists.txt:11-13`）。
+- **VMProtect 友好编译选项**（MSVC，`CMakeLists.txt:19-40`）：`/GR-`（无 RTTI）+ `/EHs-c-`（无异常）——这解释了客户端为何全程用 `Status`/`Result<T>` 错误码而非异常（见 [客户端概览](../client/index.md)）；另有 `/permissive- /Zc:__cplusplus /utf-8 /MP /W4`，Release 开 `/LTCG`。
+- 预处理宏：`WIN32_LEAN_AND_MEAN / NOMINMAX / UNICODE / _UNICODE`。
+
+```bash
+# 典型配置 + 构建（需先设好 VCPKG_ROOT）
+cmake --preset default          # 或 cmake -B build -S .
+cmake --build build --config Release
+```
+
+!!! note "客户端主交付路径"
+    可运行的 D2D 客户端在 `tools/preview-d2d/`（见 `docs/PHASE_2_D2D_MIGRATION.md`）；`src/` 是长期骨架。
+    两者的 HWID 实现不同，详见 [客户端 · 加密与原生 §5](../client/crypto-native.md#hwid)。
+
+## 2. 后端（Rust workspace）
+
+Cargo workspace 在 `SystemBackend/`（`SystemBackend/Cargo.toml`），四个 crate：`api` / `signer` / `proto` / `shared`。
+
+- Rust 版本：`rust-version = "1.75"`（`Cargo.toml:16`），edition 2021。
+- 运行二进制 **bin 名是 `systembackend`**（api crate）。
+- Release profile：`lto = true`, `codegen-units = 1`, `strip = true`, `opt-level = 3`（`Cargo.toml:54-58`）。
+- 关键依赖：axum 0.7、sqlx 0.8（postgres）、argon2、sha2、hmac、blake3、ed25519-dalek、askama、rustls 0.23（`Cargo.toml:18-52`）。
+
+```bash
+# 编译校验（需真实 DATABASE_URL 供 sqlx 宏离线/在线校验）
+cargo build --release -p launcher-api    # 产出 bin: systembackend
+cargo build --release -p signer         # 离线签名 CLI
+```
+
+!!! note "sqlx 编译期校验与 .sqlx 缓存"
+    sqlx `query!` 宏在编译期连库校验 SQL。离线构建靠提交的 `.sqlx` 缓存；缓存陈旧会导致编译失败或校验偏差。
+    部分守卫（如 B2 owner-only）刻意用运行时 `query_scalar` 避开离线缓存依赖（`admin_users.rs:67-68`）。
+    如何重建缓存 / SSH 隧道连生产 Postgres 的步骤见记忆 `backend-build-and-db-access`（本机 gitignore 文档）。
+
+### 迁移
+
+数据库迁移在 `SystemBackend/migrations/0001..0018`，服务启动时自动跑（`crates/api/src/main.rs:46-47`）。schema 详见 [数据模型](../data/data-model.md)。
+
+### 配置
+
+后端读 `config.toml`（`crates/api/src/main.rs:41-44`）。**其内容（`database_url`、`admin_password`、盐、`signing_public_key_hex`、TLS 证书路径、`cdn_base` 等）不写入本站**，字段清单见 `crates/shared/src/config.rs`；生产值只在服务器本地。
+
+## 3. Signer（离线，管理员机器）
+
+`signer` CLI 只在管理员机器运行，`keygen / sign / verify` 三个子命令，产出 `.helix`。私钥 `signer/private.key` 明文落盘、永不上服务器。完整用法与格式见 [Signer / Proto](../data/signer-proto.md)。
+
+## 4. 部署到家里云（生产后端）
+
+!!! warning "凭据在本机 gitignore 文档"
+    生产主机地址、SSH 用户/口令、sudo 策略、DB 端口/库名/连接串位置等**全部记录在本机 `CLAUDE.md`（已 gitignore）**，
+    本页不复制。以下只给**流程骨架**，具体主机/凭据以该文档为准。
+
+模板是编译期嵌入二进制的，改后端/模板必须**重新构建 + 重启**才生效。标准流程（详见记忆 `homecloud-deploy-procedure`）：
+
+```mermaid
+flowchart TD
+    A["本机打包 SystemBackend<br/>(排除 target/.git)"] --> B["SFTP 上传 → 解压到 build_src/"]
+    B --> C["在 build_src/SystemBackend 下<br/>带真实 DATABASE_URL 跑<br/>cargo build --release -p launcher-api"]
+    C --> D["备份旧二进制 → install 新二进制"]
+    D --> E["sudo systemctl restart systembackend"]
+    E --> F["验证: grep 新模板字符串已嵌入<br/>systemctl is-active / journalctl"]
+```
+
+要点（均来自本机 gitignore 文档，此处只述性质不述值）：
+
+- systemd 服务名 `systembackend.service`（另有 `systembackend-audit.service` 双库）；运行二进制与部署源码快照的路径在服务器约定目录。
+- **构建用普通部署用户**（其 cargo 在 `~/.cargo/bin`），**不要用 sudo/root 跑 cargo**（config.toml 对运行用户不可读的坑）。
+- 本机无 sshpass/plink，用 **paramiko**（Python）做非交互 SSH/SFTP；SFTP 本地路径要用 Windows 实路径。
+
+!!! danger "部署即高风险操作"
+    重启生产服务、替换二进制属于影响线上的操作。执行前确认已备份旧二进制、迁移兼容、并在 `journalctl` 复核启动无误。
+    记忆 `rebind-expiry-auth-gap` 记录了一处「已修复但可能未部署」的差异——部署状态需实际在服务器确认，勿假设。
+
+## 5. 文档站构建
+
+本文档站是 MkDocs Material，构建/预览见 [文档流水线](doc-pipeline.md)。
