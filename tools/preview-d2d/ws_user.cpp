@@ -11,6 +11,7 @@
 #include "chat.h"
 #include "fetch.h"
 #include "i18n.h"
+#include "download_pool.h"
 
 #include <memory>
 #include <deque>
@@ -82,23 +83,25 @@ void queueMediaDownload(const std::wstring& slug, int64_t server_id, const std::
         int64_t server_id;
         std::string url;
     };
-    auto* a = new A{ slug, server_id, media_url };
-    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
-        std::unique_ptr<A> a((A*)lp);
-        auto dl = fetch::downloadMediaToCache(a->url, L"chat");
+    // Wave2: 走下载池(去重合并 + 有界线程),不再每条消息起一个 CreateThread。
+    // 先登记待归一记录(下载完成回调时按 local_path 匹配填 path)。
+    std::wstring path = fetch::mediaCachePathForUrl(media_url, L"chat");
+    {
         PendingMediaResolve r;
-        r.slug = std::move(a->slug);
-        r.server_id = a->server_id;
-        r.url = std::move(a->url);
-        r.path = dl.path;
-        r.ok = dl.ok;
-        {
-            std::lock_guard<std::mutex> lk(g_media_mtx);
-            g_media_resolved.push_back(std::move(r));
-        }
+        r.slug = slug;
+        r.server_id = server_id;
+        r.url = media_url;
+        r.path = path;
+        r.ok = !path.empty();
+        std::lock_guard<std::mutex> lk(g_media_mtx);
+        g_media_resolved.push_back(std::move(r));
+    }
+    if (path.empty()) {
         if (g_notify) PostMessageW(g_notify, WM_APP + 10, 0, 0);
-        return 0;
-    }, a, 0, nullptr);
+        return;
+    }
+    std::wstring wurl(media_url.begin(), media_url.end());
+    DownloadPool::instance().enqueue(wurl, path, g_notify, WM_APP + 10);
 }
 
 void applyMediaDownloads() {
@@ -122,6 +125,9 @@ void applyMediaDownloads() {
     }
 }
 }
+
+// Wave2: 暴露通知窗口给下载池等待方(历史图后台下载完成后 PostMessage 重绘)。
+HWND mediaNotifyHwnd() { return g_notify; }
 
 void start(HWND notify) {
     if (g_session_token.empty()) return;
@@ -287,6 +293,26 @@ void drain() {
             std::string status = net::jsonStr(m, "status");
             if (!user_id.empty() && !status.empty()) {
                 fetch::updatePeerStatus(utf8ToW(user_id), utf8ToW(status));
+            }
+        } else if (type == "event" && (event_type == "reaction" || legacy_type == "reaction")) {
+            // { event_type:"reaction", message_id, actor_id, data:{emoji, remove} }
+            int64_t message_id = net::jsonInt(m, "message_id");
+            std::string actor = net::jsonStr(m, "actor_id");
+            std::string data = net::jsonObject(m, "data");
+            std::string emoji = net::jsonStr(data, "emoji");
+            bool remove = net::jsonRaw(data, "remove") == "true";
+            if (message_id > 0 && !emoji.empty()) {
+                chat::onWsReaction(message_id, utf8ToW(actor), utf8ToW(emoji), remove);
+            }
+        } else if (type == "event" && (event_type == "read" || legacy_type == "read")) {
+            // { event_type:"read", chat_id, actor_id, data:{up_to_message_id} }
+            std::string chat_id = net::jsonStr(m, "chat_id");
+            std::string actor = net::jsonStr(m, "actor_id");
+            std::string data = net::jsonObject(m, "data");
+            int64_t up_to = net::jsonInt(data, "up_to_message_id");
+            if (up_to <= 0) up_to = net::jsonInt(m, "message_id");
+            if (!chat_id.empty() && up_to > 0) {
+                chat::onWsRead(utf8ToW(chat_id), utf8ToW(actor), up_to);
             }
         }
     }

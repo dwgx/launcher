@@ -36,6 +36,7 @@ Tween g_pack_tab_x, g_pack_tab_w;
 PackDrag g_pack_drag;
 std::unordered_map<std::wstring, ChatScroll> g_scroll;
 ScrollBarDrag g_scroll_drag;
+ReactTarget   g_react_target;
 
 // ---- 内部共享状态（chat_internal.h extern）----
 const wchar_t* kGroups[] = { L"IMPORTANT", L"GENERAL", L"GAMES", L"SHOP" };
@@ -105,6 +106,7 @@ void setPickerOpen(bool open) {
         g_picker_t.start(g_picker_t.value(), 0.0f, 0.12f, 0, curve::easeOutCubic);
         g_picker_scroll_drag = PickerScrollDrag{};
         g_pack_drag = PackDrag{};
+        g_react_target.active = false;   // 关闭 picker 即退出 react 选择模式
     }
 }
 

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cwchar>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <utility>
@@ -367,10 +368,55 @@ inline HINTERNET sharedSession() {
         if (h) {
             DWORD t_resolve = 5000, t_connect = 5000, t_send = 15000, t_recv = 30000;
             WinHttpSetTimeouts(h, t_resolve, t_connect, t_send, t_recv);
+            // 提高每服务器最大并发连接数，让 keep-alive 池不至于过早串行化。
+            DWORD max_conns = 16;
+            WinHttpSetOption(h, WINHTTP_OPTION_MAX_CONNS_PER_SERVER,
+                             &max_conns, sizeof(max_conns));
+            // 尝试启用 HTTP/2（旧 SDK 无相关常量时用 #ifdef 跳过）。
+#if defined(WINHTTP_PROTOCOL_FLAG_HTTP2) && defined(WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL)
+            DWORD http2 = WINHTTP_PROTOCOL_FLAG_HTTP2;
+            WinHttpSetOption(h, WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL,
+                             &http2, sizeof(http2));
+#endif
         }
         return h;
     }();
     return s;
+}
+
+// 复用连接句柄（keep-alive）：按 host:port 缓存 WinHttpConnect 的结果，
+// 避免每次请求都新建/关闭连接而破坏 keep-alive。用 thread_local 保存，
+// 每线程独立，无需锁，也避免跨线程共享 HINTERNET 的生命周期问题。
+inline std::map<std::wstring, HINTERNET>& connectionCache() {
+    thread_local std::map<std::wstring, HINTERNET> cache;
+    return cache;
+}
+
+inline std::wstring connectionKey(const std::wstring& host, INTERNET_PORT port) {
+    std::wstring key = host;
+    key.push_back(L':');
+    key += std::to_wstring((unsigned)port);
+    return key;
+}
+
+inline HINTERNET connectionFor(HINTERNET ses, const std::wstring& host, INTERNET_PORT port) {
+    auto& cache = connectionCache();
+    std::wstring key = connectionKey(host, port);
+    auto it = cache.find(key);
+    if (it != cache.end() && it->second) return it->second;
+    HINTERNET con = WinHttpConnect(ses, host.c_str(), port, 0);
+    if (con) cache[key] = con;
+    return con;
+}
+
+// 连接疑似断开时丢弃缓存句柄，下次调用会重新 WinHttpConnect。
+inline void dropConnection(const std::wstring& host, INTERNET_PORT port) {
+    auto& cache = connectionCache();
+    auto it = cache.find(connectionKey(host, port));
+    if (it != cache.end()) {
+        if (it->second) WinHttpCloseHandle(it->second);
+        cache.erase(it);
+    }
 }
 
 inline Resp request(const wchar_t* verb, const wchar_t* path,
@@ -381,45 +427,61 @@ inline Resp request(const wchar_t* verb, const wchar_t* path,
     HINTERNET ses = sharedSession();
     if (!ses) return r;
     Endpoint ep = endpoint();
-    HINTERNET con = WinHttpConnect(ses, ep.host.c_str(), ep.port, 0);
-    if (!con) return r;
-    HINTERNET req = WinHttpOpenRequest(con, verb, path, nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, ep.secure ? WINHTTP_FLAG_SECURE : 0);
-    if (!req) { WinHttpCloseHandle(con); return r; }
-
-    maybeAllowInsecureTls(req);
 
     std::wstring headers;
     if (!content_type.empty()) headers += L"Content-Type: " + content_type + L"\r\n";
     headers += extra_headers;
 
-    BOOL ok = WinHttpSendRequest(req,
-        headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
-        headers.empty() ? 0 : (DWORD)-1,
-        body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(),
-        (DWORD)body.size(), (DWORD)body.size(), 0);
-    if (!ok) { WinHttpCloseHandle(req); WinHttpCloseHandle(con); return r; }
+    // 复用 keep-alive 连接；若连接已断（send/recv 失败），丢弃缓存句柄重连再试一次。
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        HINTERNET con = connectionFor(ses, ep.host, ep.port);
+        if (!con) return r;
 
-    if (!WinHttpReceiveResponse(req, nullptr)) {
-        WinHttpCloseHandle(req); WinHttpCloseHandle(con); return r;
+        HINTERNET req = WinHttpOpenRequest(con, verb, path, nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, ep.secure ? WINHTTP_FLAG_SECURE : 0);
+        if (!req) {
+            // 连接句柄可能已失效——丢弃后重试。
+            if (attempt == 0) { dropConnection(ep.host, ep.port); continue; }
+            return r;
+        }
+
+        maybeAllowInsecureTls(req);
+
+        BOOL ok = WinHttpSendRequest(req,
+            headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+            headers.empty() ? 0 : (DWORD)-1,
+            body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(),
+            (DWORD)body.size(), (DWORD)body.size(), 0);
+        if (!ok) {
+            WinHttpCloseHandle(req);
+            if (attempt == 0) { dropConnection(ep.host, ep.port); continue; }
+            return r;
+        }
+
+        if (!WinHttpReceiveResponse(req, nullptr)) {
+            WinHttpCloseHandle(req);
+            if (attempt == 0) { dropConnection(ep.host, ep.port); continue; }
+            return r;
+        }
+
+        DWORD status = 0; DWORD szs = sizeof(status);
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            nullptr, &status, &szs, nullptr);
+        r.status = status;
+
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
+            std::vector<char> buf(avail);
+            DWORD nrd = 0;
+            if (!WinHttpReadData(req, buf.data(), avail, &nrd)) break;
+            r.body.append(buf.data(), nrd);
+            if (nrd == 0) break;
+        }
+
+        // 只关闭请求句柄；连接句柄留在缓存里供后续复用（keep-alive）。
+        WinHttpCloseHandle(req);
+        return r;
     }
-
-    DWORD status = 0; DWORD szs = sizeof(status);
-    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        nullptr, &status, &szs, nullptr);
-    r.status = status;
-
-    DWORD avail = 0;
-    while (WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
-        std::vector<char> buf(avail);
-        DWORD nrd = 0;
-        if (!WinHttpReadData(req, buf.data(), avail, &nrd)) break;
-        r.body.append(buf.data(), nrd);
-        if (nrd == 0) break;
-    }
-
-    WinHttpCloseHandle(req);
-    WinHttpCloseHandle(con);
     return r;
 }
 

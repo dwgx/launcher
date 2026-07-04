@@ -161,6 +161,12 @@ inline uint32_t fadeArgb(uint32_t argb, float op) {
     return (a << 24) | (argb & 0xFFFFFFu);
 }
 
+// 反应 chip 行高度（有反应时占一行固定高度）。measureBubbleHeight/paintBubble 共用，保持镜像。
+constexpr float kReactionRowH = 26.0f;
+inline float reactionRowHeight(const Msg& m) {
+    return m.reactions.empty() ? 0.0f : kReactionRowH;
+}
+
 float clampf(float v, float lo, float hi);
 void setPickerOpen(bool open);
 void setPickerTabSmooth(int tab);

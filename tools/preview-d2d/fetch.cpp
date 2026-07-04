@@ -10,6 +10,7 @@
 #include <ShlObj.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <cwctype>
@@ -22,12 +23,19 @@ namespace launcher::d2d::fetch {
 std::vector<Listing> g_market_listings;
 bool g_market_loaded = false;
 std::mutex g_market_mtx;
+ListingDetail g_market_detail;
+std::mutex g_market_detail_mtx;
+MarketActionResult g_market_action;
+std::mutex g_market_action_mtx;
 PeerProfile g_peer;
 std::mutex g_peer_mtx;
 MyProfileSnapshot g_pending_my_profile;
 std::mutex g_my_profile_mtx;
 ModerationMemberState g_moderation_member;
 std::mutex g_moderation_mtx;
+CheckinResult g_checkin;
+std::mutex g_checkin_mtx;
+bool g_checkin_inflight = false;
 
 namespace {
 struct StrArg { std::wstring s; HWND h; };
@@ -140,6 +148,37 @@ bool writeFileBytes(const std::wstring& path, const std::vector<BYTE>& body) {
 AvatarDownload downloadAvatarTo(const std::string& api_path, const std::wstring& dir, const std::wstring& stem) {
     AvatarDownload out;
     if (api_path.empty() || dir.empty() || stem.empty()) return out;
+
+    // 后端现在返回带版本的头像 URL (/api/avatar/<uid>?v=<version>) + immutable 缓存。
+    // 用 uid+version 作为落盘键：解析 ?v=，命中同版本文件即短路（不走网络），
+    // 只有版本变化才重新下载。无 ?v= 时退回旧行为（始终下载到基础 stem）。
+    std::wstring vtag;
+    if (auto q = api_path.find('?'); q != std::string::npos) {
+        std::string query = api_path.substr(q + 1);
+        for (size_t pos = 0; pos < query.size();) {
+            size_t amp = query.find('&', pos);
+            std::string kv = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+            if (auto eq = kv.find('='); eq != std::string::npos && kv.compare(0, eq, "v") == 0) {
+                vtag = sanitizeFilePart(asciiToW(kv.substr(eq + 1)));
+                break;
+            }
+            if (amp == std::string::npos) break;
+            pos = amp + 1;
+        }
+    }
+    const std::wstring keyStem = vtag.empty() ? stem : (stem + L"__v" + vtag);
+
+    if (!vtag.empty()) {
+        for (const wchar_t* e : { L"png", L"jpg", L"jpeg", L"gif", L"webp", L"bmp" }) {
+            std::wstring p = dir + L"\\" + keyStem + L"." + e;
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                out.ok = true;
+                out.path = std::move(p);
+                return out;   // 版本未变，命中磁盘缓存，跳过下载
+            }
+        }
+    }
+
     std::wstring wurl = asciiToW(api_path);
     auto r = net::request(L"GET", wurl.c_str(), {}, L"");
     if (!r.ok() || r.body.empty()) {
@@ -148,7 +187,20 @@ AvatarDownload downloadAvatarTo(const std::string& api_path, const std::wstring&
     }
     const char* ext = avatarExtFromBody(r.body);
     clearAvatarFiles(dir, stem);
-    std::wstring path = dir + L"\\" + stem + L"." + asciiToW(ext);
+    if (!vtag.empty()) {
+        // 清掉本头像的旧版本文件，避免版本更迭后磁盘残留累积。
+        std::wstring pattern = dir + L"\\" + stem + L"__v*";
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                    DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    std::wstring path = dir + L"\\" + keyStem + L"." + asciiToW(ext);
     if (!writeFileBytes(path, r.body)) return out;
     out.ok = true;
     out.path = std::move(path);
@@ -368,6 +420,29 @@ void statusSync(const wchar_t* status_key) {
     }, a, 0, nullptr);
 }
 
+void checkin(HWND notify) {
+    if (g_session_token.empty()) return;
+    auto* a = new VoidArg{ notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<VoidArg> a((VoidArg*)lp);
+        // body 只带 session_token（客户端生成的 ASCII token，无用户文本）→ 不需 jsonEscape。
+        std::string body = "{\"session_token\":\"" + g_session_token + "\"}";
+        auto r = net::postJson(L"/api/community/checkin", body);
+        if (r.ok()) {
+            CheckinResult res;
+            res.level = (int)net::jsonInt(r.body, "level");
+            res.xp = net::jsonInt(r.body, "xp");
+            // granted 是 bool，无 jsonBool；用 jsonRaw 比较（order/whitespace 容错）。
+            res.granted = net::jsonRaw(r.body, "granted") == "true";
+            res.ok = true;
+            std::lock_guard<std::mutex> lk(g_checkin_mtx);
+            g_checkin = res;
+        }
+        PostMessageW(a->h, WM_APP + 60, r.ok() ? 1 : 0, (LPARAM)(intptr_t)r.status);
+        return 0;
+    }, a, 0, nullptr);
+}
+
 void logout(const std::string& token) {
     if (token.empty()) return;
     auto* a = new LogoutArg{ token };
@@ -423,9 +498,11 @@ void marketListings(HWND notify) {
                 Listing l;
                 l.id     = net::jsonStr(obj, "id");
                 l.title  = utf8ToW(net::jsonStr(obj, "title"));
-                l.seller = utf8ToW(net::jsonStr(obj, "seller"));
-                l.price  = (int)net::jsonInt(obj, "price");
-                l.summary= utf8ToW(net::jsonStr(obj, "summary"));
+                // 后端 ListingBrief 发的是 seller_id / price_cents，且无 summary；
+                // 用 category 当副标题（原来读 "seller"/"price"/"summary" 全对不上）。
+                l.seller = utf8ToW(net::jsonStr(obj, "seller_id"));
+                l.price  = (int)net::jsonInt(obj, "price_cents");
+                l.summary= utf8ToW(net::jsonStr(obj, "category"));
                 if (!l.id.empty()) tmp.push_back(std::move(l));
                 pos = cb + 1;
             }
@@ -436,6 +513,104 @@ void marketListings(HWND notify) {
             g_market_loaded = true;
         }
         PostMessageW(a->h, WM_APP + 33, 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// GET /api/market/listings/:id — 公共端点，拉商品详情填 g_market_detail。
+// clone 自 marketListings 的 CreateThread+parse 骨架，但解析扁平对象。
+void getListing(HWND notify, const std::string& id) {
+    if (id.empty()) return;
+    struct A { HWND h; std::string id; };
+    auto* a = new A{ notify, id };
+    {
+        std::lock_guard<std::mutex> lk(g_market_detail_mtx);
+        g_market_detail = ListingDetail{};
+        g_market_detail.id = id;
+    }
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::wstring path = L"/api/market/listings/";
+        for (char c : a->id) path.push_back((wchar_t)(unsigned char)c);
+        auto r = net::request(L"GET", path.c_str(), {}, L"");
+        ListingDetail d;
+        d.id = a->id;
+        if (r.ok()) {
+            d.title       = utf8ToW(net::jsonStr(r.body, "title"));
+            d.description = utf8ToW(net::jsonStr(r.body, "description"));
+            d.category    = utf8ToW(net::jsonStr(r.body, "category"));
+            d.item_type   = utf8ToW(net::jsonStr(r.body, "item_type"));
+            d.seller_id   = utf8ToW(net::jsonStr(r.body, "seller_id"));
+            d.status      = utf8ToW(net::jsonStr(r.body, "status"));
+            d.price_cents = (int64_t)net::jsonInt(r.body, "price_cents");
+            d.purchase_count = (int)net::jsonInt(r.body, "purchase_count");
+            d.rating_count   = (int)net::jsonInt(r.body, "rating_count");
+            // rating_avg 是小数，jsonInt 会截断 → 用 raw 片段走 atof。
+            d.rating_avg  = (float)atof(net::jsonRaw(r.body, "rating_avg").c_str());
+            d.loaded = true;
+        } else {
+            d.loaded = true;
+            d.error = r.body.empty() ? "load failed" : r.body.substr(0, 120);
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_market_detail_mtx);
+            g_market_detail = std::move(d);
+        }
+        PostMessageW(a->h, WM_APP + 62, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// POST /api/market/purchase — session_token 在 BODY 里；listing_id/token 都是 UUID/opaque，
+// 无用户自由文本，string-concat 安全。非幂等，UI 必须在点击后禁用 Buy 按钮直到本消息回来。
+void purchaseListing(HWND notify, const std::string& listing_id) {
+    if (g_session_token.empty() || listing_id.empty()) return;
+    struct A { HWND h; std::string listing_id; };
+    auto* a = new A{ notify, listing_id };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"listing_id\":\"" + a->listing_id + "\"}";
+        auto r = net::postJson(L"/api/market/purchase", body);
+        {
+            std::lock_guard<std::mutex> lk(g_market_action_mtx);
+            g_market_action.status = r.status;
+            g_market_action.msg = r.ok() ? "" :
+                (r.body.empty() ? "" : r.body.substr(0, 120));
+        }
+        if (r.ok()) {
+            // purchase_count / 余额变了，刷新详情与列表。
+            getListing(a->h, a->listing_id);
+            marketListings(a->h);
+        }
+        PostMessageW(a->h, WM_APP + 63, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// POST /api/market/review — body 自由文本必须 jsonEscape。省略 order_id → 后端自动选最近
+// 一笔 delivered 订单。响应 204 空 body，只看 r.ok()，不要解析 body。
+void reviewListing(HWND notify, const std::string& listing_id, int rating,
+                   const std::wstring& body_text) {
+    if (g_session_token.empty() || listing_id.empty()) return;
+    struct A { HWND h; std::string listing_id; int rating; std::wstring body_text; };
+    auto* a = new A{ notify, listing_id, rating, body_text };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"listing_id\":\"" + a->listing_id
+                         + "\",\"rating\":" + std::to_string(a->rating)
+                         + ",\"body\":\"" + net::jsonEscape(a->body_text) + "\"}";
+        auto r = net::postJson(L"/api/market/review", body);
+        {
+            std::lock_guard<std::mutex> lk(g_market_action_mtx);
+            g_market_action.status = r.status;
+            g_market_action.msg = r.ok() ? "" :
+                (r.body.empty() ? "" : r.body.substr(0, 120));
+        }
+        // 成功后刷新 rating_avg/count。
+        if (r.ok()) getListing(a->h, a->listing_id);
+        PostMessageW(a->h, WM_APP + 64, r.ok() ? 1 : 0, 0);
         return 0;
     }, a, 0, nullptr);
 }
@@ -455,6 +630,22 @@ void profileUpdate(HWND notify, ProfileUpdateKind kind, const std::string& field
 
 void profileUpdate(HWND notify, const std::string& fields) {
     profileUpdate(notify, ProfileUpdateKind::Unknown, fields);
+}
+
+void changeNickname(HWND notify, const std::string& new_nickname_escaped) {
+    if (g_session_token.empty()) return;
+    struct A { std::string n; HWND h; };
+    auto* a = new A{ new_nickname_escaped, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        // n 已由调用方 jsonEscape；new_nickname 字段名是字面量，无注入风险。
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"new_nickname\":\"" + a->n + "\"}";
+        auto r = net::postJson(L"/api/profile/nickname", body);
+        // 把 HTTP 状态码原样带回，让 UI 区分 204 成功 / 429 冷却 / 400 非法。
+        PostMessageW(a->h, WM_APP + 61, (WPARAM)r.status, 0);
+        return 0;
+    }, a, 0, nullptr);
 }
 
 std::wstring normalizePeerKey(const std::wstring& key) {
@@ -733,6 +924,9 @@ MediaUploadResult uploadMediaFile(const std::wstring& path) {
     out.sha256 = net::jsonStr(r.body, "sha256");
     out.mime = net::jsonStr(r.body, "mime");
     out.url = normalizeMediaUrl(net::jsonStr(r.body, "url"));
+    out.blurhash = net::jsonStr(r.body, "blurhash");
+    out.width = (int)net::jsonInt(r.body, "width");
+    out.height = (int)net::jsonInt(r.body, "height");
     out.ok = out.media_id > 0 && !out.sha256.empty() && !out.url.empty();
     if (!out.ok) out.error = "bad upload response";
     return out;
@@ -782,11 +976,23 @@ std::string mediaPayloadJson(const MediaUploadResult& media) {
     if (!media.ok) return "{}";
     char id_buf[64]{};
     sprintf_s(id_buf, "%lld", (long long)media.media_id);
-    return std::string("{\"media_id\":") + id_buf
+    std::string out = std::string("{\"media_id\":") + id_buf
         + ",\"sha256\":\"" + media.sha256
         + "\",\"mime\":\"" + media.mime
         + "\",\"url\":\"" + media.url
-        + "\",\"media_url\":\"" + media.url + "\"}";
+        + "\",\"media_url\":\"" + media.url + "\"";
+    // Wave3: 携带 BlurHash 占位串 + 内在宽高，客户端据此先画模糊预览、免 reflow。
+    // BlurHash 是 base83（无引号/反斜杠），可直接内嵌。
+    if (!media.blurhash.empty()) {
+        out += ",\"blurhash\":\"" + media.blurhash + "\"";
+    }
+    if (media.width > 0 && media.height > 0) {
+        char wh[64]{};
+        sprintf_s(wh, ",\"width\":%d,\"height\":%d", media.width, media.height);
+        out += wh;
+    }
+    out += "}";
+    return out;
 }
 
 void uploadAvatar(HWND notify, const std::wstring& path) {

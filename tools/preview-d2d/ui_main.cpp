@@ -127,7 +127,7 @@ void drawAvatarPill(D2DApp& app, float ax, float ay, float ar, float op) {
     const Palette& pal = palette();
 
     if (!g_avatar_path.empty()) {
-        auto* bmp = app.images().fromFile(g_avatar_path);
+        auto* bmp = app.images().fromFile(g_avatar_path, (uint32_t)(ar * 2.0f + 0.5f));
         if (bmp) {
             if (drawCoverCircle(app, bmp, ax, ay, ar, op)) return;
         }
@@ -521,6 +521,30 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 12.0f, pal.shadow_card, op, 2.0f, 3);
     prim::fillRR(ctx, cx, cy, cw, ch, 12.0f, br.solidA(pal.card, op));
 
+    // 每日签到按钮 — 卡片右上角，primary 样式（同 profile 上传按钮）。
+    // 位置避开 fx=cx+22+ar*2+18 起的名字/状态文字。是否已签到由服务器 granted 决定，
+    // 不用客户端本地日期门控（时区差异会与服务器不一致）。
+    {
+        LayoutRect ci{ cx + cw - 112, cy + 20, 92, 30 };
+        bool ci_hov = ci.contains(g_mouse) && !fetch::g_checkin_inflight;
+        prim::fillRR(ctx, ci.x, ci.y, ci.w, ci.h, 8.0f,
+                     br.solidA(ci_hov ? pal.primary_hover : pal.primary,
+                               op * (fetch::g_checkin_inflight ? 0.5f : 1.0f)));
+        auto* ci_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
+                                          DWRITE_FONT_WEIGHT_BOLD);
+        prim::drawText_(ctx, trW("home.checkin"), ci_fmt,
+                        ci.x, ci.y, ci.w, ci.h,
+                        br.solidA(0xFFFFFF, op),
+                        DWRITE_TEXT_ALIGNMENT_CENTER,
+                        DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (!fetch::g_checkin_inflight && !g_session_token.empty()) {
+            hit(ci, [](){
+                fetch::g_checkin_inflight = true;
+                fetch::checkin(GetActiveWindow());
+            }, true);
+        }
+    }
+
     // 头像 72×72
     float ar = 36.0f;
     drawAvatarPill(app, cx + 22, cy + 22, ar, op);
@@ -694,7 +718,7 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
                      pal.shadow_card_hover, op, gc_hov ? 5.0f : 4.0f, 4);
 
     auto cs2_path = cs2HeaderPath();
-    auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
+    auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path, 480);
     if (cover) {
         // 真圆角 mask（之前 PushAxisAlignedClip 让 4 角是直的）
         prim::pushLayerRR(ctx, app.factory(), cx, cy + lift, 240, 140, 12.0f);
@@ -793,6 +817,8 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
         prim::drawText_(ctx, price_str, meta,
                         cx + 16, cy + card_h - 26, card_w - 32, 18,
                         br.solidA(pal.primary, op));
+        // 点卡片打开详情 modal（购买 + 评价）。id 是 std::string，按值捕获安全。
+        hit(cr, [id = listings[i].id](){ modal::openMarketDetail(id); }, true);
     }
 }
 
@@ -947,6 +973,12 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
     field(cy + 124, trW("profile.email"),    g_user.email,    false);
     field(cy + 158, trW("profile.expires"),  g_user.expires,  false);
 
+    // 昵称字段可编辑 — 命中值框（与 field lambda 的 box 几何一致）打开改昵称 modal。
+    {
+        LayoutRect nick_box{ cx + 90, (cy + 90) - 4, cw - 110, 26 };
+        hit(nick_box, [](){ modal::openEditNickname(); }, true);
+    }
+
     // 个人签名 — 大 textarea + 编辑按钮
     prim::drawText_(ctx, trW("profile.bio"), lab_fmt,
                     cx + 16, cy + 196, 100, 14, br.solidA(pal.text_muted, op));
@@ -1091,6 +1123,7 @@ void paintMain(D2DApp& app, float W, float H) {
 
     // modals 在最顶层
     modal::paintCS2Modal(app, W, H);
+    modal::paintMarketDetailModal(app, W, H);
     modal::paintChangePwModal(app, W, H);
     modal::paintConfirmModal(app, W, H);
     modal::paintHistoryModal(app, W, H);
@@ -1100,6 +1133,7 @@ void paintMain(D2DApp& app, float W, float H) {
     modal::paintUserProfileModal(app, W, H);
     modal::paintEditStatusTextModal(app, W, H);
     modal::paintEditBioModal(app, W, H);
+    modal::paintEditNicknameModal(app, W, H);
     modal::paintMuteUserModal(app, W, H);
     // WebView2 modal 在最顶（CS2 modal 已经直接 webview，这是通用浏览器/视频）
     modal::paintWebViewModal(app, W, H);

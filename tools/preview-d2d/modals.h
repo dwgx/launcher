@@ -57,6 +57,24 @@ extern CS2State g_cs2;
 void openCS2();
 void paintCS2Modal(D2DApp& app, float W, float H);
 
+// 商品详情 — market 卡片点击打开，拉 GET /api/market/listings/:id，含购买 + 评价。
+struct MarketDetailState {
+    bool open = false;
+    Tween t;
+    std::string listing_id;
+    bool buying = false;        // 购买请求进行中，禁用 Buy 按钮（购买非幂等）
+    bool reviewing = false;     // 评价请求进行中
+    int  rating = 5;            // 1-5 星，默认 5
+    InputBox review_input;      // 可选评价文字
+    std::wstring error_msg;
+};
+extern MarketDetailState g_market_detail_modal;
+void openMarketDetail(const std::string& id);
+void paintMarketDetailModal(D2DApp& app, float W, float H);
+// WM_APP+63 / +64 触发：购买 / 评价结果
+void onMarketPurchaseResult(bool success);
+void onMarketReviewResult(bool success);
+
 struct HistoryState {
     bool open = false;
     Tween t;
@@ -144,6 +162,19 @@ extern EditBioState g_edit_bio;
 void openEditBio();
 void paintEditBioModal(D2DApp& app, float W, float H);
 void onEditBioResult(bool success);
+
+// 编辑自己的昵称 nickname（走 /api/profile/nickname，有冷却限流）
+struct EditNicknameState {
+    bool open = false;
+    Tween t;
+    InputBox input;
+    bool busy = false;
+};
+extern EditNicknameState g_edit_nickname;
+void openEditNickname();
+void paintEditNicknameModal(D2DApp& app, float W, float H);
+// status = HTTP 状态码（204 成功 / 429 冷却 / 400 非法 / 其他失败）
+void onEditNicknameResult(unsigned int status);
 
 // 消息右键上下文菜单 — chat::onMouseRDown 命中消息时打开
 struct MsgContextMenuState {

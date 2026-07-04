@@ -27,6 +27,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -413,15 +414,12 @@ float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_
     if (m.kind == MsgKind::Image || m.kind == MsgKind::Gif) {
         float bub_w = 240, bub_h = 180;
         D2D1_SIZE_F sz{ 0, 0 };
-        ID2D1Bitmap* bmp = nullptr;
-        if (m.kind == MsgKind::Gif) {
-            auto* a = app.gifs().fromFile(m.body);
-            if (a) { sz.width = (float)a->width; sz.height = (float)a->height; }
-        }
-        if (sz.width <= 0) {
-            bmp = app.images().fromFile(m.body);
-            if (bmp) sz = bmp->GetSize();
-        }
+        // measure 绝不触发解码 —— 只读已知 intrinsic 尺寸（worker 完成后填充）。
+        // 未知则用默认 240×180 框；真实尺寸到位后下一帧自然 reflow。
+        std::optional<SIZE> isz;
+        if (m.kind == MsgKind::Gif) isz = app.gifs().intrinsicSize(m.body);
+        if (!isz)                   isz = app.images().intrinsicSize(m.body);
+        if (isz) { sz.width = (float)isz->cx; sz.height = (float)isz->cy; }
         if (sz.width > 0 && sz.height > 0) {
             float aspect = sz.height / sz.width;
             float max_w = (std::min)(maxw * 0.55f, 320.0f);
@@ -429,13 +427,13 @@ float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_
             bub_h = bub_w * aspect;
             if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
         }
-        return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
+        return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + reactionRowHeight(m) + 6;
     }
     if (m.kind == MsgKind::Video) {
-        return (prev_same_author ? 140.0f : 162.0f) + replyPreviewHeight(m) + 6;
+        return (prev_same_author ? 140.0f : 162.0f) + replyPreviewHeight(m) + reactionRowHeight(m) + 6;
     }
     if (m.kind == MsgKind::Sticker) {
-        return (prev_same_author ? 100.0f : 122.0f) + replyPreviewHeight(m) + 6;
+        return (prev_same_author ? 100.0f : 122.0f) + replyPreviewHeight(m) + reactionRowHeight(m) + 6;
     }
     // text — 处理 launcher://pack/ link 卡片
     auto find_url = [](const std::wstring& s) -> std::wstring {
@@ -451,7 +449,7 @@ float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_
     };
     std::wstring url = find_url(m.body);
     if (!url.empty() && url.compare(0, 15, L"launcher://pack/") == 0) {
-        return (prev_same_author ? 88.0f : 110.0f) + replyPreviewHeight(m) + 6;
+        return (prev_same_author ? 88.0f : 110.0f) + replyPreviewHeight(m) + reactionRowHeight(m) + 6;
     }
     if (m.body.empty()) {
         // 空消息 — 不算高度（实际 paint 也跳过）
@@ -468,7 +466,7 @@ float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_
         bub_h += 14.0f;
     }
     if (!url.empty()) bub_h += 4;
-    return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + 6;
+    return (prev_same_author ? bub_h : bub_h + 22) + replyPreviewHeight(m) + reactionRowHeight(m) + 6;
 }
 
 // ============== 单条气泡 ==============
@@ -523,7 +521,7 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
         bool drew_real = false;
         // me 用真头像（g_avatar_path BitmapBrush 圆形裁剪）
         if (me && !g_avatar_path.empty()) {
-            auto* abmp = app.images().fromFile(g_avatar_path);
+            auto* abmp = app.images().fromFile(g_avatar_path, 28);
             if (abmp) {
                 D2D1_BITMAP_BRUSH_PROPERTIES bp = D2D1::BitmapBrushProperties(
                     D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP,
@@ -628,37 +626,44 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
         float bub_w = 240, bub_h = 180;
         ID2D1Bitmap* draw_bmp = nullptr;
         D2D1_SIZE_F sz = { 0, 0 };
+        float media_op = 1.0f;
+        constexpr uint32_t kMediaTargetPx = 320;   // decode-to-display-size
+
+        // 布局尺寸用 intrinsic（与 measureBubbleHeight 一致，避免缩放位图导致的抖动）。
+        std::optional<SIZE> isz;
+        if (m.kind == MsgKind::Gif) isz = app.gifs().intrinsicSize(m.body);
+        if (!isz)                   isz = app.images().intrinsicSize(m.body);
+        if (isz) { sz.width = (float)isz->cx; sz.height = (float)isz->cy; }
 
         if (m.kind == MsgKind::Gif) {
             // GIF 多帧 — IWICBitmapDecoder GetFrameCount + /grctlext/Delay
-            auto* anim = app.gifs().fromFile(m.body);
+            auto* anim = app.gifs().fromFile(m.body, kMediaTargetPx);
             if (anim) {
                 draw_bmp = app.gifs().frameAt(anim, stages::g_time_in_stage);
-                sz.width = (float)anim->width;
-                sz.height = (float)anim->height;
+                if (sz.width <= 0) { sz.width = (float)anim->width; sz.height = (float)anim->height; }
             }
         }
         if (!draw_bmp) {
-            // Image 或 GIF 解码失败 → 退到单帧 ID2D1Bitmap
-            draw_bmp = app.images().fromFile(m.body);
-            if (draw_bmp) sz = draw_bmp->GetSize();
+            // Image 或 GIF 解码失败 → 退到单帧 ID2D1Bitmap（带淡入不透明度）
+            draw_bmp = app.images().fromFile(m.body, kMediaTargetPx, &m.blurhash, &media_op);
+            if (draw_bmp && sz.width <= 0) sz = draw_bmp->GetSize();
         }
 
-        if (draw_bmp) {
-            if (sz.width > 0 && sz.height > 0) {
-                float aspect = sz.height / sz.width;
-                float max_w = (std::min)(maxw * 0.55f, 320.0f);
-                bub_w = (std::min)(max_w, sz.width);
-                bub_h = bub_w * aspect;
-                if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
-            }
+        // 尺寸用 intrinsic（sz 已由 intrinsicSize/位图填充）；占位框也据此定形，
+        // 图到位后不跳变。未知 sz 时保持默认 240×180。
+        if (sz.width > 0 && sz.height > 0) {
+            float aspect = sz.height / sz.width;
+            float max_w = (std::min)(maxw * 0.55f, 320.0f);
+            bub_w = (std::min)(max_w, sz.width);
+            bub_h = bub_w * aspect;
+            if (bub_h > 240) { bub_h = 240; bub_w = bub_h / aspect; }
         }
         float bub_x = bub_x_for(bub_w);
         if (draw_bmp) {
             // 真圆角 mask（之前 PushAxisAlignedClip 只裁矩形 4 角是直的）
             prim::pushLayerRR(ctx, app.factory(), bub_x, bub_y, bub_w, bub_h, 12.0f);
             ctx->DrawBitmap(draw_bmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
-                            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                            media_op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             prim::popLayer(ctx);
             prim::strokeRR(ctx, bub_x, bub_y, bub_w, bub_h, 12.0f,
                            br.solidA(pal.divider, 0.5f), 1.0f);
@@ -732,10 +737,10 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
                          && (m.body.substr(sd) == L".gif"
                              || m.body.substr(sd) == L".GIF"));
         if (s_is_gif) {
-            auto* sa = app.gifs().fromFile(m.body);
+            auto* sa = app.gifs().fromFile(m.body, 100);
             if (sa) sbmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
         }
-        if (!sbmp) sbmp = app.images().fromFile(m.body);
+        if (!sbmp) sbmp = app.images().fromFile(m.body, 100);
         if (sbmp) {
             prim::pushLayerRR(ctx, app.factory(), bub_x, bub_y, bub_w, bub_h, 16.0f);
             ctx->DrawBitmap(sbmp, D2D1::RectF(bub_x, bub_y, bub_x + bub_w, bub_y + bub_h),
@@ -792,7 +797,7 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
             std::lock_guard<std::mutex> lk(sticker::g_pack_preview_mtx);
             if (sticker::g_pack_preview.short_name == short_a
                 && !sticker::g_pack_preview.cover_path.empty()) {
-                thumb = app.images().fromFile(sticker::g_pack_preview.cover_path);
+                thumb = app.images().fromFile(sticker::g_pack_preview.cover_path, 64);
             }
         }
         if (thumb) {
@@ -909,6 +914,78 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
     }
 
     return (prev_same_author ? bub_h : bub_h + 22) + reply_h + 6;
+}
+
+// 反应 chip 行 + "已读" 标记 —— 画在 bubble 行底部（reactionRowHeight 预留的带里）。
+// 与 measureBubbleHeight 的 reactionRowHeight()/kReadMarkerH 预留保持镜像。
+// row_top/row_h 是该消息整行（含 reply + reaction 带 + 可选 read marker）的矩形。
+constexpr float kReadMarkerH = 14.0f;
+void paintReactionFooter(D2DApp& app, const Msg& m, float x, float row_top,
+                         float row_h, float maxw, bool show_read_marker) {
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    bool me = isSelfMessage(m);
+    constexpr float ar = 14.0f, gap = 10.0f;
+    // bubble 内容左右边界（跟 paintBubble 的 bub_x_for 对齐）。
+    float left_edge  = x + ar * 2 + gap;
+    float right_edge = x + maxw - ar * 2 - gap;
+
+    float read_h = show_read_marker ? kReadMarkerH : 0.0f;
+    float chip_h = m.reactions.empty() ? 0.0f : kReactionRowH;
+    // 行底部：row_top + row_h - 6(gap)。read marker 占最底，chip 带在其上。
+    float footer_bottom = row_top + row_h - 6.0f;
+    float read_y = footer_bottom - read_h;
+    float chip_top = read_y - chip_h;
+
+    if (!m.reactions.empty()) {
+        auto* chip_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+        const float pad = 8.0f, chip_gap = 5.0f, ch_h = 20.0f;
+        // 先算每个 chip 宽度。
+        std::vector<float> cw(m.reactions.size(), 0);
+        float total_w = 0;
+        for (size_t i = 0; i < m.reactions.size(); ++i) {
+            wchar_t cnt[16]; swprintf_s(cnt, L" %d", m.reactions[i].count);
+            std::wstring label = m.reactions[i].emoji + cnt;
+            cw[i] = measureW(app, label, chip_fmt) + pad * 2.0f;
+            total_w += cw[i] + (i ? chip_gap : 0);
+        }
+        float cx = me ? (right_edge - total_w) : left_edge;
+        float cy = chip_top + (chip_h - ch_h) * 0.5f;
+        for (size_t i = 0; i < m.reactions.size(); ++i) {
+            const Reaction& r = m.reactions[i];
+            uint32_t bg = r.mine ? fadeArgb(pal.primary, 0.18f) : fadeArgb(pal.text, 0.06f);
+            prim::fillRR(ctx, cx, cy, cw[i], ch_h, 10.0f, br.solid(bg));
+            if (r.mine) {
+                prim::strokeRR(ctx, cx, cy, cw[i], ch_h, 10.0f,
+                               br.solidA(pal.primary, 0.55f), 1.0f);
+            }
+            wchar_t cnt[16]; swprintf_s(cnt, L" %d", r.count);
+            std::wstring label = r.emoji + cnt;
+            prim::drawText_(ctx, label, chip_fmt,
+                            cx + pad, cy + 2, cw[i] - pad * 2.0f + 2.0f, 16,
+                            br.solid(r.mine ? pal.primary : pal.text));
+            // 点击 chip 切换：自己已点 → remove；未点 → add。仅对已落库消息（server_id>0）。
+            if (m.server_id > 0) {
+                int64_t sid = m.server_id;
+                std::wstring emoji = r.emoji;
+                bool remove = r.mine;
+                std::wstring slug = g_active;
+                hit({ cx, cy, cw[i], ch_h }, [slug, sid, emoji, remove]() {
+                    reactToMessage(GetActiveWindow(), slug, sid, emoji, remove);
+                }, true);
+            }
+            cx += cw[i] + chip_gap;
+        }
+    }
+
+    if (show_read_marker) {
+        auto* rd_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(7.0f));
+        prim::drawText_(ctx, trW("chat.read_receipt"), rd_fmt,
+                        x, read_y, maxw, read_h,
+                        br.solidA(pal.text_muted, 0.8f),
+                        DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
 }
 
 // ============== Composer ==============
@@ -1162,11 +1239,21 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     std::vector<float> heights(msgs.size(), 0);
     float total = kStreamTopPad + kStreamBottomPad;
+    // 读回执标记：找"自己最后一条已被 peer 读过的消息"— 只在这一条下画一个 Read 标记。
+    int read_marker_idx = -1;
+    for (size_t i = msgs.size(); i-- > 0; ) {
+        const Msg& m = msgs[i];
+        if (isSelfMessage(m) && m.server_id > 0 && messageReadByPeer(g_active, m.server_id)) {
+            read_marker_idx = (int)i;
+            break;
+        }
+    }
     for (size_t i = 0; i < msgs.size(); ++i) {
         const Msg& m = msgs[i];
         const Msg* prev = (i > 0) ? &msgs[i - 1] : nullptr;
         bool prev_same = prev && sameGroupedAuthor(*prev, m);
         heights[i] = measureBubbleHeight(app, m, maxw, prev_same);
+        if ((int)i == read_marker_idx) heights[i] += kReadMarkerH;   // 预留 Read 标记行
         total += heights[i];
     }
     // ----- 滚动状态 -----
@@ -1196,6 +1283,11 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     sc.rendered_count = msgs.size();
     sc.tail_server_id = tail_server_id;
     sc.tail_client_msg_id = tail_client_msg_id;
+    // 已读回执：贴底浏览时把 tail 标记为已读。markRead 内部按 slug 单调去抖，
+    // 每帧调用无害（tail 不前进就直接返回）；后端 GREATEST 也容忍重复。
+    if (was_at_bottom && !g_scroll_drag.active && tail_server_id > 0) {
+        markRead(GetActiveWindow(), g_active, tail_server_id);
+    }
     float max_off = (std::max)(0.0f, total - stream_h);
     if (sc.target_offset > max_off) sc.target_offset = max_off;
     if (sc.target_offset < 0) sc.target_offset = 0;
@@ -1278,6 +1370,11 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
         }
         g_msg_row_hits.push_back({ { ax, my, aw, heights[i] }, (int)i });
         paintBubble(app, m, (int)i, ax + 16, my, maxw, prev_same);
+        // 反应 chips + (仅 read_marker_idx 那条) 已读标记，画在该行底部预留带里。
+        if (!m.reactions.empty() || (int)i == read_marker_idx) {
+            paintReactionFooter(app, m, ax + 16, my, heights[i], maxw,
+                                /*show_read_marker=*/(int)i == read_marker_idx);
+        }
         my += heights[i];
     }
     ctx->PopAxisAlignedClip();
@@ -1558,9 +1655,17 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             }
             hit(cell_r, [e](){
                 std::wstring s = e;
-                g_composer.replaceSelection(s);
-                g_focus_composer = true;
-                // 不自动关 picker — 用户可能要连续选
+                if (g_react_target.active) {
+                    // React 模式：把选中的 emoji 发到目标消息（remove=false 表示加反应）。
+                    reactToMessage(GetActiveWindow(), g_react_target.slug,
+                                   g_react_target.server_id, s, /*remove=*/false);
+                    g_react_target.active = false;
+                    setPickerOpen(false);
+                } else {
+                    g_composer.replaceSelection(s);
+                    g_focus_composer = true;
+                    // 不自动关 picker — 用户可能要连续选
+                }
             }, true);
         }
         ctx->PopAxisAlignedClip();
@@ -1758,10 +1863,10 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                        || sp.substr(sd) == L".GIF"));
                     if (decode_bitmaps) {
                         if (is_gif) {
-                            auto* sa = app.gifs().fromFile(sp);
+                            auto* sa = app.gifs().fromFile(sp, 100);
                             if (sa) sticker_bmp = app.gifs().frameAt(sa, stages::g_time_in_stage);
                         }
-                        if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp);
+                        if (!sticker_bmp) sticker_bmp = app.images().fromFile(sp, 100);
                     }
                     if (sticker_bmp) {
                         prim::pushLayerRR(ctx, app.factory(),

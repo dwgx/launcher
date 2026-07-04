@@ -32,8 +32,13 @@
 #include "hwid.h"
 #include "sticker.h"
 #include "net.h"
+#include "download_pool.h"
 #include <memory>
 #include <utility>
+
+#ifdef LAUNCHER_VISUAL_SMOKE
+#include "visual_smoke.h"
+#endif
 
 #pragma comment(lib, "user32.lib")
 
@@ -327,7 +332,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::unique_ptr<std::wstring> p((std::wstring*)lp);
             if (wp && p && !p->empty()) {
                 g_avatar_path = *p;
-                g_app.images().invalidate();
+                g_app.images().evict(g_avatar_path);   // 仅逐出该头像，不再全清缓存
                 toast::show(trW("toast.avatar_synced"));
             } else {
                 toast::show(trW("toast.avatar_upload_fail"));
@@ -345,8 +350,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             chat::switchChannel(chat::g_active);
             return 0;
         }
-        case WM_APP + 10: {                    // WS message arrived
+        case WM_APP + 10: {                    // WS message arrived / Wave2 媒体下载完成
             ws::drain();
+            InvalidateRect(hwnd, nullptr, FALSE);  // Wave2: 历史图后台下载完 → 重绘让解码缓存接手
+            return 0;
+        }
+        case launcher::d2d::kMsgDecodeReady: {  // 后台解码完成 → UI 线程上传+翻 Ready+重绘
+            g_app.images().drainCompleted();
+            g_app.gifs().drainCompleted();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 15: {                    // user tags fetched
@@ -381,17 +393,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP + 23: {                    // 远程头像下载完成；lp = std::wstring*
             std::unique_ptr<std::wstring> p((std::wstring*)lp);
             if (!wp) {
+                if (!g_avatar_path.empty()) g_app.images().evict(g_avatar_path);
                 g_avatar_path.clear();
-                g_app.images().invalidate();
                 return 0;
             }
             if (wp && p && !p->empty()) {
                 g_avatar_path = *p;
-                g_app.images().invalidate();   // 强制下次重新解码
+                g_app.images().evict(g_avatar_path);   // 仅逐出该头像，强制重新解码
                 toast::show(trW("toast.avatar_cloud_synced"));
             } else {
+                if (!g_avatar_path.empty()) g_app.images().evict(g_avatar_path);
                 g_avatar_path.clear();
-                g_app.images().invalidate();
             }
             return 0;
         }
@@ -473,6 +485,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_APP + 33: {                    // market listings fetched
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 29: {                    // sticker import 完成；wp=成功数 lp=pack_id
@@ -608,6 +621,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        case WM_APP + 60: {                    // 每日签到结果
+            fetch::g_checkin_inflight = false;
+            if (wp) {
+                fetch::CheckinResult res;
+                {
+                    std::lock_guard<std::mutex> lk(fetch::g_checkin_mtx);
+                    res = fetch::g_checkin;
+                }
+                if (res.level > 0) g_user.level = res.level;
+                toast::show(res.granted ? trW("home.checkin_reward")
+                                        : trW("home.checkin_done"));
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else if ((DWORD)lp == 401 || (DWORD)lp == 403) {
+                leaveInvalidSession(hwnd, true, true);
+            }
+            return 0;
+        }
         case WM_APP + 51: {                    // chat picker → 卸载非 owner pack (wp/lp 同 +32)
             std::unique_ptr<chat::PackActionPayload> payload((chat::PackActionPayload*)wp);
             if (payload) {
@@ -669,6 +699,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 modal::onEditBioResult(ok);
             }
             if (wp) toast::show(trW("toast.saved"));
+            return 0;
+        }
+        case WM_APP + 61: {                    // change_nickname result; wp = HTTP 状态码
+            // onEditNicknameResult 自行按状态码分派 toast（含 429 冷却）+ refetch。
+            modal::onEditNicknameResult((unsigned int)wp);
+            return 0;
+        }
+        case WM_APP + 62: {                    // market listing detail loaded
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 63: {                    // market purchase result (wp = success)
+            modal::onMarketPurchaseResult(wp != 0);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 64: {                    // market review result (wp = success)
+            modal::onMarketReviewResult(wp != 0);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_APP + 65: {                    // emoji 反应 POST 失败 → 回滚本地乐观聚合
+            chat::applyReactFailure();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 36: {                    // peer profile fetched
@@ -763,6 +817,22 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         DestroyWindow(hwnd);
         return 1;
     }
+    // 后台解码服务 —— 所有 WIC 解码在此，完成后 PostMessage(kMsgDecodeReady) 回 UI 线程。
+    launcher::d2d::decodeService().start(hwnd);
+    // Wave2: 后台下载池 —— 历史/WS 图片下载在此,去重合并,完成后 PostMessage(WM_APP+10)。
+    launcher::d2d::DownloadPool::instance().start(4);
+
+#ifdef LAUNCHER_VISUAL_SMOKE
+    // 可插拔视觉冒烟钩子：置于 autologin 之前，绕过 applyEnvIdentity/validateSavedSession/
+    // afterLogin 及所有 live fetch。run() 自带帧循环，绝不进正常消息循环。移除见 visual_smoke.h。
+    if (visual_smoke::requested()) {
+        int rc_smoke = visual_smoke::run(g_app, hwnd);
+        launcher::d2d::decodeService().stop();
+        g_app.shutdown();          // 镜像正常收尾（main 末尾 g_app.shutdown()）
+        DestroyWindow(hwnd);
+        return rc_smoke;
+    }
+#endif
 
     // 启动后尝试 autologin — 有 saved session 且 saved creds 时直接走主页
     {
@@ -848,6 +918,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         }
     }
 
+    launcher::d2d::decodeService().stop();   // join worker 线程（须在 g_app.shutdown 前）
     g_app.shutdown();
     return 0;
 }

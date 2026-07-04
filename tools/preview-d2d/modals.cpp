@@ -30,6 +30,7 @@ namespace launcher::d2d::modal {
 ChangePwState     g_change_pw;
 ConfirmState      g_confirm;
 CS2State          g_cs2;
+MarketDetailState g_market_detail_modal;
 HistoryState      g_history;
 AddTagState       g_addtag;
 CreatePackState   g_createpack;
@@ -37,6 +38,7 @@ RenamePackState   g_renamepack;
 UserProfileState  g_user_profile;
 EditStatusTextState g_edit_status;
 EditBioState      g_edit_bio;
+EditNicknameState g_edit_nickname;
 WebViewModalState g_webview_modal;
 MsgContextMenuState g_msg_menu;
 UserContextMenuState g_user_menu;
@@ -259,6 +261,8 @@ void tickAll(float dt) {
     g_change_pw.t.tick(dt);
     g_confirm.t.tick(dt);
     g_cs2.t.tick(dt);
+    g_market_detail_modal.t.tick(dt);
+    g_market_detail_modal.review_input.float_t.tick(dt);
     g_history.t.tick(dt);
     g_addtag.t.tick(dt);
     g_addtag.input.float_t.tick(dt);
@@ -271,6 +275,8 @@ void tickAll(float dt) {
     g_edit_status.input.float_t.tick(dt);
     g_edit_bio.t.tick(dt);
     g_edit_bio.input.float_t.tick(dt);
+    g_edit_nickname.t.tick(dt);
+    g_edit_nickname.input.float_t.tick(dt);
     g_webview_modal.t.tick(dt);
     g_msg_menu.t.tick(dt);
     g_user_menu.t.tick(dt);
@@ -284,8 +290,10 @@ void tickAll(float dt) {
 
 bool anyOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
+        || g_market_detail_modal.open
         || g_addtag.open || g_createpack.open || g_renamepack.open
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
+        || g_edit_nickname.open
         || g_webview_modal.open || g_msg_menu.open || g_user_menu.open || g_mute_user.open
         || g_pack_preview_modal.open
         || g_search.open;
@@ -293,8 +301,10 @@ bool anyOpen() {
 
 bool hasBlockingModalOpen() {
     return g_change_pw.open || g_confirm.open || g_cs2.open || g_history.open
+        || g_market_detail_modal.open
         || g_addtag.open || g_createpack.open || g_renamepack.open
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
+        || g_edit_nickname.open
         || g_webview_modal.open || g_mute_user.open || g_pack_preview_modal.open
         || g_search.open;
 }
@@ -571,7 +581,7 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     } else {
         webview::show(false);
         auto cs2_path = cs2HeaderPath();
-        auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path);
+        auto* cover_bmp = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path, 720);
         if (cover_bmp) {
             prim::pushLayerRR(ctx, app.factory(), cx + 8, cover_y, cw - 16, cover_h, 8.0f);
             D2D1_SIZE_F sz = cover_bmp->GetSize();
@@ -619,6 +629,185 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
                    L"Launch CS2", t, [](){ launchCS2(); });
     drawGhostBtn(app, cx + 240, cy + ch - 56, 160, 40,
                  trW("launch.store_page"), t, [](){ openCS2Store(); });
+}
+
+// ============== MarketDetail ==============
+void openMarketDetail(const std::string& id) {
+    dismissAllModals();
+    g_market_detail_modal.open = true;
+    g_market_detail_modal.listing_id = id;
+    g_market_detail_modal.buying = false;
+    g_market_detail_modal.reviewing = false;
+    g_market_detail_modal.rating = 5;
+    g_market_detail_modal.review_input.text.clear();
+    g_market_detail_modal.review_input.cursor = 0;
+    g_market_detail_modal.review_input.clearSel();
+    g_market_detail_modal.error_msg.clear();
+    g_market_detail_modal.t.start(0, 1, 0.30f, 0, curve::easeOutQuint);
+    fetch::getListing(GetActiveWindow(), id);
+}
+static void closeMarketDetail() {
+    g_market_detail_modal.t.start(g_market_detail_modal.t.value(), 0, 0.20f, 0,
+                                  curve::easeOutQuint);
+    g_market_detail_modal.open = false;
+}
+
+void onMarketPurchaseResult(bool success) {
+    g_market_detail_modal.buying = false;
+    fetch::MarketActionResult res;
+    {
+        std::lock_guard<std::mutex> lk(fetch::g_market_action_mtx);
+        res = fetch::g_market_action;
+    }
+    if (success) {
+        toast::show(trW("market.purchase_ok"));
+    } else if (res.status == 402) {
+        toast::show(trW("market.insufficient_credit"));
+    } else {
+        toast::show(trW("market.purchase_failed"));
+    }
+}
+
+void onMarketReviewResult(bool success) {
+    g_market_detail_modal.reviewing = false;
+    if (success) {
+        g_market_detail_modal.review_input.text.clear();
+        g_market_detail_modal.review_input.cursor = 0;
+        g_market_detail_modal.review_input.clearSel();
+        toast::show(trW("market.review_ok"));
+    } else {
+        toast::show(trW("market.review_failed"));
+    }
+}
+
+void paintMarketDetailModal(D2DApp& app, float W, float H) {
+    if (!g_market_detail_modal.open && g_market_detail_modal.t.value() < 0.001f) return;
+    float t = g_market_detail_modal.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    float cw = 460, ch = 480;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+
+    // 关闭按钮
+    {
+        LayoutRect xb{ cx + cw - 40, cy + 14, 28, 28 };
+        bool xh = xb.contains(g_mouse);
+        if (xh) prim::fillRR(ctx, xb.x, xb.y, 28, 28, 6, br.solidA(pal.text, t * 0.10f));
+        icons::drawIcon(app, icons::Name::X, xb.x + 6, xb.y + 6, 16, fadeArgb(pal.text, t));
+        hit(xb, [](){ closeMarketDetail(); }, true);
+    }
+
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
+                                  DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
+
+    fetch::ListingDetail d;
+    {
+        std::lock_guard<std::mutex> lk(fetch::g_market_detail_mtx);
+        d = fetch::g_market_detail;
+    }
+    // 详情还在拉 / 拉的是别的 id → 显示 loading
+    bool matches = (d.id == g_market_detail_modal.listing_id);
+    if (!matches || !d.loaded) {
+        prim::drawText_(ctx, trW("common.loading"), sub,
+                        cx + 28, cy + 24, cw - 96, 22, br.solidA(pal.text_muted, t));
+        return;
+    }
+    if (!d.error.empty()) {
+        prim::drawText_(ctx, trW("market.load_failed"), h1,
+                        cx + 28, cy + 24, cw - 96, 24, br.solidA(pal.text, t));
+        prim::drawText_(ctx, utf8ToWModal(d.error), sub,
+                        cx + 28, cy + 56, cw - 56, 40, br.solidA(0xE34B4B, t));
+        return;
+    }
+
+    // 标题 + 分类 + 描述
+    prim::drawText_(ctx, d.title, h1,
+                    cx + 28, cy + 24, cw - 96, 26, br.solidA(pal.text, t));
+    prim::drawText_(ctx, d.category, sub,
+                    cx + 28, cy + 54, cw - 56, 18, br.solidA(pal.text_muted, t));
+    prim::drawText_(ctx, d.description, body_fmt,
+                    cx + 28, cy + 80, cw - 56, 90, br.solidA(pal.text, t));
+
+    // 价格 + 评分
+    std::wstring price_line = trW("market.price_cents");
+    if (auto p = price_line.find(L"{n}"); p != std::wstring::npos)
+        price_line.replace(p, 3, std::to_wstring((long long)d.price_cents));
+    prim::drawText_(ctx, price_line, h1,
+                    cx + 28, cy + 176, cw - 56, 24, br.solidA(pal.primary, t));
+    wchar_t rbuf[64];
+    swprintf_s(rbuf, L"%.1f  (%d)", d.rating_avg, d.rating_count);
+    prim::drawText_(ctx, rbuf, sub,
+                    cx + 28, cy + 204, cw - 56, 18, br.solidA(pal.text_muted, t));
+
+    bool signed_in = !g_session_token.empty();
+
+    // 1-5 星选择行
+    auto* star_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(18.0f),
+                                        DWRITE_FONT_WEIGHT_BOLD);
+    prim::drawText_(ctx, trW("market.your_rating"), sub,
+                    cx + 28, cy + 232, cw - 56, 18, br.solidA(pal.text_muted, t));
+    for (int i = 1; i <= 5; ++i) {
+        LayoutRect sr{ cx + 28 + (i - 1) * 32.0f, cy + 252, 28, 28 };
+        bool filled = i <= g_market_detail_modal.rating;
+        prim::drawText_(ctx, filled ? L"★" : L"☆", star_fmt,
+                        sr.x, sr.y, 28, 28,
+                        br.solidA(filled ? pal.primary : pal.text_muted, t),
+                        DWRITE_TEXT_ALIGNMENT_CENTER,
+                        DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (signed_in) hit(sr, [i](){ g_market_detail_modal.rating = i; }, true);
+    }
+
+    // 评价文字（可选）
+    drawField(app, g_market_detail_modal.review_input, cx + 28, cy + 290, cw - 56, 40,
+              trW("market.review_placeholder"), signed_in, t);
+    if (signed_in) hit(g_market_detail_modal.review_input.bounds, [](){}, true);
+
+    if (!g_market_detail_modal.error_msg.empty()) {
+        prim::drawText_(ctx, g_market_detail_modal.error_msg, sub,
+                        cx + 28, cy + 336, cw - 56, 18, br.solidA(0xE34B4B, t));
+    }
+
+    // 底部按钮：Buy + Submit review
+    float by = cy + ch - 56;
+    bool self_listing = (d.seller_id == utf8ToWModal(g_user_id));
+    bool can_buy = signed_in && !self_listing && d.status == L"active";
+    if (can_buy) {
+        std::wstring buy_label = g_market_detail_modal.buying
+            ? trW("market.buying") : trW("market.buy");
+        drawPrimaryBtn(app, cx + 28, by, 180, 40, buy_label, t,
+            [hwnd = GetActiveWindow()](){
+                if (g_market_detail_modal.buying) return;   // 非幂等：禁止重复点击
+                g_market_detail_modal.buying = true;
+                fetch::purchaseListing(hwnd, g_market_detail_modal.listing_id);
+            });
+    } else {
+        // 登出 / 自售 / 已下架：给出禁用态说明
+        std::wstring why = !signed_in ? trW("market.signin_to_buy")
+            : (self_listing ? trW("market.own_listing") : trW("market.not_active"));
+        prim::drawText_(ctx, why, sub, cx + 28, by + 12, 180, 18,
+                        br.solidA(pal.text_muted, t));
+    }
+    if (signed_in) {
+        std::wstring rev_label = g_market_detail_modal.reviewing
+            ? trW("market.submitting") : trW("market.submit_review");
+        drawGhostBtn(app, cx + cw - 28 - 180, by, 180, 40, rev_label, t,
+            [hwnd = GetActiveWindow()](){
+                if (g_market_detail_modal.reviewing) return;
+                g_market_detail_modal.reviewing = true;
+                fetch::reviewListing(hwnd, g_market_detail_modal.listing_id,
+                                     g_market_detail_modal.rating,
+                                     g_market_detail_modal.review_input.text);
+            });
+    }
 }
 
 // ============== History ==============
@@ -1022,7 +1211,7 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     prim::fillCircle(ctx, ax + ar, ay + ar, ar + 4, br.solidA(pal.card, t));
     bool drew_peer_avatar = false;
     if (!peer.avatar_path.empty()) {
-        if (auto* bmp = app.images().fromFile(peer.avatar_path)) {
+        if (auto* bmp = app.images().fromFile(peer.avatar_path, (uint32_t)(ar * 2.0f + 0.5f))) {
             drew_peer_avatar = drawCoverCircle(app, bmp, ax, ay, ar, t);
         }
     }
@@ -1287,6 +1476,78 @@ void paintEditBioModal(D2DApp& app, float W, float H) {
     drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
                    save.c_str(), t,
                    [hwnd = GetActiveWindow()](){ submitEditBio(hwnd); });
+}
+
+// ============== EditNickname modal ==============
+void openEditNickname() {
+    dismissAllModals();
+    g_edit_nickname.open = true;
+    g_edit_nickname.input.text = g_user.nickname;
+    g_edit_nickname.input.cursor = (int)g_user.nickname.size();
+    g_edit_nickname.input.clearSel();
+    g_edit_nickname.busy = false;
+    g_edit_nickname.t.start(0, 1, 0.22f, 0, curve::easeOutCubic);
+}
+static void closeEditNickname() {
+    g_edit_nickname.t.start(g_edit_nickname.t.value(), 0, 0.18f, 0, curve::easeOutCubic);
+    g_edit_nickname.open = false;
+}
+static void submitEditNickname(HWND hwnd) {
+    if (g_edit_nickname.busy) return;
+    std::wstring s = g_edit_nickname.input.text;
+    // 后端按 Unicode scalar 计数上限 24；客户端 UTF-16 保守裁到 24 wchar，
+    // astral 字符可能仍超标 → 后端权威，UI 处理 400。
+    if (s.size() > 24) s = s.substr(0, 24);
+    if (s.empty()) return;  // 后端拒绝空昵称，避免无意义请求
+    g_edit_nickname.busy = true;
+    g_user.nickname = s;    // 乐观更新，成功后由 myProfile 回收服务端 trim 结果
+    fetch::changeNickname(hwnd, net::jsonEscape(s));
+    closeEditNickname();
+}
+void onEditNicknameResult(unsigned int status) {
+    if (!g_edit_nickname.busy) return;
+    g_edit_nickname.busy = false;
+    if (status >= 200 && status < 300) {
+        // 204 成功：refetch 让 g_user.nickname 与服务端 trim 后的值一致。
+        fetch::myProfile(GetActiveWindow());
+        toast::show(trW("toast.saved"));
+    } else if (status == 429) {
+        // 冷却中：DB 未变，refetch 把乐观值回滚成真实昵称。
+        fetch::myProfile(GetActiveWindow());
+        toast::show(trW("toast.nickname_cooldown"));
+    } else {
+        // 400 长度非法 / 其他失败：回滚 + 提示。
+        fetch::myProfile(GetActiveWindow());
+        toast::show(trW("toast.save_fail_refetch"));
+    }
+}
+void paintEditNicknameModal(D2DApp& app, float W, float H) {
+    if (!g_edit_nickname.open && g_edit_nickname.t.value() < 0.001f) return;
+    float t = g_edit_nickname.t.value();
+    if (t < 0.001f) return;
+    paintDim(app, W, H, t);
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    float cw = 360, ch = 220;
+    float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
+    prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
+    prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
+    auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+    prim::drawText_(ctx, trW("profile.nickname"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
+    prim::drawText_(ctx, trW("nickname.edit_hint"), sub,
+                    cx + 30, cy + 50, cw - 60, 18, br.solidA(pal.text_muted, t));
+    drawField(app, g_edit_nickname.input, cx + 30, cy + 80, cw - 60, 40,
+              trW("profile.nickname"), true, t);
+    hit(g_edit_nickname.input.bounds, [](){}, true);
+    float by = cy + ch - 52;
+    std::wstring cancel = trW("common.cancel");
+    std::wstring save = g_edit_nickname.busy ? trW("status.saving") : trW("common.save");
+    drawGhostBtn(app, cx + 30, by, 120, 36, cancel.c_str(), t, [](){ closeEditNickname(); });
+    drawPrimaryBtn(app, cx + cw - 30 - 160, by, 160, 36,
+                   save.c_str(), t,
+                   [hwnd = GetActiveWindow()](){ submitEditNickname(hwnd); });
 }
 
 // ============== WebView modal ==============
@@ -1630,6 +1891,13 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
         toast::show(trW("toast.copied"));
         closeMsgMenu();
     }, false });
+    if (g_msg_menu.server_id > 0) {
+        items.push_back({ trW("msg.react"), [](){
+            // 复用 emoji picker：置 react target，选中的 glyph 走 reactToMessage 而非 composer。
+            chat::beginReactPick(g_msg_menu.slug, g_msg_menu.server_id);
+            closeMsgMenu();
+        }, false });
+    }
     if (is_media) {
         items.push_back({ trW("msg.add_emoji"), [](){
             // Copy current media to a temporary folder before importing it as emoji.
@@ -1968,7 +2236,7 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
                 int row = i / cols, col = i % cols;
                 float ex = gx + col * (cell + 6), ey = gy + row * (cell + 6);
                 prim::fillRR(ctx, ex, ey, cell, cell, 8.0f, br.solidA(pal.surface, t));
-                ID2D1Bitmap* bmp = app.images().fromFile(pv.sticker_paths[i]);
+                ID2D1Bitmap* bmp = app.images().fromFile(pv.sticker_paths[i], 72);
                 if (bmp) {
                     prim::pushLayerRR(ctx, app.factory(), ex, ey, cell, cell, 8.0f);
                     ctx->DrawBitmap(bmp,
@@ -2257,6 +2525,7 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
         else if (g_mute_user.open) closeMuteUser();
         else if (g_pack_preview_modal.open) closePackPreview();
         else if (g_edit_bio.open) closeEditBio();
+        else if (g_edit_nickname.open) closeEditNickname();
         else if (g_edit_status.open) closeEditStatusText();
         else if (g_user_profile.open) closeUserProfile();
         else if (g_renamepack.open) closeRenamePack();
@@ -2265,6 +2534,7 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
         else if (g_change_pw.open) closeChangePw();
         else if (g_confirm.open) closeConfirm();
         else if (g_cs2.open) closeCS2();
+        else if (g_market_detail_modal.open) closeMarketDetail();
         else if (g_history.open) closeHistory();
     }
     return true;
@@ -2301,7 +2571,13 @@ bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
         return true;
     }
     if (g_edit_bio.open) { g_edit_bio.input.onChar(c, ctrl, hwnd); return true; }
+    if (g_edit_nickname.open) { g_edit_nickname.input.onChar(c, ctrl, hwnd); return true; }
     if (g_edit_status.open) { g_edit_status.input.onChar(c, ctrl, hwnd); return true; }
+    if (g_market_detail_modal.open) {
+        if (!g_session_token.empty())
+            g_market_detail_modal.review_input.onChar(c, ctrl, hwnd);
+        return true;
+    }
     if (g_addtag.open) { g_addtag.input.onChar(c, ctrl, hwnd); return true; }
     if (g_createpack.open) { g_createpack.input.onChar(c, ctrl, hwnd); return true; }
     if (g_renamepack.open) { g_renamepack.input.onChar(c, ctrl, hwnd); return true; }
@@ -2323,6 +2599,7 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (g_pack_preview_modal.open) { closePackPreview(); return true; }
         if (g_webview_modal.open) { closeWebViewModal(); return true; }
         if (g_edit_bio.open) { closeEditBio(); return true; }
+        if (g_edit_nickname.open) { closeEditNickname(); return true; }
         if (g_edit_status.open) { closeEditStatusText(); return true; }
         if (g_user_profile.open) { closeUserProfile(); return true; }
         if (g_renamepack.open) { closeRenamePack(); return true; }
@@ -2331,6 +2608,7 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (g_change_pw.open) { closeChangePw(); return true; }
         if (g_confirm.open) { closeConfirm(); return true; }
         if (g_cs2.open) { closeCS2(); return true; }
+        if (g_market_detail_modal.open) { closeMarketDetail(); return true; }
         if (g_history.open) { closeHistory(); return true; }
     }
     if (g_search.open) {
@@ -2346,6 +2624,15 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (g_edit_bio.open) {
         if (vk == VK_RETURN && !ctrl) { submitEditBio(hwnd); return true; }
         g_edit_bio.input.onKey(vk, shift, ctrl);
+        return true;
+    }
+    if (g_edit_nickname.open) {
+        if (vk == VK_RETURN) { submitEditNickname(hwnd); return true; }
+        g_edit_nickname.input.onKey(vk, shift, ctrl);
+        return true;
+    }
+    if (g_market_detail_modal.open) {
+        if (!g_session_token.empty()) g_market_detail_modal.review_input.onKey(vk, shift, ctrl);
         return true;
     }
     if (g_mute_user.open) {
@@ -2395,6 +2682,7 @@ void dismissAllModals() {
     if (g_change_pw.open)          closeChangePw();
     if (g_confirm.open)            closeConfirm();
     if (g_cs2.open)                closeCS2();
+    if (g_market_detail_modal.open) closeMarketDetail();
     if (g_history.open)            closeHistory();
     if (g_addtag.open)             closeAddTag();
     if (g_createpack.open)         closeCreatePack();
@@ -2402,6 +2690,7 @@ void dismissAllModals() {
     if (g_user_profile.open)       closeUserProfile();
     if (g_edit_status.open)        closeEditStatusText();
     if (g_edit_bio.open)           closeEditBio();
+    if (g_edit_nickname.open)      closeEditNickname();
     if (g_webview_modal.open)      closeWebViewModal();
     if (g_mute_user.open)          closeMuteUser();
     if (g_pack_preview_modal.open) closePackPreview();

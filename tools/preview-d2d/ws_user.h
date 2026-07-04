@@ -21,4 +21,7 @@ void stop();
 // main thread 收到 WM_APP+10 后调，drain 所有待处理消息
 void drain();
 
+// Wave2: 下载池等待方用的通知窗口(未启动 WS 时为 nullptr)。
+HWND mediaNotifyHwnd();
+
 }  // namespace launcher::d2d::ws

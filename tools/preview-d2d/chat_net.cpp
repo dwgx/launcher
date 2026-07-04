@@ -444,6 +444,171 @@ void onWsMessageDeleted(int64_t server_id) {
     }
 }
 
+// ============== 已读回执 + emoji 反应 ==============
+namespace {
+// 每频道最后一次已经 POST 出去的 up_to_id — 单调递增去抖，避免 paint 每帧刷 POST。
+std::unordered_map<std::wstring, int64_t> g_last_sent_read;
+// 每频道 peer 已读位置：slug → (peer_key → last_read message id)。渲染自己消息下的"已读"标记用。
+std::unordered_map<std::wstring, std::unordered_map<std::wstring, int64_t>> g_peer_read;
+// react 失败回滚队列（后台线程写，WM_APP+65 主线程读）。
+struct ReactFail {
+    std::wstring slug;
+    int64_t      server_id = 0;
+    std::wstring emoji;
+    bool         was_remove = false;   // 失败前乐观执行的动作：true=当时在移除，回滚=重新加回
+};
+std::mutex g_react_fail_mtx;
+std::vector<ReactFail> g_react_fail;
+
+// 在指定消息上应用一次反应增量。add=true 表示"加上我的反应"，false 表示"去掉我的反应"。
+// touch_mine=true 时同步 mine 标记（本地乐观 / 自己的 WS 回显）；别人反应时 touch_mine=false。
+void applyReactionDelta(Msg& m, const std::wstring& emoji, bool add, bool touch_mine) {
+    for (auto it = m.reactions.begin(); it != m.reactions.end(); ++it) {
+        if (it->emoji == emoji) {
+            if (add) {
+                it->count += 1;
+                if (touch_mine) it->mine = true;
+            } else {
+                it->count -= 1;
+                if (touch_mine) it->mine = false;
+                if (it->count <= 0) m.reactions.erase(it);
+            }
+            return;
+        }
+    }
+    if (add) {
+        m.reactions.push_back(Reaction{ emoji, 1, touch_mine });
+    }
+}
+
+Msg* findMsgByServerId(std::vector<Msg>& msgs, int64_t server_id) {
+    for (auto& m : msgs) if (m.server_id == server_id) return &m;
+    return nullptr;
+}
+} // namespace
+
+// 标记已读 — fire-and-forget（clone statusSync）。解析 chat_id 同 fetchHistory。
+void markRead(HWND hwnd, const std::wstring& slug, int64_t up_to_id) {
+    if (up_to_id <= 0 || g_session_token.empty()) return;
+    // 单调去抖：只在 tail 前进时发。
+    auto& last = g_last_sent_read[slug];
+    if (up_to_id <= last) return;
+    std::string chat_id;
+    for (auto& c : g_channels) if (c.slug == slug) { chat_id = c.id; break; }
+    if (chat_id.empty()) return;
+    last = up_to_id;
+    struct A { std::string chat_id; int64_t up_to; };
+    auto* a = new A{ chat_id, up_to_id };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        char idbuf[32]; sprintf_s(idbuf, "%lld", (long long)a->up_to);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"chat_id\":\"" + a->chat_id
+                         + "\",\"up_to_message_id\":" + idbuf + "}";
+        net::postJson(L"/api/chat/read", body);   // 204 No Content；不关心回执
+        return 0;
+    }, a, 0, nullptr);
+    (void)hwnd;
+}
+
+// emoji 反应 — 本地乐观切换 + POST /api/chat/react（失败 WM_APP+65 回滚）。
+void reactToMessage(HWND hwnd, const std::wstring& slug, int64_t server_id,
+                    const std::wstring& emoji, bool remove) {
+    if (server_id <= 0 || g_session_token.empty() || emoji.empty()) return;
+    // 乐观切换本地聚合（add = !remove）。
+    {
+        auto& msgs = streamFor(slug);
+        if (Msg* m = findMsgByServerId(msgs, server_id)) {
+            applyReactionDelta(*m, emoji, !remove, /*touch_mine=*/true);
+        }
+    }
+    struct A { std::wstring slug; int64_t server_id; std::wstring emoji; bool remove; HWND h; };
+    auto* a = new A{ slug, server_id, emoji, remove, hwnd };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        char idbuf[32]; sprintf_s(idbuf, "%lld", (long long)a->server_id);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"message_id\":" + idbuf
+                         + ",\"emoji\":\"" + net::jsonEscape(a->emoji) + "\""
+                         + ",\"remove\":" + (a->remove ? "true" : "false") + "}";
+        auto r = net::postJson(L"/api/chat/react", body);   // 成功 204 No Content
+        if (!r.ok()) {
+            {
+                std::lock_guard<std::mutex> lk(g_react_fail_mtx);
+                g_react_fail.push_back(ReactFail{ a->slug, a->server_id, a->emoji, a->remove });
+            }
+            PostMessageW(a->h, WM_APP + 65, 0, 0);
+        }
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// WM_APP+65 — react 失败：把乐观动作反向撤销。
+void applyReactFailure() {
+    std::vector<ReactFail> arr;
+    {
+        std::lock_guard<std::mutex> lk(g_react_fail_mtx);
+        arr.swap(g_react_fail);
+    }
+    for (auto& f : arr) {
+        auto& msgs = streamFor(f.slug);
+        if (Msg* m = findMsgByServerId(msgs, f.server_id)) {
+            // 乐观时 add = !was_remove；回滚 = 相反动作。
+            applyReactionDelta(*m, f.emoji, /*add=*/f.was_remove, /*touch_mine=*/true);
+        }
+    }
+}
+
+// WS "reaction" 事件。自己的动作已在 reactToMessage 乐观处理，跳过回显避免重复计数。
+void onWsReaction(int64_t message_id, const std::wstring& actor_id,
+                  const std::wstring& emoji, bool remove) {
+    if (message_id <= 0 || emoji.empty()) return;
+    if (!g_user_id.empty() && actor_id == utf8wHist(g_user_id)) return;
+    std::lock_guard<std::mutex> lk(g_streams_mtx);
+    for (auto& [slug, msgs] : g_streams) {
+        if (Msg* m = findMsgByServerId(msgs, message_id)) {
+            applyReactionDelta(*m, emoji, /*add=*/!remove, /*touch_mine=*/false);
+            return;
+        }
+    }
+}
+
+// WS "read" 事件 — 记录 peer 已读位置（自己的回执忽略）。
+void onWsRead(const std::wstring& chat_id, const std::wstring& actor_id, int64_t up_to_message_id) {
+    if (up_to_message_id <= 0 || actor_id.empty()) return;
+    if (!g_user_id.empty() && actor_id == utf8wHist(g_user_id)) return;
+    std::wstring slug;
+    std::string chat_id_a;
+    chat_id_a.reserve(chat_id.size());
+    for (wchar_t c : chat_id) chat_id_a.push_back((char)c);
+    for (auto& c : g_channels) if (c.id == chat_id_a) { slug = c.slug; break; }
+    if (slug.empty()) return;
+    auto& peers = g_peer_read[slug];
+    int64_t& cur = peers[actor_id];
+    if (up_to_message_id > cur) cur = up_to_message_id;   // 单调
+}
+
+// 某条自己的消息是否已被任一 peer 读过（server_id <= peer last_read）。
+bool messageReadByPeer(const std::wstring& slug, int64_t server_id) {
+    if (server_id <= 0) return false;
+    auto it = g_peer_read.find(slug);
+    if (it == g_peer_read.end()) return false;
+    for (auto& [peer, last_read] : it->second) {
+        if (last_read >= server_id) return true;
+    }
+    return false;
+}
+
+// 右键菜单 "React" → 进入选 emoji 模式并打开 picker。
+void beginReactPick(const std::wstring& slug, int64_t server_id) {
+    if (server_id <= 0) return;
+    g_react_target.slug = slug;
+    g_react_target.server_id = server_id;
+    g_react_target.active = true;
+    if (!g_picker_open) setPickerOpen(true);
+}
+
+
 // 兼容老调用名
 bool sendTextMessage(HWND hwnd, const std::wstring& text) {
     if (!requireActiveChannelWrite()) return false;

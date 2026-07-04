@@ -27,6 +27,15 @@ void remoteAvatar(HWND notify);
 // POST /api/profile/status → 后端写 + WS broadcast
 void statusSync(const wchar_t* status_key);
 
+// POST /api/community/checkin — 每日签到；body 只带 session_token（无用户文本）。
+// 结果写 g_checkin + WM_APP+60 (wp = r.ok(), lp = r.status)。granted=当天首次点亮。
+struct CheckinResult { int level = 1; int64_t xp = 0; bool granted = false; bool ok = false; };
+extern CheckinResult g_checkin;
+extern std::mutex g_checkin_mtx;
+// 仅 UI 线程读写（hit 回调置 true，WM_APP+60 清 false）→ 无需原子；防止重复点触。
+extern bool g_checkin_inflight;
+void checkin(HWND notify);
+
 // POST /api/auth/logout (best-effort 异步，不等结果)
 void logout(const std::string& token);
 
@@ -44,6 +53,9 @@ struct MediaUploadResult {
     std::string mime;
     std::string url;              // /api/media/<sha>/file.<ext>
     std::wstring local_path;      // source file path used for upload
+    std::string blurhash;         // Wave3: BlurHash placeholder (may be empty)
+    int width = 0;                // Wave3: intrinsic pixel width (0 if unknown)
+    int height = 0;               // Wave3: intrinsic pixel height (0 if unknown)
     std::string error;
 };
 
@@ -91,12 +103,56 @@ extern std::mutex g_market_mtx;
 // GET /api/market/listings → 写 g_market_listings + WM_APP+33
 void marketListings(HWND notify);
 
+// 商品详情 — GET /api/market/listings/:id 拿回后填这个，供 detail modal 渲染。
+// price_cents 是 i64，必须用 int64 存（大额价格 int 会溢出）。
+struct ListingDetail {
+    std::string  id;
+    std::wstring title;
+    std::wstring description;
+    std::wstring category;
+    std::wstring item_type;
+    std::wstring seller_id;
+    std::wstring status;
+    int64_t      price_cents = 0;
+    int          purchase_count = 0;
+    int          rating_count = 0;
+    float        rating_avg = 0.0f;
+    bool         loaded = false;
+    std::string  error;              // 非空 = 拉取失败（HTTP body 前 120 字）
+};
+extern ListingDetail g_market_detail;
+extern std::mutex g_market_detail_mtx;
+
+// purchase / review 的结果暂存，供 UI 线程做 toast（区分 402 余额不足 vs 400/404）。
+struct MarketActionResult {
+    DWORD       status = 0;
+    std::string msg;                 // 失败时 HTTP body 前 120 字
+};
+extern MarketActionResult g_market_action;
+extern std::mutex g_market_action_mtx;
+
+// GET /api/market/listings/:id → 写 g_market_detail + WM_APP+62 (wp = success)
+void getListing(HWND notify, const std::string& id);
+
+// POST /api/market/purchase → WM_APP+63 (wp = success)。非幂等，UI 需在点击后禁用按钮。
+void purchaseListing(HWND notify, const std::string& listing_id);
+
+// POST /api/market/review → WM_APP+64 (wp = success)。204 空 body，只看 r.ok()。
+// order_id 省略 → 后端自动选评价者最近一笔 delivered 订单。body 是自由文本，会 jsonEscape。
+void reviewListing(HWND notify, const std::string& listing_id, int rating,
+                   const std::wstring& body_text);
+
 enum class ProfileUpdateKind { Unknown = 0, StatusText = 1, Bio = 2, Nickname = 3 };
 
 // POST /api/profile/update — 更新 nickname / status_text / bio 任一字段
 // fields = JSON object 片段，e.g. "\"bio\":\"...\""
 void profileUpdate(HWND notify, const std::string& fields);
 void profileUpdate(HWND notify, ProfileUpdateKind kind, const std::string& fields);
+
+// POST /api/profile/nickname — 单独的改昵称端点（有冷却限流）。
+// new_nickname_escaped 必须已经过 net::jsonEscape。完成后 PostMessage WM_APP+61，
+// wParam = HTTP 状态码（204 成功 / 429 冷却中 / 400 长度非法 / 其他失败）。
+void changeNickname(HWND notify, const std::string& new_nickname_escaped);
 
 // GET ip-api.com/json/ — 异步查 IP 地理位置 → 写 g_geo_country (WM_APP+38)
 void geoIP(HWND notify);

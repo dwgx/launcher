@@ -111,6 +111,15 @@ extern ScrollBarDrag g_scroll_drag;
 enum class MsgKind { Text, System, DayDivider, Image, Sticker, Gif, Video };
 enum class MsgSendState { Sent, Pending, Failed };
 
+// 一条消息上的某个 emoji 聚合（count = 该 emoji 的总反应数，mine = 当前用户是否也点了）。
+// 只由 WS "reaction" 事件 + 本地乐观切换维护 —— 后端 history/MessageOut 不带 reactions，
+// 冷加载看不到旧消息的反应（见 feature 设计 risks）。
+struct Reaction {
+    std::wstring emoji;
+    int          count = 0;
+    bool         mine  = false;
+};
+
 struct Msg {
     MsgKind kind = MsgKind::Text;
     std::wstring from;        // "me" 表示自己
@@ -120,6 +129,9 @@ struct Msg {
     std::wstring status;
     std::wstring body;
     std::wstring time;
+    // BLURHASH SEAM (Wave3)：backend 下发的 blurhash 占位串。现阶段仅布线，
+    // chat_net 解析处留空；paint 把它透传给 ImageCache::fromFile 供未来占位解码。
+    std::string  blurhash;
     MsgSendState send_state = MsgSendState::Sent;
     std::wstring error_text;
     std::string  client_msg_id;
@@ -129,6 +141,7 @@ struct Msg {
     std::wstring reply_author;
     std::wstring reply_preview;
     bool         waiting_reply_target = false;
+    std::vector<Reaction> reactions;   // emoji 反应聚合（WS 事件驱动，见 Reaction 注释）
 };
 
 std::vector<Msg>& streamFor(const std::wstring& slug);
@@ -204,5 +217,37 @@ void deleteMessage(HWND hwnd, const std::wstring& slug, int64_t server_id);
 
 // WS 收到 type=delete 事件 — 在所有 stream 里找匹配 server_id 摘掉
 void onWsMessageDeleted(int64_t server_id);
+
+// ============== 已读回执 + emoji 反应 ==============
+// 标记已读：解析 slug→chat_id，POST /api/chat/read（fire-and-forget，后端 GREATEST 容重复）。
+// up_to_id 必须是后端 message id（server_id>0），pending 消息无 id 不发。
+void markRead(HWND hwnd, const std::wstring& slug, int64_t up_to_id);
+
+// 对某条消息加/去 emoji 反应：本地乐观切换 + POST /api/chat/react（失败回 WM_APP+60 回滚）。
+void reactToMessage(HWND hwnd, const std::wstring& slug, int64_t server_id,
+                    const std::wstring& emoji, bool remove);
+
+// WM_APP+60 主线程回调 — react 失败时按 (slug, server_id, emoji, was_remove) 回滚本地聚合。
+void applyReactFailure();
+
+// picker 复用 —— 右键菜单点 "React" 时置位，picker cell 命中读它决定是"插入 composer"还是"发反应"。
+struct ReactTarget {
+    std::wstring slug;
+    int64_t      server_id = 0;
+    bool         active    = false;
+};
+extern ReactTarget g_react_target;
+
+// 从消息右键菜单进入"选 emoji 反应"模式：置位 g_react_target 并打开 picker。
+// picker cell 命中时读 g_react_target.active 决定是发反应还是插入 composer。
+void beginReactPick(const std::wstring& slug, int64_t server_id);
+
+// WS "reaction" 事件 — 在所有 stream 里按 server_id 定位消息，增减该 emoji 计数。
+void onWsReaction(int64_t message_id, const std::wstring& actor_id,
+                  const std::wstring& emoji, bool remove);
+// WS "read" 事件 — 记录某频道内某 peer 的 last_read message id（渲染 "已读" 标记用）。
+void onWsRead(const std::wstring& chat_id, const std::wstring& actor_id, int64_t up_to_message_id);
+// 查询：自己在 slug 频道的某条消息 server_id 是否已被任一 peer 读过。
+bool messageReadByPeer(const std::wstring& slug, int64_t server_id);
 
 }  // namespace launcher::d2d::chat

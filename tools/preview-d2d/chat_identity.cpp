@@ -11,6 +11,8 @@
 #include "user_state.h"
 #include "net.h"
 #include "fetch.h"
+#include "download_pool.h"
+#include "ws_user.h"
 
 #include <limits>
 #include <mutex>
@@ -29,9 +31,17 @@ std::wstring utf8wHist(const std::string& s) {
 
 std::wstring mediaLocalPathFromUrl(const std::string& media_url) {
     if (media_url.empty()) return {};
-    auto dl = launcher::d2d::fetch::downloadMediaToCache(media_url, L"chat");
-    if (dl.ok) return dl.path;
-    return utf8wHist(media_url);
+    // Wave2: 不在 parse 线程同步下载。算出本地缓存路径立即返回；
+    // 若文件已在磁盘(热路径)直接用,否则入队后台下载池(去重合并),
+    // 下载完成 PostMessage 触发重绘,Wave1 的解码占位符会在期间顶着。
+    std::wstring path = launcher::d2d::fetch::mediaCachePathForUrl(media_url, L"chat");
+    if (path.empty()) return utf8wHist(media_url);
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::wstring wurl(media_url.begin(), media_url.end());
+        launcher::d2d::DownloadPool::instance().enqueue(
+            wurl, path, launcher::d2d::ws::mediaNotifyHwnd(), WM_APP + 10);
+    }
+    return path;
 }
 
 std::wstring bodyFromPayloadObject(const std::string& payload_obj) {
