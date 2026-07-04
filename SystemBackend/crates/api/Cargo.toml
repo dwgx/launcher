@@ -41,3 +41,5 @@ axum-server = { workspace = true }
 rustls      = { workspace = true }
 once_cell   = { workspace = true }
 bytes       = { workspace = true }
+image       = { workspace = true }
+blurhash    = { workspace = true }

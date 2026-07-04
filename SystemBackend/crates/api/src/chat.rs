@@ -1023,14 +1023,40 @@ pub async fn list_chats(
                 .unwrap_or(0)
             };
         let kind: String = r.try_get("kind").map_err(internal)?;
-        let title: Option<String> = r.try_get("title").map_err(internal)?;
+        let mut title: Option<String> = r.try_get("title").map_err(internal)?;
+        // DM 没有存 title：解析对端成员的 nickname/username 作为展示名 + 头像，
+        // 否则客户端无法给 DM 行打标签（batch2 接线阻塞项）。
+        let mut avatar_url: Option<String> = None;
+        if kind == "dm" {
+            if let Ok(Some(peer)) = sqlx::query!(
+                r#"SELECT u.id, u.nickname, u.username, u.avatar_path,
+                          COALESCE(m.version, 0) as "avatar_version!"
+                   FROM chat_members cmx
+                   JOIN users u ON u.id = cmx.user_id
+                   LEFT JOIN user_avatar_meta m ON m.user_id = u.id
+                   WHERE cmx.chat_id = $1 AND cmx.user_id <> $2
+                   LIMIT 1"#,
+                chat_id, me
+            )
+            .fetch_optional(&s.db)
+            .await
+            {
+                title = peer
+                    .nickname
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| peer.username.filter(|u| !u.is_empty()));
+                avatar_url = peer
+                    .avatar_path
+                    .map(|_| format!("/api/avatar/{}?v={}", peer.id, peer.avatar_version));
+            }
+        }
         let last_visible_message_at: Option<DateTime<Utc>> =
             r.try_get("last_visible_message_at").map_err(internal)?;
         out.push(ChatListItem {
             id: chat_id.to_string(),
             kind,
             title,
-            avatar_url: None,
+            avatar_url,
             last_message: last_out,
             last_message_at: last_visible_message_at.map(|t| t.timestamp()),
             unread_count: unread,

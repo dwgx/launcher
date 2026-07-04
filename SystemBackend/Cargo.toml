@@ -50,6 +50,8 @@ askama      = { version = "0.12", features = ["with-axum"] }
 askama_axum = "0.4"
 hex         = "0.4"
 base64      = "0.22"
+image       = "0.25.5"
+blurhash    = "0.2.3"
 
 [profile.release]
 lto = true

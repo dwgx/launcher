@@ -19,6 +19,7 @@ mod heartbeat;
 mod market;
 mod media;
 mod media_policy;
+mod media_thumb;
 mod profile;
 mod rebind;
 mod state;

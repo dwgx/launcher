@@ -73,14 +73,17 @@ pub async fn get_profile(
 ) -> Result<Json<ProfileResp>, (StatusCode, String)> {
     let uid = auth_user(&s, &q.session_token).await?;
     let row = sqlx::query!(
-        r#"SELECT uid, username, nickname, avatar_path,
-                  subscription_tier, subscription_expires_at,
-                  nickname_changed_at, password_changed_at,
-                  status,
-                  COALESCE(status_text, '') as "status_text!",
-                  COALESCE(bio, '') as "bio!",
-                  role, role_label, is_admin
-           FROM users WHERE id = $1"#,
+        r#"SELECT u.uid, u.username, u.nickname, u.avatar_path,
+                  u.subscription_tier, u.subscription_expires_at,
+                  u.nickname_changed_at, u.password_changed_at,
+                  u.status,
+                  COALESCE(u.status_text, '') as "status_text!",
+                  COALESCE(u.bio, '') as "bio!",
+                  u.role, u.role_label, u.is_admin,
+                  COALESCE(m.version, 0) as "avatar_version!"
+           FROM users u
+           LEFT JOIN user_avatar_meta m ON m.user_id = u.id
+           WHERE u.id = $1"#,
         uid
     )
     .fetch_one(&s.db)
@@ -94,7 +97,9 @@ pub async fn get_profile(
         uid: row.uid.unwrap_or_default(),
         username: row.username.unwrap_or_default(),
         nickname: row.nickname,
-        avatar_url: row.avatar_path.map(|_| format!("/api/avatar/{}", uid)),
+        avatar_url: row
+            .avatar_path
+            .map(|_| format!("/api/avatar/{}?v={}", uid, row.avatar_version)),
         tier: row.subscription_tier,
         tier_expires_at: row.subscription_expires_at.map(|t| t.timestamp()),
         nickname_changed_at: row.nickname_changed_at.map(|t| t.timestamp()),
@@ -257,11 +262,22 @@ pub async fn upload_avatar(
     }
     let detected = media_policy::validate_avatar(&bytes)?;
 
-    let dir = std::path::Path::new(&s.cfg.avatar_root);
-    std::fs::create_dir_all(dir).map_err(internal)?;
+    let dir = std::path::PathBuf::from(&s.cfg.avatar_root);
+    tokio::fs::create_dir_all(&dir).await.map_err(internal)?;
     let path = dir.join(format!("{}.{}", uid, detected.ext));
-    std::fs::write(&path, &bytes).map_err(internal)?;
+    tokio::fs::write(&path, &bytes).await.map_err(internal)?;
     let path_str = path.to_string_lossy().to_string();
+
+    // 生成头像缩略图（64/128）。GIF 头像不缩放（保留动图），失败不阻断上传。
+    if detected.mime != "image/gif" {
+        let _ = crate::media_thumb::generate(
+            bytes.clone(),
+            dir.clone(),
+            uid.to_string(),
+            crate::media_thumb::AVATAR_SLOTS,
+        )
+        .await;
+    }
 
     sqlx::query!(
         r#"UPDATE users
@@ -275,55 +291,134 @@ pub async fn upload_avatar(
     .await
     .map_err(internal)?;
 
-    sqlx::query!(
+    // 记录/自增版本，返回带 ?v= 的 URL，让客户端缓存失效精确到每次换头像。
+    let version = sqlx::query_scalar!(
         r#"INSERT INTO user_avatar_meta (user_id, version, bytes, updated_at)
               VALUES ($1, 1, $2, now())
               ON CONFLICT (user_id) DO UPDATE
               SET version = user_avatar_meta.version + 1,
-                  bytes = $2, updated_at = now()"#,
+                  bytes = $2, updated_at = now()
+              RETURNING version"#,
         uid,
         bytes.len() as i32
     )
-    .execute(&s.db)
+    .fetch_optional(&s.db)
     .await
-    .ok();
+    .ok()
+    .flatten()
+    .unwrap_or(1);
 
     Ok(Json(serde_json::json!({
-        "avatar_url": format!("/api/avatar/{}", uid),
+        "avatar_url": format!("/api/avatar/{}?v={}", uid, version),
         "size": bytes.len(),
     })))
 }
 
 // =====================================================================
-// GET /api/avatar/:id  (公开返回原图)
+// GET /api/avatar/:id  (公开返回原图 / ?s= 变体)
 // =====================================================================
+#[derive(Deserialize)]
+pub struct AvatarQuery {
+    /// 版本号（换头像自增），仅用于缓存失效；服务端不校验值。
+    pub v: Option<i32>,
+    /// 变体档位（64/128）；命中则返回缩略图，缺失回退原图。
+    pub s: Option<u32>,
+}
+
 pub async fn get_avatar(
     State(s): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Query(q): Query<AvatarQuery>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     use axum::http::header;
-    let row = match sqlx::query!("SELECT avatar_path, avatar_mime FROM users WHERE id=$1", id)
-        .fetch_optional(&s.db)
-        .await
+    let row = match sqlx::query!(
+        r#"SELECT u.avatar_path, u.avatar_mime,
+                  COALESCE(m.version, 0) AS "version!"
+           FROM users u
+           LEFT JOIN user_avatar_meta m ON m.user_id = u.id
+           WHERE u.id = $1"#,
+        id
+    )
+    .fetch_optional(&s.db)
+    .await
     {
         Ok(Some(r)) => r,
         _ => return (StatusCode::NOT_FOUND, "no avatar").into_response(),
     };
-    let path = match row.avatar_path {
+    let orig_path = match row.avatar_path {
         Some(p) => p,
         None => return (StatusCode::NOT_FOUND, "no avatar").into_response(),
     };
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::NOT_FOUND, "missing file").into_response(),
-    };
-    let mime = row
+
+    // ETag = uid + 版本 (+ 变体档)。换头像 version 自增 ⇒ ETag 变化 ⇒ 客户端重取。
+    let version = row.version;
+    let mut path = std::path::PathBuf::from(&orig_path);
+    let mut mime = row
         .avatar_mime
+        .clone()
         .unwrap_or_else(|| "application/octet-stream".into());
+    let mut etag_core = format!("{}v{}", id, version);
+
+    if let Some(req_slot) = q.s {
+        if let Some(slot) = crate::media_thumb::resolve_slot(req_slot) {
+            let dir = std::path::PathBuf::from(&s.cfg.avatar_root);
+            for ext in ["jpg", "png"] {
+                let cand = dir.join(crate::media_thumb::variant_filename(
+                    &id.to_string(),
+                    slot,
+                    ext,
+                ));
+                if tokio::fs::try_exists(&cand).await.unwrap_or(false) {
+                    path = cand;
+                    mime = if ext == "png" {
+                        "image/png".into()
+                    } else {
+                        "image/jpeg".into()
+                    };
+                    etag_core = format!("{}v{}_s{}", id, version, slot);
+                    break;
+                }
+            }
+        }
+    }
+    let _ = q.v; // v 只影响 URL 缓存键，逻辑上无需读取。
+
+    let etag = format!("\"{}\"", etag_core);
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if inm.contains(&etag) || inm.trim() == "*" {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, etag.clone()),
+                    (
+                        header::CACHE_CONTROL,
+                        "public, max-age=31536000, immutable".into(),
+                    ),
+                ],
+            )
+                .into_response();
+        }
+    }
+
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!(uid = %id, path = %path.display(), "avatar file missing on disk");
+            return (StatusCode::NOT_FOUND, "missing file").into_response();
+        }
+    };
     (
         [
             (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, "public, max-age=300".into()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".into(),
+            ),
+            (header::ETAG, etag),
         ],
         bytes,
     )
@@ -568,6 +663,8 @@ pub async fn update_profile(
 pub struct PeerProfileResp {
     pub uid: String,
     pub username: String,
+    /// 真实 users.id（UUID）——客户端开 DM 需要严格 UUID（chat::open_dm）。
+    pub user_id: String,
     pub nickname: Option<String>,
     pub avatar_url: Option<String>,
     pub status: String,
@@ -585,12 +682,14 @@ pub async fn get_peer_profile(
 ) -> Result<Json<PeerProfileResp>, (StatusCode, String)> {
     let _ = auth_user(&s, &q.session_token).await?;
     let row = sqlx::query!(
-        r#"SELECT id, uid, username, nickname, avatar_path, status,
-                  COALESCE(status_text, '') as "status_text!",
-                  COALESCE(bio, '') as "bio!",
-                  role, role_label
-           FROM users
-           WHERE uid = $1 OR username = $1 OR id::text = $1"#,
+        r#"SELECT u.id, u.uid, u.username, u.nickname, u.avatar_path, u.status,
+                  COALESCE(u.status_text, '') as "status_text!",
+                  COALESCE(u.bio, '') as "bio!",
+                  u.role, u.role_label,
+                  COALESCE(m.version, 0) as "avatar_version!"
+           FROM users u
+           LEFT JOIN user_avatar_meta m ON m.user_id = u.id
+           WHERE u.uid = $1 OR u.username = $1 OR u.id::text = $1"#,
         key
     )
     .fetch_optional(&s.db)
@@ -607,8 +706,11 @@ pub async fn get_peer_profile(
     Ok(Json(PeerProfileResp {
         uid: row.uid.unwrap_or_default(),
         username: row.username.unwrap_or_default(),
+        user_id: row.id.to_string(),
         nickname: row.nickname,
-        avatar_url: row.avatar_path.map(|_| format!("/api/avatar/{}", row.id)),
+        avatar_url: row
+            .avatar_path
+            .map(|_| format!("/api/avatar/{}?v={}", row.id, row.avatar_version)),
         status: if row.status.is_empty() {
             "offline".into()
         } else {
