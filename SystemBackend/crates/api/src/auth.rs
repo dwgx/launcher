@@ -55,7 +55,7 @@ pub async fn register(
     if req.password.len() < 8 {
         return Err((StatusCode::BAD_REQUEST, "password ≥ 8 chars".into()));
     }
-    if req.hwid_hex.len() != 64 {
+    if req.hwid_hex.len() != 64 || !req.hwid_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err((
             StatusCode::BAD_REQUEST,
             "hwid_hex must be 64 hex chars".into(),
@@ -273,7 +273,7 @@ pub async fn login(
 
     // Brute-force lockout: 5 failures within 15 min triggers 15 min cooldown
     {
-        let mut map = s.login_attempts.lock().unwrap();
+        let mut map = s.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
         // M-3: Evict stale entries to prevent unbounded memory growth
         if map.len() > 10_000 {
             map.retain(|_, v| v.first_at.elapsed() < time::Duration::from_secs(1800));
@@ -313,9 +313,9 @@ pub async fn login(
     let row = match row_opt {
         Some(r) => r,
         None => {
-            // M-2: Run dummy argon2 verify to prevent timing oracle (user enumeration)
-            const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-            let _ = hashing::verify_password("x", DUMMY_HASH);
+            // M-2: 用启动时按配置 argon2 参数预算的 dummy hash 跑一次 verify，
+            // 使未知用户与已知用户耗时一致，消除用户枚举时序旁路。见 AppState::new。
+            let _ = hashing::verify_password("x", &s.dummy_password_hash);
             // 注意：login_history.user_id 是 UUID NOT NULL（见 migrations/0003_user_profile.sql），
             // 未知用户没有对应 user_id，无法插入 login_history，因此这里不记录失败行，仅计数限流。
             return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));

@@ -58,7 +58,7 @@ fn admin_login_key(username: &str) -> String {
 }
 
 fn check_admin_login_limit(state: &AppState, key: &str) -> Result<(), time::Duration> {
-    let mut map = state.login_attempts.lock().unwrap();
+    let mut map = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
     let entry = map
         .entry(key.to_string())
         .or_insert_with(|| crate::state::LoginAttemptEntry {
@@ -104,7 +104,7 @@ fn admin_cookie_sig(
     user_id: &str,
     role: &str,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(state.cfg.admin_password.as_bytes())
+    let mut mac = HmacSha256::new_from_slice(state.admin_cookie_secret.as_slice())
         .expect("HMAC accepts any key length");
     mac.update(b"launcher.admin.session.v1:");
     mac.update(issued_at.to_string().as_bytes());
@@ -128,7 +128,7 @@ fn verify_admin_cookie_sig(
     let Ok(sig) = hex::decode(sig_hex) else {
         return false;
     };
-    let mut mac = HmacSha256::new_from_slice(state.cfg.admin_password.as_bytes())
+    let mut mac = HmacSha256::new_from_slice(state.admin_cookie_secret.as_slice())
         .expect("HMAC accepts any key length");
     mac.update(b"launcher.admin.session.v1:");
     mac.update(issued_at.to_string().as_bytes());

@@ -236,7 +236,7 @@ async fn list_json(
     let rows = sqlx::query!(
         "SELECT code, note, max_uses, use_count, expires_at, revoked_at, created_at FROM invite_codes")
         .fetch_all(&s.db).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(crate::error::internal)?;
     Ok(axum::Json(serde_json::json!(rows
         .iter()
         .map(|r| serde_json::json!({

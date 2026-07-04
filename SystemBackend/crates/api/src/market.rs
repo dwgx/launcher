@@ -154,7 +154,7 @@ pub async fn get_listing(
            FROM market_listings l
              JOIN market_categories c ON c.id = l.category_id
              LEFT JOIN media_files m  ON m.id = l.cover_media_id
-           WHERE l.id = $1"#, id)
+           WHERE l.id = $1 AND l.status = 'active'"#, id)
         .fetch_optional(&s.db).await.map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "not found".into()))?;
 

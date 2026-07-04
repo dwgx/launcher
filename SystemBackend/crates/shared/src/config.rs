@@ -50,6 +50,11 @@ pub struct AppConfig {
     /// 每用户表情包上限（默认 50；admin 改 config 可放宽）
     #[serde(default = "default_sticker_per_user")]
     pub sticker_per_user_limit: i64,
+
+    /// Admin 会话 cookie 的 HMAC 签名密钥（hex，建议 ≥32 字节随机）。
+    /// 留空则每次启动随机生成——重启会使已签发的 admin cookie 全部失效。
+    #[serde(default)]
+    pub admin_cookie_secret: Option<String>,
 }
 
 fn default_argon_mem() -> u32 {

@@ -345,9 +345,16 @@ pub async fn delete_sticker(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct GetPackQ {
+    // 公开 pack 无需 token；私有 pack 需 owner 的 session_token 才能查看详情
+    pub session_token: Option<String>,
+}
+
 pub async fn get_pack(
     State(s): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    Query(q): Query<GetPackQ>,
 ) -> Result<Json<PackOut>, (StatusCode, String)> {
     let pack = sqlx::query!(
         r#"SELECT p.id, p.name, p.short_name, p.description, p.creator_id,
@@ -364,6 +371,17 @@ pub async fn get_pack(
     .await
     .map_err(internal)?
     .ok_or((StatusCode::NOT_FOUND, "pack not found".into()))?;
+
+    // 非公开 pack 仅创建者本人可查看（防 IDOR：按 id 枚举他人私有 pack）
+    if !pack.is_public {
+        let me = match q.session_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => auth_user(&s, t).await?,
+            None => return Err((StatusCode::NOT_FOUND, "pack not found".into())),
+        };
+        if pack.creator_id != Some(me) {
+            return Err((StatusCode::NOT_FOUND, "pack not found".into()));
+        }
+    }
 
     let stickers = sqlx::query!(
         r#"SELECT s.id, s.media_id, s.emoji_alias, s.label, s.is_animated,
@@ -445,7 +463,9 @@ pub async fn get_pack_by_short(
     .await
     .map_err(internal)?
     .ok_or((StatusCode::NOT_FOUND, "pack not found or not public".into()))?;
-    get_pack(State(s), Path(id)).await
+    // 通过 short_name 拿到的一定是 is_public=TRUE 的 pack，无需 token
+    get_pack(State(s), Path(id), Query(GetPackQ { session_token: None })).await
+
 }
 
 // ---------- 公开 pack 列表（按安装量降序） ----------

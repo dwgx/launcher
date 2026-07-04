@@ -54,6 +54,25 @@ fn guard_role_assignment(
     Ok(())
 }
 
+/// B3: is_admin 是与 role 平行的「客户端管理员」信号——community/chat 判定管理员用
+/// `is_admin OR role IN ('admin','owner','super_admin')`，且客户端 super_admin =
+/// `is_admin AND (role IN owner/super_admin OR username='admin')`。B1 只看被写入的
+/// role，不看目标已有的 role；若不一并收紧，非 owner 可绕过 B1 直接 PATCH
+/// `is_admin=true`，配合目标已有的高权 role 提成客户端 super_admin。故：非 owner
+/// 不得把 is_admin 显式置 true（经 role 派生的 is_admin 仍受 B1 约束）。
+fn guard_admin_flag(
+    actor: &AdminActor,
+    is_admin: Option<bool>,
+) -> Result<(), (StatusCode, String)> {
+    if is_admin == Some(true) && !is_owner(actor) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "只有 owner 可以把用户设为管理员(is_admin)".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// B2: 拦截「非 owner 重置一个绑定了高权 admin_operator(owner/admin) 的用户密码」，
 /// 否则可通过重置该用户密码再登录 /admin 冒充 owner/admin。
 async fn guard_target_not_privileged_operator(
@@ -173,6 +192,10 @@ pub async fn patch_user(
     }
     // B1: 非 owner 不能把用户提成 owner/super_admin
     guard_role_assignment(&actor, req.role.as_deref())?;
+    // B3: 非 owner 不能显式把 is_admin 置 true（否则可绕过 B1 提成客户端 super_admin）
+    guard_admin_flag(&actor, req.is_admin)?;
+    // B2: 非 owner 不能改写绑定了 owner/admin operator 的账户（改角色/用户名即可劫持其登录）
+    guard_target_not_privileged_operator(&s, &actor, id).await?;
     sqlx::query!(
         r#"UPDATE users SET
             uid = COALESCE($2, uid),
@@ -439,6 +462,10 @@ async fn user_edit_submit(
     let role_arg = form.role.as_deref().filter(|r| !r.is_empty());
     if guard_role_assignment(&actor, role_arg).is_err() {
         return Redirect::to("/admin/users?err=role_forbidden").into_response();
+    }
+    // B2: 非 owner 不能改写绑定了 owner/admin operator 的账户（改角色/用户名即可劫持其登录）
+    if guard_target_not_privileged_operator(&s, &actor, id).await.is_err() {
+        return Redirect::to("/admin/users?err=target_forbidden").into_response();
     }
 
     let _ = sqlx::query!(

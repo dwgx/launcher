@@ -21,8 +21,14 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+/// 握手后每隔该间隔重新校验 session 是否仍有效（过期/被吊销则踢下线）。
+/// 握手鉴权只在连接建立那一刻成立；长连接期间令牌可能过期或被登出，
+/// 需周期性复核，否则被吊销的令牌会一直收到推送。
+const REAUTH_INTERVAL: Duration = Duration::from_secs(60);
 
 type Tx = mpsc::Sender<String>;
 
@@ -94,11 +100,11 @@ pub async fn ws_handler(
         Err((code, msg)) => return (code, msg).into_response(),
     };
     upgrade
-        .on_upgrade(move |socket| handle(socket, uid))
+        .on_upgrade(move |socket| handle(socket, s, q.session_token, uid))
         .into_response()
 }
 
-async fn handle(mut socket: WebSocket, uid: Uuid) {
+async fn handle(mut socket: WebSocket, state: Arc<AppState>, token: String, uid: Uuid) {
     let (tx, mut rx) = mpsc::channel::<String>(512);
     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     {
@@ -116,6 +122,8 @@ async fn handle(mut socket: WebSocket, uid: Uuid) {
         .await;
 
     // 读 + 写并行
+    let mut reauth = tokio::time::interval(REAUTH_INTERVAL);
+    reauth.tick().await; // 首次立即返回，跳过——握手时刚校验过
     loop {
         tokio::select! {
             // 服务端推
@@ -125,6 +133,14 @@ async fn handle(mut socket: WebSocket, uid: Uuid) {
                         if socket.send(Message::Text(body)).await.is_err() { break; }
                     }
                     None => break,
+                }
+            }
+            // 周期性复核 session：过期或被吊销则主动断开
+            _ = reauth.tick() => {
+                if auth_user(&state, &token).await.is_err() {
+                    tracing::info!("ws session no longer valid, kicking: user={}", uid);
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
                 }
             }
             // 客户端发（ping / typing 之类）
