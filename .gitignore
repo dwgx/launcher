@@ -123,3 +123,16 @@ tmp/smoke/*.json
 
 # MkDocs 构建产物
 /site/
+
+# 视觉冒烟层输出(一次性截图产物,勿提交)
+tools/preview-d2d/.visual-smoke/
+tools/preview-d2d/.visual-smoke-out/
+tools/preview-d2d/.visual-smoke-run/
+tools/preview-d2d/.visual-smoke-w*/
+
+# 会话终端转储(非源码产物)
+*-md-codegraph.txt
+
+# 本地运维脚本(内联凭据 · 切勿提交 · 见 CLAUDE.md)
+scripts/hc.py
+scripts/hc_tunnel.py
