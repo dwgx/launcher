@@ -59,4 +59,19 @@ inline bool anyHover(POINT p) {
     return false;
 }
 
+// 窗口拖动判定用:命中任何「真实交互区」返回 true(该处让给客户区,不拖窗)。
+// 关键:忽略全屏遮罩/背景吞击 hit —— 公告弹窗、消息/用户菜单、聊天区都注册过
+// 接近整窗大小的 (0,0,W,H) 背景 hit,若把它们算进去,整窗任何位置都被判为
+// 客户区而拖不动。用尺寸阈值排除:任一边 >= 窗口的 92% 视为遮罩,不计。
+// 这样气泡/频道/输入框/按钮等局部 hit 仍让路(点击不误拖),而空白/遮罩处可拖。
+inline bool hoverInteractive(POINT p, float W, float H) {
+    for (auto& h : g_hits) {
+        if (!h.rect.contains(p)) continue;
+        bool full_mask = (h.rect.w >= W * 0.92f) && (h.rect.h >= H * 0.92f);
+        if (full_mask) continue;   // 跳过整窗遮罩
+        return true;
+    }
+    return false;
+}
+
 }  // namespace launcher::d2d

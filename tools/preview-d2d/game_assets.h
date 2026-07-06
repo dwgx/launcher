@@ -37,4 +37,32 @@ inline std::wstring cs2HeaderPath() {
     return {};
 }
 
+// 返回 cs2_header.mp4 的完整路径（找不到返回空）。
+// 与 cs2HeaderPath() 同样的探测顺序：exe 同目录 → ../assets → ../../assets。
+// build_d2d.bat 把 assets/images/games/cs2_header.mp4（若存在）复制到 dist/。
+// 缺文件时上层会回退到静态 cs2_header.jpg，绝不空白。
+inline std::wstring cs2VideoPath() {
+    static std::wstring cached;
+    if (!cached.empty()) {
+        if (GetFileAttributesW(cached.c_str()) != INVALID_FILE_ATTRIBUTES) return cached;
+        cached.clear();
+    }
+    wchar_t exe[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring dir = exe;
+    auto p = dir.find_last_of(L'\\');
+    if (p != std::wstring::npos) dir = dir.substr(0, p);
+
+    std::wstring c1 = dir + L"\\cs2_header.mp4";
+    if (GetFileAttributesW(c1.c_str()) != INVALID_FILE_ATTRIBUTES) { cached = c1; return c1; }
+
+    std::wstring c2 = dir + L"\\..\\assets\\images\\games\\cs2_header.mp4";
+    if (GetFileAttributesW(c2.c_str()) != INVALID_FILE_ATTRIBUTES) { cached = c2; return c2; }
+
+    std::wstring c3 = dir + L"\\..\\..\\assets\\images\\games\\cs2_header.mp4";
+    if (GetFileAttributesW(c3.c_str()) != INVALID_FILE_ATTRIBUTES) { cached = c3; return c3; }
+
+    return {};
+}
+
 }  // namespace launcher::d2d

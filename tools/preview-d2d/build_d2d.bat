@@ -46,6 +46,9 @@ if "%RC%"=="0" (
     if exist ..\..\assets\images\games\cs2_header.jpg (
         copy /y ..\..\assets\images\games\cs2_header.jpg ..\..\dist\cs2_header.jpg >nul
     )
+    if exist ..\..\assets\images\games\cs2_header.mp4 (
+        copy /y ..\..\assets\images\games\cs2_header.mp4 ..\..\dist\cs2_header.mp4 >nul
+    )
     if exist ..\..\third_party\webview2\runtimes\win-x64\native\WebView2Loader.dll (
         copy /y ..\..\third_party\webview2\runtimes\win-x64\native\WebView2Loader.dll ..\..\dist\WebView2Loader.dll >nul
     )

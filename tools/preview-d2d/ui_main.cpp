@@ -18,6 +18,7 @@
 #include "ws_user.h"
 #include "i18n.h"
 #include "game_assets.h"
+#include "webview.h"
 #include "render/primitives.h"
 
 #include <algorithm>
@@ -695,6 +696,46 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
 }
 
+// ---- Lunch-view CS2 cover video (WebView2 <video>) ----------------------
+// 本 view 是 webview 的第三个消费者（另两个：modals.cpp 的 CS2 modal 与通用
+// video/web modal）。webview 是全局单例，故用一个 tracker 记录「当前 navigate
+// 的内容」，避免每帧重复 navigate，也能在 modal 改过 URL 后检测到需要重载。
+// 离开 Lunching view 或有 modal 抢占时必须 show(false) 并 invalidate tracker。
+namespace {
+
+// tracker 值：空 = 未由本 view 导航过（或已失效，下帧需重新 navigate）。
+std::wstring g_lunch_video_nav;
+
+// 本地路径 → file:/// URL（与 modals.cpp fileToFileUrl 等价；各自 anon ns）。
+std::wstring lunchFileToFileUrl(const std::wstring& path) {
+    std::wstring url = L"file:///";
+    for (wchar_t c : path) url.push_back(c == L'\\' ? L'/' : c);
+    return url;
+}
+
+// cover-tile 版 <video>：muted + playsinline + loop + autoplay，去掉 controls，
+// object-fit:cover 铺满圆角瓦片。src 已是 file:/// 或 http(s):// URL。
+std::wstring buildTileVideoHtml(const std::wstring& src) {
+    std::wstring h = L"<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                     L"<style>html,body{margin:0;padding:0;background:#000;height:100vh;overflow:hidden;}"
+                     L"video{width:100%;height:100%;object-fit:cover;display:block;}</style></head>"
+                     L"<body><video src=\"";
+    h += src;
+    h += L"\" autoplay muted loop playsinline></video></body></html>";
+    return h;
+}
+
+}  // anon
+
+// 离开 Lunching view / modal 抢占时调用：隐藏 webview 并失效 tracker，
+// 下次回到 Lunching 会重新 navigate 视频进瓦片。
+void hideLunchVideo() {
+    if (!g_lunch_video_nav.empty()) {
+        webview::show(false);
+        g_lunch_video_nav.clear();
+    }
+}
+
 void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
@@ -717,22 +758,59 @@ void paintLunchingView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawShadow(ctx, br, cx, cy + lift, 240, 140, 12.0f,
                      pal.shadow_card_hover, op, gc_hov ? 5.0f : 4.0f, 4);
 
-    auto cs2_path = cs2HeaderPath();
-    auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path, 480);
-    if (cover) {
-        // 真圆角 mask（之前 PushAxisAlignedClip 让 4 角是直的）
-        prim::pushLayerRR(ctx, app.factory(), cx, cy + lift, 240, 140, 12.0f);
-        D2D1_SIZE_F sz = cover->GetSize();
-        float scale = (std::max)(240.0f / sz.width, 140.0f / sz.height);
-        float dw = sz.width * scale, dh = sz.height * scale;
-        float dx = cx + (240 - dw) * 0.5f, dy = cy + lift + (140 - dh) * 0.5f;
-        ctx->DrawBitmap(cover, D2D1::RectF(dx, dy, dx + dw, dy + dh),
-                        op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    // CS2 cover：优先 WebView2 <video> 铺在瓦片上；否则回退静态 cs2_header.jpg。
+    // wantVideo 条件：runtime 可用 + 有 mp4 文件 + view 淡入基本完成（op>0.95，
+    // 与 CS2 modal 的 t>0.95 门控一致，保证 bounds 稳定）+ 没有 modal 抢占 webview
+    //（CS2 modal 正是从本瓦片打开的，两者共用同一个全局 webview 单例）。
+    auto cs2_video = cs2VideoPath();
+    bool wantVideo = webview::runtimeAvailable() && !cs2_video.empty()
+                     && op > 0.95f && !modal::anyOpen();
+    bool videoShown = false;
+    if (wantVideo) {
+        webview::ensure(app.hwnd());
+        if (webview::isReady()) {
+            float scale = app.dpi() / 96.0f;
+            int wl = (int)(cx * scale);
+            int wt = (int)((cy + lift) * scale);
+            int wr = (int)((cx + 240) * scale);
+            int wb = (int)((cy + lift + 140) * scale);
+            webview::setBounds(wl, wt, wr, wb);
+            // 只在内容变化时 navigate（tracker 记录本 view 最后导航的 src）。
+            std::wstring src = lunchFileToFileUrl(cs2_video);
+            if (g_lunch_video_nav != src) {
+                webview::navigateHtml(buildTileVideoHtml(src));
+                g_lunch_video_nav = src;
+            }
+            webview::show(true);
+            videoShown = true;
+        }
+    }
+
+    if (!videoShown) {
+        // webview 未铺（无 runtime / 无 mp4 / 淡入中 / modal 抢占）→ 隐藏视频，
+        // 画静态 cs2_header.jpg 封面兜底，绝不空白。
+        hideLunchVideo();
+        auto cs2_path = cs2HeaderPath();
+        auto* cover = cs2_path.empty() ? nullptr : app.images().fromFile(cs2_path, 480);
+        if (cover) {
+            // 真圆角 mask（之前 PushAxisAlignedClip 让 4 角是直的）
+            prim::pushLayerRR(ctx, app.factory(), cx, cy + lift, 240, 140, 12.0f);
+            D2D1_SIZE_F sz = cover->GetSize();
+            float scale = (std::max)(240.0f / sz.width, 140.0f / sz.height);
+            float dw = sz.width * scale, dh = sz.height * scale;
+            float dx = cx + (240 - dw) * 0.5f, dy = cy + lift + (140 - dh) * 0.5f;
+            ctx->DrawBitmap(cover, D2D1::RectF(dx, dy, dx + dw, dy + dh),
+                            op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            prim::fillRect(ctx, cx, cy + lift + 80, 240, 60,
+                           br.solidA(0x000000, op * 0.55f));
+            prim::popLayer(ctx);
+        } else {
+            prim::fillRR(ctx, cx, cy + lift, 240, 140, 12.0f, br.solidA(0xC96442, op));
+        }
+    } else {
+        // 视频铺满瓦片上方（z-order 高于 D2D），底部再压一条渐变让标题文字可读。
         prim::fillRect(ctx, cx, cy + lift + 80, 240, 60,
                        br.solidA(0x000000, op * 0.55f));
-        prim::popLayer(ctx);
-    } else {
-        prim::fillRR(ctx, cx, cy + lift, 240, 140, 12.0f, br.solidA(0xC96442, op));
     }
 
     auto* gn_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
@@ -1116,6 +1194,11 @@ void paintMain(D2DApp& app, float W, float H) {
         case stages::View::Settings: paintSettingsView(app, ax, ay, aw, ah); break;
         case stages::View::Profile:  paintProfileView(app, ax, ay, aw, ah);  break;
     }
+
+    // 非 Lunching view 时隐藏 CS2 瓦片视频，别让 webview HWND 漏到其他页面。
+    // （cheap：tracker 为空时直接 no-op。）Lunching view 内的 modal 抢占已由
+    // paintLunchingView 里的 anyOpen() 分支处理。
+    if (stages::g_view != stages::View::Lunching) hideLunchVideo();
 
     // dropdown 在 view 之上
     paintAccountDropdown(app, W);

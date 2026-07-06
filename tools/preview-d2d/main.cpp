@@ -189,11 +189,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd, &pt);
             POINT dip = physToDip(pt);
-            if (stages::g_stage == stages::Stage::Main
-                && stages::g_view == stages::View::Chat) {
-                return HTCLIENT;
-            }
-            return anyHover(dip) ? HTCLIENT : HTCAPTION;
+            // 统一判定(所有视图一致,含 chat):悬停在真实交互区(气泡/频道/
+            // 输入框/按钮等局部 hit)时让给客户区,空白处可拖动整窗。
+            // hoverInteractive 会忽略整窗遮罩 hit,避免 chat 里整片拖不动
+            // (上一版把 chat body 全锁 HTCLIENT 是错的 —— 只有顶栏能拖)。
+            return hoverInteractive(dip, g_app.widthDip(), g_app.heightDip())
+                       ? HTCLIENT : HTCAPTION;
         }
         case WM_MOUSEMOVE: {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
