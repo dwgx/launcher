@@ -230,16 +230,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat) {
                 chat::onMouseLUp(hwnd, dip);
+            } else if (stages::g_stage == stages::Stage::Main) {
+                // 结束主视图滚动条拖动（若有）
+                ui::onViewMouseUp();
             }
             return 0;
         }
         case WM_MOUSEWHEEL: {
-            if (stages::g_stage == stages::Stage::Main
-                && stages::g_view == stages::View::Chat
-                && !modal::anyOpen()) {
-                // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
+            if (stages::g_stage == stages::Stage::Main && !modal::anyOpen()) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wp);
-                chat::onWheel(delta);
+                if (stages::g_view == stages::View::Chat) {
+                    // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
+                    chat::onWheel(delta);
+                } else if (stages::g_view == stages::View::Home
+                        || stages::g_view == stages::View::Market
+                        || stages::g_view == stages::View::Settings
+                        || stages::g_view == stages::View::Profile) {
+                    ui::onViewWheel(delta);
+                }
             }
             return 0;
         }

@@ -23,9 +23,12 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <cstdio>
 
 namespace launcher::d2d::modal {
+
+void dismissTopModal();  // 定义在文件后段;paintDim(匿名命名空间内)经限定名调用。
 
 ChangePwState     g_change_pw;
 ConfirmState      g_confirm;
@@ -42,6 +45,7 @@ EditNicknameState g_edit_nickname;
 WebViewModalState g_webview_modal;
 MsgContextMenuState g_msg_menu;
 UserContextMenuState g_user_menu;
+ChatMoreMenuState g_chat_more;
 MuteUserState     g_mute_user;
 PackPreviewState  g_pack_preview_modal;
 SearchState       g_search;
@@ -150,6 +154,11 @@ void paintDim(D2DApp& app, float W, float H, float t) {
     const Palette& pal = palette();
     app.ctx()->FillRectangle(D2D1::RectF(0, 0, W, H),
                              app.brushes().solidA(0x000000, 0.40f * t));
+    // 全屏背景遮罩 hit:吞掉落到模态之外的点击,防止穿透触发后面主页面控件;
+    // 点它 = 关闭最上层模态(点外返回)。模态自身的按钮 hit 在此之后注册,
+    // dispatchClick 反向遍历时先命中模态按钮,点模态外才落到这个遮罩上。
+    // dismissTopModal 是 modal 命名空间(非本 anon)的函数,用限定名。
+    hit({ 0, 0, W, H }, [](){ launcher::d2d::modal::dismissTopModal(); }, false);
     (void)pal;
 }
 
@@ -264,6 +273,7 @@ void tickAll(float dt) {
     g_market_detail_modal.t.tick(dt);
     g_market_detail_modal.review_input.float_t.tick(dt);
     g_history.t.tick(dt);
+    g_history.page_anim.tick(dt);
     g_addtag.t.tick(dt);
     g_addtag.input.float_t.tick(dt);
     g_createpack.t.tick(dt);
@@ -280,6 +290,7 @@ void tickAll(float dt) {
     g_webview_modal.t.tick(dt);
     g_msg_menu.t.tick(dt);
     g_user_menu.t.tick(dt);
+    g_chat_more.t.tick(dt);
     g_mute_user.t.tick(dt);
     g_mute_user.duration.float_t.tick(dt);
     g_mute_user.reason.float_t.tick(dt);
@@ -294,7 +305,8 @@ bool anyOpen() {
         || g_addtag.open || g_createpack.open || g_renamepack.open
         || g_user_profile.open || g_edit_status.open || g_edit_bio.open
         || g_edit_nickname.open
-        || g_webview_modal.open || g_msg_menu.open || g_user_menu.open || g_mute_user.open
+        || g_webview_modal.open || g_msg_menu.open || g_user_menu.open || g_chat_more.open
+        || g_mute_user.open
         || g_pack_preview_modal.open
         || g_search.open;
 }
@@ -834,7 +846,9 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     auto* ctx = app.ctx();
     auto& br = app.brushes();
 
-    float cw = 460, ch = 420;
+    // ch 需容纳:标题区(~90) + 5 行 × 50 = 250 + 分页(~44) + 关闭按钮(~52) + 边距。
+    // 旧值 420 装不下(行区 cy+90..cy+340 压到 cy+330 的分页控件上 → 渲染重叠)。
+    float cw = 460, ch = 540;
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
@@ -878,18 +892,38 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
                          br.solidA(pal.surface, t * 0.6f));
         }
     } else {
-        for (int i = begin; i < end; ++i) {
-            float ry = cy + 90 + (i - begin) * 50;
-            prim::fillRR(ctx, cx + 20, ry, cw - 40, 40, 8.0f,
-                         br.solidA(pal.surface, t));
-            // 成功 = 绿点，失败 = 红点（之前恒为绿，看不出失败登录）。
-            uint32_t dot = g_history.rows[i].success ? 0x4ADE80 : 0xE34B4B;
-            prim::fillCircle(ctx, cx + 36, ry + 20, 6,
-                             br.solidA(dot, t));
-            prim::drawText_(ctx, g_history.rows[i].text, row_fmt,
-                            cx + 56, ry + 11, cw - 96, 18,
-                            br.solidA(pal.text, t));
+        // 画某一页的 5 行，整体加水平位移 dx（用于翻页滑动）。x 基准同旧代码
+        // （行框 cx+20、圆点 cx+36、文字 cx+56），只在 x 上叠加 dx。
+        auto drawPageRows = [&](int pageIdx, float dx) {
+            int pbegin = pageIdx * per;
+            int pend = (std::min)(pbegin + per, total);
+            for (int i = pbegin; i < pend; ++i) {
+                float ry = cy + 90 + (i - pbegin) * 50;
+                prim::fillRR(ctx, cx + 20 + dx, ry, cw - 40, 40, 8.0f,
+                             br.solidA(pal.surface, t));
+                // 成功 = 绿点，失败 = 红点（之前恒为绿，看不出失败登录）。
+                uint32_t dot = g_history.rows[i].success ? 0x4ADE80 : 0xE34B4B;
+                prim::fillCircle(ctx, cx + 36 + dx, ry + 20, 6,
+                                 br.solidA(dot, t));
+                prim::drawText_(ctx, g_history.rows[i].text, row_fmt,
+                                cx + 56 + dx, ry + 11, cw - 96, 18,
+                                br.solidA(pal.text, t));
+            }
+        };
+        // 裁剪到行区，滑动的两页不溢出卡片。区域覆盖 5 行 (90..90+5*50=340) + 少量 pad。
+        ctx->PushAxisAlignedClip(D2D1::RectF(cx + 20, cy + 84, cx + cw - 20, cy + 90 + per * 50),
+                                 D2D1_ANTIALIAS_MODE_ALIASED);
+        bool animating = g_history.page_anim.started && !g_history.page_anim.done();
+        if (animating) {
+            float e = g_history.page_anim.value();         // 0→1
+            int dir = g_history.slide_dir;                 // +1 next, -1 prev
+            // 旧页从中心滑向 -dir 方向出场；新页从 dir 方向入场。
+            drawPageRows(g_history.prev_page, (float)(-dir) * e * cw);
+            drawPageRows(g_history.page,      (float)dir * (1.0f - e) * cw);
+        } else {
+            drawPageRows(g_history.page, 0.0f);
         }
+        ctx->PopAxisAlignedClip();
     }
     // Pagination controls.
     if (total_pages > 1) {
@@ -898,10 +932,25 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
                         cx + cw * 0.5f - 30, cy + ch - 90, 60, 18,
                         br.solidA(pal.text_muted, t),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
+        int tp_capt = total_pages;
         drawGhostBtn(app, cx + cw * 0.5f - 90, cy + ch - 95, 30, 30, L"<", t,
-                     [](){ if (g_history.page > 0) g_history.page--; });
+                     [](){
+                         if (g_history.page > 0) {
+                             g_history.prev_page = g_history.page;
+                             g_history.page--;
+                             g_history.slide_dir = -1;
+                             g_history.page_anim.start(0.0f, 1.0f, 0.22f, 0, curve::easeOutCubic);
+                         }
+                     });
         drawGhostBtn(app, cx + cw * 0.5f + 60, cy + ch - 95, 30, 30, L">", t,
-                     [](){ g_history.page++; });
+                     [tp_capt](){
+                         if (g_history.page < tp_capt - 1) {
+                             g_history.prev_page = g_history.page;
+                             g_history.page++;
+                             g_history.slide_dir = 1;
+                             g_history.page_anim.start(0.0f, 1.0f, 0.22f, 0, curve::easeOutCubic);
+                         }
+                     });
     }
 
     drawGhostBtn(app, cx + cw - 24 - 100, cy + ch - 52, 100, 36,
@@ -1166,8 +1215,11 @@ void onRenamePackResult(bool success) {
 }
 // ============== UserProfile modal ==============
 void openUserProfile(const std::wstring& uid_or_nickname) {
+    // 连点同一头像去重:已在展示同一个 key 就忽略,不重启弹出动画(修连点闪烁重弹)。
+    if (g_user_profile.open && g_user_profile.cur_key == uid_or_nickname) return;
     dismissAllModals();  // 互斥：先关其它浮层，避免与表情包卡片等叠加
     g_user_profile.open = true;
+    g_user_profile.cur_key = uid_or_nickname;
     g_user_profile.t.start(0, 1, 0.25f, 0, curve::easeOutCubic);
     if (isSelfProfileKey(uid_or_nickname)) {
         std::lock_guard<std::mutex> lk(fetch::g_peer_mtx);
@@ -1754,6 +1806,22 @@ static void closeUserMenu() {
     g_user_menu.open = false;
 }
 
+void openChatMoreMenu(POINT anchor_dip) {
+    if (hasBlockingModalOpen()) return;
+    closeMsgMenu();
+    closeUserMenu();
+    g_chat_more.open = true;
+    g_chat_more.anchor = anchor_dip;
+    g_chat_more.menu_rect = {};
+    g_chat_more.view = 0;
+    g_chat_more.scroll = 0;
+    g_chat_more.t.start(0, 1, 0.18f, 0, curve::easeOutCubic);
+}
+void closeChatMoreMenu() {
+    g_chat_more.t.start(g_chat_more.t.value(), 0, 0.14f, 0, curve::easeOutCubic);
+    g_chat_more.open = false;
+}
+
 void closeContextMenus() {
     if (g_msg_menu.open) closeMsgMenu();
     if (g_user_menu.open) closeUserMenu();
@@ -2085,6 +2153,138 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
     g_user_menu.menu_rect = { mx, my, mw, mh };
 
     hit({ 0, 0, W, H }, [](){ closeUserMenu(); }, false);
+
+    prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
+    prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);
+    for (size_t i = 0; i < items.size(); ++i) {
+        float y = my + 8 + row * (float)i;
+        LayoutRect r{ mx + 6, y, mw - 12, row };
+        bool hov = !items[i].disabled && r.contains(g_mouse);
+        if (hov) prim::fillRR(ctx, r.x, r.y, r.w, r.h, 6, br.solidA(pal.primary, 0.12f * t));
+        uint32_t color = items[i].disabled ? pal.text_muted : (items[i].danger ? 0xFFE8795C : pal.text);
+        std::wstring lbl = fitText(app, items[i].label, menu_fmt, r.w - 20);
+        prim::drawTextNoWrap(ctx, lbl, menu_fmt, r.x + 10, r.y + 8, r.w - 20, 16,
+                        br.solidA(color, items[i].disabled ? 0.55f * t : t));
+        if (!items[i].disabled) hit(r, items[i].click, true);
+    }
+}
+
+namespace {
+// 成员子列表最多可见行数（含 Back 行之外的成员行）；超出用 g_chat_more.scroll 翻。
+constexpr int kChatMoreMembersVisible = 12;
+
+// 复刻 chat::authorKeyFor 的键逻辑（chat_internal.h 仅供 chat_*.cpp 用，这里内联）。
+std::wstring chatMoreAuthorKey(const chat::Msg& m) {
+    if (!m.author_key.empty()) return m.author_key;
+    if (!m.peer_key.empty()) return m.peer_key;
+    if (m.from == L"me") return L"me";
+    return m.from;
+}
+// 复刻 chat::displayAuthorFor 的展示逻辑（昵称/用户名 via peerProfileCached）。
+std::wstring chatMoreAuthorLabel(const chat::Msg& m) {
+    if (m.from == L"me") {
+        if (!m.author.empty()) return m.author;
+        if (!g_user.nickname.empty()) return g_user.nickname;
+        if (!g_user.username.empty()) return g_user.username;
+        return L"me";
+    }
+    std::wstring key = !m.author_key.empty() ? m.author_key
+                     : (!m.peer_key.empty() ? m.peer_key : m.from);
+    if (!key.empty()) {
+        fetch::PeerProfile peer = fetch::peerProfileCached(key);
+        if (peer.loaded && peer.err.empty()) {
+            if (!peer.nickname.empty()) return peer.nickname;
+            if (!peer.username.empty()) return peer.username;
+            if (!peer.uid.empty())      return peer.uid;
+        }
+    }
+    if (!m.author.empty()) return m.author;
+    if (!m.from.empty())   return m.from;
+    return key;
+}
+}  // namespace
+
+void paintChatMoreMenu(D2DApp& app, float W, float H) {
+    if (hasBlockingModalOpen()) return;
+    if (!g_chat_more.open && g_chat_more.t.value() < 0.001f) return;
+    float t = g_chat_more.t.value();
+    if (t < 0.001f) return;
+    const Palette& pal = palette();
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+
+    struct Item { std::wstring label; std::function<void()> click; bool danger; bool disabled; };
+    std::vector<Item> items;
+
+    if (g_chat_more.view == 0) {
+        // 主菜单：搜索 / 成员 / 公告
+        items.push_back({ trW("chatmenu.search"), [](){
+            closeChatMoreMenu();
+            openSearch();
+        }, false, false });
+        items.push_back({ trW("chatmenu.members"), [](){
+            // 就地切到成员子列表；弹层保持打开、下一帧重新测量。
+            g_chat_more.view = 1;
+            g_chat_more.scroll = 0;
+        }, false, false });
+        items.push_back({ trW("chatmenu.announcements"), [](){
+            closeChatMoreMenu();
+            chat::switchChannel(L"announcements");
+        }, false, false });
+    } else {
+        // 成员子列表：Back 行 + 当前流里出现过的唯一发言者（客户端来源，真实数据）。
+        items.push_back({ L"‹ " + trW("chatmenu.back"), [](){
+            g_chat_more.view = 0;
+            g_chat_more.scroll = 0;
+        }, false, false });
+
+        std::vector<std::pair<std::wstring, std::wstring>> roster;  // key -> label，首次出现顺序
+        std::set<std::wstring> seen;
+        for (const auto& m : chat::streamFor(chat::g_active)) {
+            std::wstring key = chatMoreAuthorKey(m);
+            if (key.empty()) continue;
+            if (!seen.insert(key).second) continue;
+            roster.emplace_back(key, chatMoreAuthorLabel(m));
+        }
+
+        if (roster.empty()) {
+            items.push_back({ trW("chatmenu.members_empty"), [](){}, false, true });
+        } else {
+            int total = (int)roster.size();
+            int off = g_chat_more.scroll;
+            if (off > total - kChatMoreMembersVisible) off = total - kChatMoreMembersVisible;
+            if (off < 0) off = 0;
+            g_chat_more.scroll = off;
+            int end = (std::min)(total, off + kChatMoreMembersVisible);
+            for (int i = off; i < end; ++i) {
+                std::wstring key = roster[i].first;
+                std::wstring lbl = roster[i].second;
+                items.push_back({ lbl, [key, lbl](){
+                    closeChatMoreMenu();
+                    openUserContextMenu(g_chat_more.anchor, key, lbl);
+                }, false, false });
+            }
+        }
+    }
+
+    auto* menu_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.0f));
+    float mw = 190.0f;
+    for (const auto& it : items) {
+        float need = measureW(app, it.label, menu_fmt) + 32.0f;
+        if (need > mw) mw = need;
+    }
+    if (mw > 360.0f) mw = 360.0f;
+    float row = 32.0f;
+    float mh = 12.0f + row * (float)items.size() + 12.0f;
+    float mx = (float)g_chat_more.anchor.x;
+    float my = (float)g_chat_more.anchor.y;
+    if (mx + mw > W - 8) mx = W - mw - 8;
+    if (my + mh > H - 8) my = H - mh - 8;
+    if (mx < 8) mx = 8;
+    if (my < 8) my = 8;
+    g_chat_more.menu_rect = { mx, my, mw, mh };
+
+    hit({ 0, 0, W, H }, [](){ closeChatMoreMenu(); }, false);
 
     prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);
@@ -2505,6 +2705,26 @@ void paintSearchModal(D2DApp& app, float W, float H) {
                  trW("common.close").c_str(), t, [](){ closeSearch(); });
 }
 
+// 关闭当前最上层的「带背景遮罩」模态(paintDim 遮罩 hit 的回调 = 点模态外返回)。
+// 菜单类(msg/user/chat_more/webview)不走 paintDim,由 onMouseLDown 各自处理,不在此列。
+void dismissTopModal() {
+    if (g_search.open) closeSearch();
+    else if (g_mute_user.open) closeMuteUser();
+    else if (g_pack_preview_modal.open) closePackPreview();
+    else if (g_edit_bio.open) closeEditBio();
+    else if (g_edit_nickname.open) closeEditNickname();
+    else if (g_edit_status.open) closeEditStatusText();
+    else if (g_user_profile.open) closeUserProfile();
+    else if (g_renamepack.open) closeRenamePack();
+    else if (g_createpack.open) closeCreatePack();
+    else if (g_addtag.open) closeAddTag();
+    else if (g_change_pw.open) closeChangePw();
+    else if (g_confirm.open) closeConfirm();
+    else if (g_cs2.open) closeCS2();
+    else if (g_market_detail_modal.open) closeMarketDetail();
+    else if (g_history.open) closeHistory();
+}
+
 // ============== Event routing ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
@@ -2522,6 +2742,7 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!consumed) {
         if (g_search.open) closeSearch();
         else if (g_user_menu.open) closeUserMenu();
+        else if (g_chat_more.open) closeChatMoreMenu();
         else if (g_mute_user.open) closeMuteUser();
         else if (g_pack_preview_modal.open) closePackPreview();
         else if (g_edit_bio.open) closeEditBio();
@@ -2549,6 +2770,11 @@ bool onMouseRDown(HWND /*hwnd*/, POINT dip) {
     if (g_user_menu.open) {
         bool inside = g_user_menu.menu_rect.contains(dip);
         if (!inside) closeUserMenu();
+        return inside;
+    }
+    if (g_chat_more.open) {
+        bool inside = g_chat_more.menu_rect.contains(dip);
+        if (!inside) closeChatMoreMenu();
         return inside;
     }
     return hasBlockingModalOpen();
@@ -2594,6 +2820,7 @@ bool onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (vk == VK_ESCAPE) {
         if (g_search.open) { closeSearch(); return true; }
         if (g_user_menu.open) { closeUserMenu(); return true; }
+        if (g_chat_more.open) { closeChatMoreMenu(); return true; }
         if (g_mute_user.open) { closeMuteUser(); return true; }
         if (g_msg_menu.open) { closeMsgMenu(); return true; }
         if (g_pack_preview_modal.open) { closePackPreview(); return true; }

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <unordered_map>
 #include <commdlg.h>
 #include <ShlObj.h>
 #include <wrl/client.h>
@@ -39,7 +40,33 @@ Tween  g_dropdown_t;
 Tween  g_status_fold_t;
 Tween  g_seg_lang_x, g_seg_lang_w, g_seg_theme_x, g_seg_theme_w;
 
+// ---- 主视图滚动（Home/Market/Settings/Profile）------------------------------
+// 每个可滚 view 一份 top-anchored 滚动状态（offset 0 = 顶部，与 chat 的 from-bottom
+// 约定相反 —— 这里用更直观的 from-top）。content_h 由各 paintXxxView 在末尾写入
+// （immediate-mode：本帧量到的内容底，下一帧用于 clamp）。offset 每帧 0.22 lerp 逼近
+// target（复刻 chat 手感 chat_paint.cpp:1343-1345）。max_off<=0 时完全不动/不画滚动条，
+// 保证已适配的窗口（含 visual-smoke 17 屏）像素不变 → 0 flag。
 namespace {
+
+struct ViewScroll {
+    float offset      = 0;   // 当前渲染用值（px from top）
+    float target      = 0;   // wheel / 拖动写这个
+    float content_h   = 0;   // 上一帧量到的内容总高
+    float viewport_h  = 0;   // 上一帧的可视高（ah）
+};
+// keyed by View —— 只有 Home/Market/Settings/Profile 会被用到。
+std::unordered_map<int, ViewScroll> g_view_scroll;
+
+// 主视图滚动条拖动 —— 复刻 chat 的 g_scroll_drag（chat.h:100-108），但 top-anchored。
+struct ViewScrollDrag {
+    bool  active = false;
+    int   view = -1;
+    float anchor_mouse_y = 0;
+    float anchor_offset  = 0;
+    float track_h        = 0;   // 可移动轨道高（track_h - thumb_h）
+    float max_off        = 0;
+};
+ViewScrollDrag g_view_scroll_drag;
 
 struct MenuEntry { stages::View view; const char* label_key; icons::Name icon; };
 constexpr MenuEntry kMenu[] = {
@@ -694,6 +721,10 @@ void paintHomeView(D2DApp& app, float ax, float ay, float aw, float ah) {
         chip_fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         hit(addr, [](){ modal::openAddTag(); }, true);
     }
+
+    // 内容总高（相对 ay）→ 供 paintMain 滚动包裹层下一帧 clamp。
+    // 最低内容 = tags chip 行底（chipy + 26），+20 底 padding。
+    g_view_scroll[(int)stages::View::Home].content_h = (chipy + 26.0f + 20.0f) - ay;
 }
 
 // ---- Lunch-view CS2 cover video (WebView2 <video>) ----------------------
@@ -863,17 +894,24 @@ void paintMarketView(D2DApp& app, float ax, float ay, float aw, float ah) {
         prim::drawText_(ctx, market_loaded ? trW("market.empty") : trW("market.loading"), sub,
                         ax + 32, ay + 100, aw - 64, 22,
                         br.solidA(pal.text_muted, op));
+        g_view_scroll[(int)stages::View::Market].content_h = 0.0f;
         return;
     }
     int n = (int)listings.size();
     int per_row = 2;
     float card_w = (aw - 96) / per_row;
     float card_h = 110;
+    // 内容总高：100 顶 + ceil(n/2) 行 × 126 pitch（最后一行不减 16 间距也无妨，多算的
+    // 16px 当底 padding），相对 ay。滚动包裹层用它判断是否需要滚动条。
+    int rows_total = (n + per_row - 1) / per_row;
+    g_view_scroll[(int)stages::View::Market].content_h =
+        100.0f + rows_total * (card_h + 16.0f) + 4.0f;
     for (int i = 0; i < n; ++i) {
         int row = i / per_row, col = i % per_row;
         float cx = ax + 32 + col * (card_w + 16);
         float cy = ay + 100 + row * (card_h + 16);
-        if (cy > ay + ah) break;
+        // 不再因超出 viewport 提前 break —— 由滚动包裹层的 clip + 滚动处理可见性，
+        // 让所有 listing 都能画到 / 命中到（否则超出首屏的条目永远点不到）。
         LayoutRect cr{ cx, cy, card_w, card_h };
         bool hov = cr.contains(g_mouse);
         prim::drawShadow(ctx, br, cx, cy + (hov ? -1.0f : 0.0f),
@@ -1011,6 +1049,10 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     prim::drawText_(ctx, L"© 2026 dwgx", sub,
                     vx, sy_, aw - 64, 22,
                     br.solidA(pal.text_muted, op));
+    sy_ += 22;
+
+    // 内容总高（相对 ay）+ 20 底 padding。
+    g_view_scroll[(int)stages::View::Settings].content_h = (sy_ + 20.0f) - ay;
 }
 
 void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
@@ -1152,9 +1194,118 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
                     DWRITE_TEXT_ALIGNMENT_CENTER,
                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     hit(pw, [](){ modal::openChangePw(); }, true);
+
+    // profile 卡被撑满 viewport（cy=ay+50, ch=ah-70 → 卡底 = ay+ah-20），内容总高 = 卡底
+    // + 20 padding = ah，几乎恒等于 viewport → max_off≈0 不滚动（设计如此）。仍上报以统一。
+    g_view_scroll[(int)stages::View::Profile].content_h = (cy + ch + 20.0f) - ay;
 }
 
 // Chat view 走 chat::paintChatView
+
+// ---- 可滚动 view 包裹层 -----------------------------------------------------
+// 复刻 recon 方案：D2D 平移只移像素，不移 CPU 侧 LayoutRect，故必须在 body 画完后把
+// 本帧 body 注册的 hit rect 从 content-space 改写到 screen-space，clicks 才落对。
+// 步骤见函数内注释。fn 是四个 paintXxxView 之一（它在自然绝对 y 画 + 末尾上报 content_h）。
+using ViewPaintFn = void(*)(D2DApp&, float, float, float, float);
+
+void paintScrollableView(D2DApp& app, ViewPaintFn fn, stages::View view,
+                         float ax, float ay, float aw, float ah) {
+    auto* ctx = app.ctx();
+    auto& br = app.brushes();
+    const Palette& pal = palette();
+
+    ViewScroll& vs = g_view_scroll[(int)view];
+    vs.viewport_h = ah;
+    float content_h = vs.content_h;   // 上一帧量到的（首帧=0 → max_off=0）
+    float max_off = (std::max)(0.0f, content_h - ah);
+
+    // 1) clamp target + lerp offset（复刻 chat 0.22 手感）。拖动中直接同步。
+    if (g_view_scroll_drag.active && g_view_scroll_drag.view == (int)view && g_mouse_pressed) {
+        float dy = (float)g_mouse.y - g_view_scroll_drag.anchor_mouse_y;
+        float track_h = (std::max)(1.0f, g_view_scroll_drag.track_h);
+        float content_per_track = g_view_scroll_drag.max_off / track_h;
+        float new_off = g_view_scroll_drag.anchor_offset + dy * content_per_track;
+        if (new_off > max_off) new_off = max_off;
+        if (new_off < 0.0f) new_off = 0.0f;
+        vs.target = new_off;
+        vs.offset = new_off;
+    } else {
+        if (vs.target > max_off) vs.target = max_off;
+        if (vs.target < 0.0f) vs.target = 0.0f;
+        float diff = vs.target - vs.offset;
+        if (std::abs(diff) < 0.5f) vs.offset = vs.target;
+        else                       vs.offset += diff * 0.22f;
+    }
+    if (vs.offset > max_off) vs.offset = max_off;
+    if (vs.offset < 0.0f) vs.offset = 0.0f;
+
+    // 2) 不需要滚动：原样画（无 transform / 无滚动条），保证已适配窗口像素不变 → 0 flag。
+    if (max_off <= 0.0f) {
+        vs.offset = 0.0f;
+        vs.target = 0.0f;
+        fn(app, ax, ay, aw, ah);
+        return;
+    }
+
+    float offset = vs.offset;
+
+    // 3) 裁剪到 view 区域（别让滚动内容漏到 topbar/sidebar）+ 平移 -offset。
+    ctx->PushAxisAlignedClip(D2D1::RectF(ax, ay, ax + aw, ay + ah),
+                             D2D1_ANTIALIAS_MODE_ALIASED);
+    D2D1_MATRIX_3X2_F saved;
+    ctx->GetTransform(&saved);
+    ctx->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -offset) * saved);
+
+    // 鼠标同步进 content-space：inline hover 用 rect.contains(g_mouse)，内容整体上移了
+    // offset，等价于把鼠标下移 offset 再比 content-space rect → hover 正确。
+    POINT saved_mouse = g_mouse;
+    g_mouse.y += (LONG)std::lround(offset);
+
+    size_t n0 = g_hits.size();
+    fn(app, ax, ay, aw, ah);   // body 在自然 content y 画 + 注册 hit + 上报 content_h
+
+    // 5) 把 body 这帧注册的 hit rect 从 content-space 改写到 screen-space。
+    // 元素 content_y 实际画在 screen y = content_y - offset，故 rect.y -= offset 对齐。
+    for (size_t i = n0; i < g_hits.size(); ++i) g_hits[i].rect.y -= offset;
+
+    g_mouse = saved_mouse;
+    ctx->SetTransform(saved);
+    ctx->PopAxisAlignedClip();
+
+    // 6) 右侧细滚动条（screen-space，在 transform 之外，故 rect 已是屏幕坐标，
+    // 不参与上面的 [n0,end) 改写）。镜像 chat_paint.cpp:1393-1423 但 top-anchored。
+    {
+        float bar_x = ax + aw - 8.0f;
+        float bar_w = 6.0f;
+        float track_y = ay + 4.0f;
+        float track_h = ah - 8.0f;
+        float thumb_h = (ah / content_h) * track_h;
+        if (thumb_h < 28.0f) thumb_h = 28.0f;
+        float t_pos = (max_off > 0.0f) ? (offset / max_off) : 0.0f;
+        float movable = track_h - thumb_h;
+        float thumb_y = track_y + movable * t_pos;
+        prim::fillRR(ctx, bar_x, track_y, bar_w, track_h, 3.0f,
+                     br.solidA(pal.text, 0.05f));
+        LayoutRect thumb_rect{ bar_x - 2.0f, thumb_y, bar_w + 4.0f, thumb_h };
+        bool bar_hov = thumb_rect.contains(g_mouse)
+                    || (g_view_scroll_drag.active && g_view_scroll_drag.view == (int)view);
+        prim::fillRR(ctx, bar_x, thumb_y, bar_w, thumb_h, 3.0f,
+                     br.solidA(pal.text, bar_hov ? 0.50f : 0.30f));
+        float anchor_y = (float)g_mouse.y;
+        float anchor_off = offset;
+        float movable_capt = movable;
+        float max_off_capt = max_off;
+        int view_capt = (int)view;
+        hit(thumb_rect, [anchor_y, anchor_off, movable_capt, max_off_capt, view_capt](){
+            g_view_scroll_drag.active = true;
+            g_view_scroll_drag.view = view_capt;
+            g_view_scroll_drag.anchor_mouse_y = anchor_y;
+            g_view_scroll_drag.anchor_offset = anchor_off;
+            g_view_scroll_drag.track_h = movable_capt;
+            g_view_scroll_drag.max_off = max_off_capt;
+        }, true);
+    }
+}
 
 }  // anon
 
@@ -1162,6 +1313,23 @@ void switchView(stages::View v) {
     if (v == stages::g_view) return;
     stages::g_view = v;
     stages::g_view_fade.start(0.0f, 1.0f, 0.25f, 0, curve::easeOutQuint);
+}
+
+// 主视图滚轮 — 复刻 chat.cpp:77-81，但 top-anchored（offset 0 = 顶）。
+// 一次 notch(delta=±120) → 90px；向下滚(delta<0)增大 offset（内容上移）。
+// content_h / viewport_h 用上一帧量到的值 clamp（首帧还没量到 → max_off=0 不动，无害）。
+void onViewWheel(int delta) {
+    auto& vs = g_view_scroll[(int)stages::g_view];
+    float max_off = (std::max)(0.0f, vs.content_h - vs.viewport_h);
+    if (max_off <= 0.0f) return;
+    // 向下滚 delta<0 → 内容上移 → offset 增大，故减 delta。
+    vs.target -= (float)delta * 0.75f;
+    if (vs.target > max_off) vs.target = max_off;
+    if (vs.target < 0.0f) vs.target = 0.0f;
+}
+
+void onViewMouseUp() {
+    g_view_scroll_drag.active = false;
 }
 
 void tickMain(float dt) {
@@ -1186,13 +1354,17 @@ void paintMain(D2DApp& app, float W, float H) {
     float ax = kSidebarW, ay = kTopbarH;
     float aw = W - kSidebarW, ah = H - kTopbarH;
     switch (stages::g_view) {
-        case stages::View::Home:     paintHomeView(app, ax, ay, aw, ah);     break;
+        case stages::View::Home:
+            paintScrollableView(app, paintHomeView, stages::View::Home, ax, ay, aw, ah); break;
         case stages::View::Lunching: paintLunchingView(app, ax, ay, aw, ah); break;
         case stages::View::Chat:     chat::paintChatView(app, ax, ay, aw, ah); break;
-        case stages::View::Market:   paintMarketView(app, ax, ay, aw, ah);   break;
+        case stages::View::Market:
+            paintScrollableView(app, paintMarketView, stages::View::Market, ax, ay, aw, ah); break;
         case stages::View::Cloud:    paintCloudView(app, ax, ay, aw, ah);    break;
-        case stages::View::Settings: paintSettingsView(app, ax, ay, aw, ah); break;
-        case stages::View::Profile:  paintProfileView(app, ax, ay, aw, ah);  break;
+        case stages::View::Settings:
+            paintScrollableView(app, paintSettingsView, stages::View::Settings, ax, ay, aw, ah); break;
+        case stages::View::Profile:
+            paintScrollableView(app, paintProfileView, stages::View::Profile, ax, ay, aw, ah); break;
     }
 
     // 非 Lunching view 时隐藏 CS2 瓦片视频，别让 webview HWND 漏到其他页面。
@@ -1228,6 +1400,7 @@ void paintMain(D2DApp& app, float W, float H) {
     // 消息右键菜单 — 在所有 modal 之上、toast 之下
     modal::paintMsgContextMenu(app, W, H);
     modal::paintUserContextMenu(app, W, H);
+    modal::paintChatMoreMenu(app, W, H);
 
     chat::paintAnnouncementModal(app, W, H);
 

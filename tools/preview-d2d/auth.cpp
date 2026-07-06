@@ -388,6 +388,12 @@ void handleSubmit(HWND hwnd) {
         std::string u = net::jsonEscape(a->user);
         std::string p = net::jsonEscape(a->pass);
         std::string hwid = hwidHex();             // 64 hex SHA-256，后端强制
+        // 地理国家码：ip-api.com 异步解析后写入 g_geo_country（如 L"CN"）。
+        // 与 geoIP 竞争 —— 启动后首次登录可能尚未解析完，此时不带该字段（后端可选）。
+        std::string geo;
+        if (g_geo_country[0] != 0) {
+            geo = ",\"geo_country\":\"" + net::jsonEscape(g_geo_country) + "\"";
+        }
         std::string body;
         const wchar_t* path;
         if (a->reg) {
@@ -402,7 +408,8 @@ void handleSubmit(HWND hwnd) {
             body = "{\"username\":\"" + u
                  + "\",\"password\":\"" + p
                  + "\",\"hwid_hex\":\"" + hwid
-                 + "\",\"client_ver\":\"0.1\"}";
+                 + "\",\"client_ver\":\"0.1\""
+                 + geo + "}";
             path = L"/api/auth/login";
         }
         auto resp = net::postJson(path, body);

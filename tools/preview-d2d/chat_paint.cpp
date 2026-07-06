@@ -1179,18 +1179,28 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
                     ax + 36, ay + 32, (std::max)(300.0f, aw - 72.0f), 16, br.solid(pal.text_muted));
 
     // 右上 search / more 按钮
+    // 有模态打开时不注册这两个 header hit —— 否则点右上角关模态会命中残留的
+    // search 按钮 hit,导致搜索反复重开、"取消不掉"(hit 每帧在 view 层注册、
+    // 模态后画,点击派发会先撞上 view 的按钮)。
+    bool header_btns_active = !modal::anyOpen();
     float btn_x = ax + aw - 14 - 34 * 2 - 4;
     for (int i = 0; i < 2; ++i) {
         LayoutRect ar{ btn_x, ay + 11, 34, 34 };
-        bool hov = ar.contains(g_mouse);
+        bool hov = header_btns_active && ar.contains(g_mouse);
         if (hov) {
             prim::fillRR(ctx, ar.x, ar.y, ar.w, ar.h, 8.0f, br.solid(pal.card));
         }
         icons::Name n = (i == 0) ? icons::Name::Search : icons::Name::More;
         icons::drawIcon(app, n, ar.x + 8, ar.y + 8, 18,
                         hov ? pal.text : pal.text_muted);
-        if (i == 0) {
-            hit(ar, [](){ modal::openSearch(); }, true);
+        if (header_btns_active) {
+            if (i == 0) {
+                hit(ar, [](){ modal::openSearch(); }, true);
+            } else {
+                // 三个点:功能菜单(搜索/成员/静音等,视权限)。
+                POINT anchor{ (LONG)ar.x, (LONG)(ar.y + ar.h + 4) };
+                hit(ar, [anchor](){ modal::openChatMoreMenu(anchor); }, true);
+            }
         }
         btn_x += 38;
     }

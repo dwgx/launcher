@@ -380,6 +380,12 @@ const char* tr(const char* key) {
         {"usermenu.unmute",     "Unmute",           u8"解除禁言",          u8"ミュート解除"},
         {"usermenu.mute",       "Mute",             u8"禁言",              u8"ミュート"},
 
+        {"chatmenu.search",        "Search",         u8"搜索",      u8"検索"},
+        {"chatmenu.members",       "Members",        u8"成员",      u8"メンバー"},
+        {"chatmenu.announcements", "Announcements",  u8"公告",      u8"お知らせ"},
+        {"chatmenu.members_empty", "No members yet", u8"暂无成员",  u8"メンバーがいません"},
+        {"chatmenu.back",          "Back",           u8"返回",      u8"戻る"},
+
         {"search.title",        "Search messages",  u8"搜索消息",          u8"メッセージを検索"},
 
         {"sticker.export_dialog_title","Choose export destination folder",

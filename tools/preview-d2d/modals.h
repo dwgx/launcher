@@ -83,6 +83,10 @@ struct HistoryState {
     std::vector<Row> rows;
     bool loaded = false;
     int  page = 0;     // 5 行/页
+    // 翻页横向滑动动画 —— < > 换页时旧页滑出、新页滑入（0.22s easeOutCubic）。
+    Tween page_anim;   // 0→1 进度；只在 started && !done 时双页并绘
+    int   prev_page = 0;
+    int   slide_dir = 0;   // +1 = 下一页（新页从右侧滑入）；-1 = 上一页（从左侧滑入）
 };
 extern HistoryState g_history;
 void openHistory();
@@ -134,6 +138,7 @@ void onRenamePackResult(bool success);
 struct UserProfileState {
     bool open = false;
     Tween t;
+    std::wstring cur_key;   // 当前展示的 profile key —— 连点同一头像去重,避免重复重启弹出动画
 };
 extern UserProfileState g_user_profile;
 void openUserProfile(const std::wstring& uid_or_nickname);
@@ -210,6 +215,22 @@ struct UserContextMenuState {
 extern UserContextMenuState g_user_menu;
 void openUserContextMenu(POINT anchor_dip, const std::wstring& profile_key, const std::wstring& label);
 void paintUserContextMenu(D2DApp& app, float W, float H);
+
+// 聊天头部「更多」弹出菜单：搜索 / 成员 / 公告。
+// 复用 UserContextMenuState 的几何/交互模式；多加 view/scroll 让同一个弹层能在
+// 3 项主菜单(view==0)与成员子列表(view==1)之间就地切换，避免再开第二个 modal 结构。
+struct ChatMoreMenuState {
+    bool open = false;
+    Tween t;
+    POINT anchor{};          // header 设置（chat_paint.cpp -> More 按钮下方）
+    LayoutRect menu_rect{};  // 每帧计算；供 outside-click / RDown 命中判定
+    int  view = 0;           // 0 = 主菜单(3 项)  1 = 成员子列表
+    int  scroll = 0;         // 成员子列表滚动偏移（行）
+};
+extern ChatMoreMenuState g_chat_more;
+void openChatMoreMenu(POINT anchor_dip);
+void paintChatMoreMenu(D2DApp& app, float W, float H);
+void closeChatMoreMenu();
 
 struct MuteUserState {
     bool open = false;
