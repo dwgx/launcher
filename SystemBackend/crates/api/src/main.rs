@@ -82,12 +82,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("HTTPS listening on {} (cert={})", addr, cert_path);
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path).await?;
         axum_server::bind_rustls(addr, tls)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
         tracing::info!("HTTP listening on {}", cfg.bind_addr);
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
     }
     Ok(())
 }

@@ -1,8 +1,13 @@
 use crate::state::AppState;
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::StatusCode,
+    Json,
+};
 use chrono::{Duration, Utc};
 use launcher_shared::{error::AppError, hashing, tier::Tier, uid as shared_uid};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time;
 use uuid::Uuid;
@@ -248,6 +253,8 @@ pub struct LoginReq {
     pub password: String,
     pub hwid_hex: String, // 客户端拼接 + sha256 后的 hex
     pub client_ver: String,
+    /// 客户端解析的国家码（ip-api.com，如 "CN"）。可选，缺省则不记录地理位置。
+    pub geo_country: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -264,12 +271,23 @@ pub struct LoginResp {
 
 pub async fn login(
     State(s): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, (StatusCode, String)> {
     // H-2: Validate hwid_hex upfront to prevent UTF-8 boundary panic on slicing
     if req.hwid_hex.len() != 64 || !req.hwid_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err((StatusCode::BAD_REQUEST, "invalid hwid".into()));
     }
+
+    // 地理国家码：客户端解析后随登录上送，做 2 字符 sanity trim（如 "CN"）。
+    // 不信任客户端上送的 IP —— remote_ip 由服务端从连接的 peer 地址捕获。
+    let geo_country: Option<String> = req
+        .geo_country
+        .as_deref()
+        .map(|c| c.trim())
+        .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic()))
+        .map(|c| c.to_ascii_uppercase());
+    let remote_ip = peer.ip().to_string();
 
     // Brute-force lockout: 5 failures within 15 min triggers 15 min cooldown
     {
@@ -324,14 +342,16 @@ pub async fn login(
 
     if !hashing::verify_password(&req.password, &row.password_hash).map_err(internal)? {
         // 记 login_history：密码错误的失败登录。此时已有 row.id，可写入 user_id。
-        sqlx::query!(
-            r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
-               VALUES ($1, false, $2, $3, $4)"#,
-            row.id,
-            &req.hwid_hex[..16],
-            req.client_ver,
-            Some("bad_password")
+        sqlx::query(
+            r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason, geo_country, remote_ip)
+               VALUES ($1, false, $2, $3, $4, $5, $6::inet)"#,
         )
+        .bind(row.id)
+        .bind(&req.hwid_hex[..16])
+        .bind(&req.client_ver)
+        .bind(Some("bad_password"))
+        .bind(&geo_country)
+        .bind(&remote_ip)
         .execute(&s.db)
         .await
         .ok();
@@ -381,14 +401,18 @@ pub async fn login(
     .map_err(internal)?;
 
     // 记 login_history：成功，但 HWID 不匹配时 failure_reason 标记 hwid_mismatch 以便审计
-    sqlx::query!(
-        r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason)
-           VALUES ($1, true, $2, $3, $4)"#,
-        row.id,
-        &req.hwid_hex[..16],
-        req.client_ver,
-        if hwid_ok { None } else { Some("hwid_mismatch") }
+    // 运行时 query(非 query! 宏):remote_ip 是 INET,query! 需 ipnetwork feature;
+    // 用运行时 bind + $6::inet 让 Postgres 端转换,避免引入 ipnetwork 依赖 + 免 .sqlx 缓存。
+    sqlx::query(
+        r#"INSERT INTO login_history (user_id, success, hwid_short, client_ver, failure_reason, geo_country, remote_ip)
+           VALUES ($1, true, $2, $3, $4, $5, $6::inet)"#,
     )
+    .bind(row.id)
+    .bind(&req.hwid_hex[..16])
+    .bind(&req.client_ver)
+    .bind(if hwid_ok { None } else { Some("hwid_mismatch") })
+    .bind(&geo_country)
+    .bind(&remote_ip)
     .execute(&s.db)
     .await
     .ok();
