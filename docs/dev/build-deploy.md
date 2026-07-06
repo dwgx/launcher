@@ -26,6 +26,20 @@ cmake --build build --config Release
     可运行的 D2D 客户端在 `tools/preview-d2d/`（见 `docs/PHASE_2_D2D_MIGRATION.md`）；`src/` 是长期骨架。
     两者的 HWID 实现不同，详见 [客户端 · 加密与原生 §5](../client/crypto-native.md#hwid)。
 
+### D2D 客户端构建脚本（`tools/preview-d2d/`）
+
+D2D 客户端用两个 MSVC 批处理脚本（都自动定位 `vcvars64.bat`、cl 直接编译，非 CMake）：
+
+- **`build_d2d.bat`** —— 正常构建，产出纯净 `LauncherD2D.exe`。
+- **`build_d2d_visual.bat`** —— `build_d2d.bat` 的克隆 + 额外编入 `visual_smoke.cpp` + `/DLAUNCHER_VISUAL_SMOKE`，
+  产出带**视觉冒烟钩子**的 exe。**不改** `build_d2d.bat`，保正常构建纯净、钩子在正常构建里编译为空翻译单元。
+  跑冒烟：`build_d2d_visual.bat` 后 `set LAUNCHER_VISUAL_SMOKE=1` 启动（或加 `--visual-smoke`），逐屏 PNG 落
+  `.visual-smoke/`。详见 [视觉冒烟测试](testing-visual-smoke.md)。
+
+!!! note "生产 host 脱敏注入"
+    两个脚本都通过环境变量 `LAUNCHER_DEFAULT_HOST` / `LAUNCHER_DEFAULT_SCHEME` / `LAUNCHER_DEFAULT_PORT` 注入生产
+    地址，**不写死进源码**；未设置时回退到 `net.h` 内的 `127.0.0.1` 默认值。字面主机/端口按名引用，不入文档。
+
 ## 2. 后端（Rust workspace）
 
 Cargo workspace 在 `SystemBackend/`（`SystemBackend/Cargo.toml`），四个 crate：`api` / `signer` / `proto` / `shared`。
@@ -48,11 +62,19 @@ cargo build --release -p signer         # 离线签名 CLI
 
 ### 迁移
 
-数据库迁移在 `SystemBackend/migrations/0001..0018`，服务启动时自动跑（`crates/api/src/main.rs:46-47`）。schema 详见 [数据模型](../data/data-model.md)。
+数据库迁移在 `SystemBackend/migrations/0001..0019`，服务启动时自动跑（`crates/api/src/main.rs:46-47`）。最新
+`0019_media_thumbs.sql` 给 `media_files` 加 `blurhash`/`has_thumbs` 两列，全 additive + `IF NOT EXISTS`，对现网
+旧行无破坏、可幂等重复登记（迁移不含 backfill，见 [图片管线 §3.4](../client/image-pipeline.md)）。schema 详见
+[数据模型](../data/data-model.md)。
 
 ### 配置
 
 后端读 `config.toml`（`crates/api/src/main.rs:41-44`）。**其内容（`database_url`、`admin_password`、盐、`signing_public_key_hex`、TLS 证书路径、`cdn_base` 等）不写入本站**，字段清单见 `crates/shared/src/config.rs`；生产值只在服务器本地。
+
+!!! warning "运维提醒：新增 `admin_cookie_secret` 配置项"
+    admin 会话 cookie 现在用**独立**的 `admin_cookie_secret`（≥32 字节 hex）签名，而非复用 `admin_password`
+    （`config.rs:57`、`state.rs:20-62`）。生产 `config.toml` **应显式配置**该项（值按名引用，只在服务器本地）——
+    否则每次进程启动都随机生成新密钥，会使所有已登录 admin 会话在重启后失效（`state.rs:59-61` 会 `warn`）。
 
 ## 3. Signer（离线，管理员机器）
 
@@ -80,6 +102,10 @@ flowchart TD
 - systemd 服务名 `systembackend.service`（另有 `systembackend-audit.service` 双库）；运行二进制与部署源码快照的路径在服务器约定目录。
 - **构建用普通部署用户**（其 cargo 在 `~/.cargo/bin`），**不要用 sudo/root 跑 cargo**（config.toml 对运行用户不可读的坑）。
 - 本机无 sshpass/plink，用 **paramiko**（Python）做非交互 SSH/SFTP；SFTP 本地路径要用 Windows 实路径。
+- **Wave 3 图片管线相关**：`media_thumb.rs` 依赖 `image` crate（解码/Lanczos3 缩放/JPEG-PNG 编码）+ `blurhash`
+  crate，构建二进制体积/依赖较前增大，首次构建耗时更长。迁移 0019 幂等（`IF NOT EXISTS`），重复部署安全。
+  部署后旧图仍走原图回退，直到 backfill（见 [图片管线 §3.4](../client/image-pipeline.md)）。config 需新增
+  `admin_cookie_secret`（见上 §配置的运维提醒）。
 
 !!! danger "部署即高风险操作"
     重启生产服务、替换二进制属于影响线上的操作。执行前确认已备份旧二进制、迁移兼容、并在 `journalctl` 复核启动无误。

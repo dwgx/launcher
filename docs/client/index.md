@@ -1,10 +1,19 @@
 # 客户端概览
 
-客户端是 C++20 原生 Windows 程序（`src/`），面向 VMProtect 加固，运行在**不可信环境**。本章分三页覆盖：
+客户端是 C++20 原生 Windows 程序，面向 VMProtect 加固，运行在**不可信环境**。本章分页覆盖：
 
 - **[App 与 UI 层](app-ui.md)** —— 进程入口、`AppPhase` 状态机、`EventLoop`、Skia 渲染 + 动画管线、主题、视图/组件。
 - **[网络 / 存储 / 核心](net-storage-core.md)** —— libcurl HTTP 客户端、Registry+DPAPI 隐写存储、SQLite 缓存、EventBus、订阅协议契约。
 - **[加密与原生模块](crypto-native.md)** —— 编译期字符串混淆、DPAPI 封存、14 源 HWID 指纹、动态导入隐藏。
+- **[图片管线（跨端）](image-pipeline.md)** —— 异步解码 + 下载池 + 后端缩略图三波优化（D2D 客户端 + 后端）。
+- **[桌面通知](notifications.md)** —— 顶部动态岛 Toast（`tools/preview-d2d/toast.*`）。
+
+!!! important "两套客户端代码：`src/` 骨架 vs `tools/preview-d2d/` 出货客户端"
+    **实际出货、真正联通后端的客户端是 `tools/preview-d2d/`（D2D，Direct2D）**——图片管线、动态岛通知、聊天/市场
+    等联网功能都在这里（见 `docs/PHASE_2_D2D_MIGRATION.md`）。而 `src/` 是**长期骨架**：构件（net/storage/crypto/
+    native）已实现但主入口 `main.cpp` 尚未接线（下文「目录结构」与各子系统页描述的是 `src/`）。读者切勿把 `src/`
+    当作活跃客户端。跨端图片链路见 [图片管线](image-pipeline.md)，通知见 [桌面通知](notifications.md)，
+    截图回归见 [视觉冒烟测试](../dev/testing-visual-smoke.md)。
 
 ## 目录结构与职责
 

@@ -61,6 +61,10 @@ graph TD
 | GET | /api/hwid/rebind/list | rebind::list_for_user | session |
 | GET/POST | /api/profile* (profile, nickname, password, avatar, login-history, status, update, tags*) | profile::* (`main.rs:108-120`) | session |
 | GET | /api/profile/peer/:key , /api/avatar/:id | profile::* | session |
+
+!!! note "DM 相关字段（客户端接线所需）"
+    - `GET /api/profile/peer/:key` 的 `PeerProfileResp` 显式暴露真实 `user_id`（`users.id` UUID，`profile.rs:663-676,706-709`）——客户端开 DM（`chat::open_dm`）需要严格 UUID，仅有 7 位 uid / username 不够。`:key` 可用 uid / username / user_id 任一解析（`profile.rs:692`）。
+    - `GET /api/chat/list` 对 `kind=dm` 的行**在服务端 join 对端成员**补展示名与头像：DM 不存 `title`，`list_chats` 用对端 `nickname`（空则 `username`）作 title、`avatar_path` 拼 `avatar_url`（`chat.rs:1027-1049`），否则客户端无法给 DM 行打标签。
 | POST/GET | /api/media/upload , /api/media/:sha/:name | media::upload / download (`main.rs:122-123`) | session |
 | POST/GET | /api/chat/* (dm, group, list, official, send, history, sync, search, read, react, delete) | chat::* (`main.rs:125-135`) | session |
 | GET/POST | /api/chat/moderation/{member,mute,unmute} | chat::* (`main.rs:136-138`) | session（内部校验群权限） |
@@ -111,7 +115,7 @@ graph TD
 
 ### 4.1 会话载体：签名 cookie
 
-Admin 会话不入库（bootstrap 情形），而是放进签名 cookie `launcher_admin`（`admin.rs:25`），有效期 12 小时（`admin.rs:26`）。cookie 明文格式为 `issued_at:username:user_id:role:sig`（`admin.rs:144-162`），`sig` 是 HMAC-SHA256（`admin.rs:100-118`）。cookie 属性：`Path=/admin; HttpOnly; SameSite=Strict`，仅在有 TLS cert 时加 `Secure`（`admin.rs:252-273`）。
+Admin 会话不入库（bootstrap 情形），而是放进签名 cookie `launcher_admin`（`admin.rs:25`），有效期 12 小时（`admin.rs:26`）。cookie 明文格式为 `issued_at:username:user_id:role:sig`（`admin.rs:144-162`），`sig` 是 HMAC-SHA256（`admin.rs:100-118`）。HMAC 密钥用**独立的 `admin_cookie_secret`**（`state.admin_cookie_secret`，`admin.rs:107,131`），与 `admin_password` 解耦——配置提供 ≥32 字节 hex 则采用，否则启动随机生成（`state.rs:20-62`）。cookie 属性：`Path=/admin; HttpOnly; SameSite=Strict`，仅在有 TLS cert 时加 `Secure`（`admin.rs:252-273`）。
 
 校验链 `admin_session`（`admin.rs:203-246`）：
 
@@ -172,10 +176,12 @@ flowchart TD
     不足时也可用 key 提权到 bootstrap-owner（`:265-266`）。影响：明文 admin 口令一旦以 URL query 形式传输（生产为
     HTTP，见 §1），会落进代理/访问日志、浏览器历史，等同 owner 全权凭据泄露。使用该旁路的端点：`admin_users.rs:107,159,212`、`market.rs:464`、`rebind.rs:153,204`。
 
-!!! danger "cookie 签名密钥 = admin_password（HMAC key 复用）"
-    admin cookie 的 HMAC-SHA256 密钥直接用 `cfg.admin_password` 作为 key（`admin.rs:107-108,131-132`）。同一秘密既是
-    **登录口令**又是**会话签名密钥**又是 **`?key=` 旁路凭据**。三重复用意味着：口令一旦泄露即可离线伪造任意 role 的
-    合法 cookie；且轮换口令会立即使所有现存 cookie 失效。建议独立的会话签名密钥（此处仅记录现状，不改代码）。
+!!! success "已修复：cookie 签名密钥独立化（原 High）"
+    admin cookie 的 HMAC-SHA256 密钥曾直接复用 `cfg.admin_password`。当前已改为**独立的
+    `admin_cookie_secret`**（`state.rs:20-62`；签发/校验 `admin.rs:107,131`）：配置提供 ≥32 字节 hex 则解码采用，
+    否则本次启动用 `OsRng` 随机生成并 `warn`（重启会使已登录 admin 会话失效）。因此泄露 `admin_password` 已
+    **不能**离线伪造合法 cookie，轮换口令也不再连带登出。运维提醒：生产 `config.toml` 应显式配置
+    `admin_cookie_secret`（按名引用，值只在服务器本地），以免重启导致会话失效。
 
 !!! danger "bootstrap-owner 长期后门"
     只要知道 `cfg.admin_password`，无用户名即可登录为 owner（`admin.rs:336-346`），该身份不在 `admin_operators` 表内、
@@ -187,7 +193,14 @@ flowchart TD
 
 ### 已在源码中修复的历史项
 
-- **rebind 过期 token 旁路**：`rebind::submit` 现在校验 `expires_at > now()`（`rebind.rs:46`），MEMORY 中记录的「过期 session token 被 rebind::submit 接受」在当前源码已收敛。（部署状态未在此验证。）
+- **cookie HMAC 密钥独立化（原 High）**：admin cookie 的 HMAC key 由复用 `admin_password` 改为独立
+  `admin_cookie_secret`（`state.rs:20-62`、`admin.rs:107,131`）。详见 §4.1 与上方 success 框。
+- **register UTF-8 panic 守卫**：`register` 前置校验 `hwid_hex` 长度==64 且全 ascii-hex（`auth.rs:58-63`），
+  与 `login`（`auth.rs:270`）对齐，消除非 ASCII 边界切片 panic。
+- **login_attempts 毒锁**：限流锁改 `unwrap_or_else(|e| e.into_inner())`（`auth.rs:276`；admin 侧
+  `admin.rs:89,95`），锁中毒不再 panic。
+- **rebind 过期 token 旁路**：`rebind::submit` 现在校验 `expires_at > now()`（`rebind.rs:46`），「过期 session
+  token 被 rebind::submit 接受」在当前源码已收敛。（部署状态未在此验证。）
 
 ## 6. 错误处理与信息泄露防护
 

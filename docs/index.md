@@ -21,10 +21,12 @@ Launcher 是一个 Windows 桌面游戏启动器，由三个信任域组成：
 - **[架构总览](architecture/index.md)** —— 进程边界、三信任域、组件拓扑的高层视图。
 - **[端到端数据流](architecture/data-flow.md)** —— 启动→登录→订阅→启动游戏的完整流，逐段标注实现状态。
 - **客户端子系统** —— [App 与 UI 层](client/app-ui.md)、[网络/存储/核心](client/net-storage-core.md)、[加密与原生模块](client/crypto-native.md)。
+- **[图片管线（跨端）](client/image-pipeline.md)** —— 客户端异步解码 + 下载池 + 后端缩略图/BlurHash/变体服务三波优化（已部署）。
+- **[桌面通知](client/notifications.md)** —— 顶部动态岛 Toast 的状态机与时间线。
 - **后端子系统** —— [认证/会话/共享加密](backend/auth-session.md)、[API 与管理后台](backend/api-admin.md)。
 - **[Signer / .helix / Proto](data/signer-proto.md)** 与 **[数据模型](data/data-model.md)**。
 - **[安全与信任模型](security/index.md)** —— 信任边界、已知弱点清单，以及 [端到端加密与验证链](security/crypto-chain.md)。
-- **[构建与部署](dev/build-deploy.md)** 与 **[文档流水线](dev/doc-pipeline.md)**。
+- **[构建与部署](dev/build-deploy.md)**、**[视觉冒烟测试](dev/testing-visual-smoke.md)** 与 **[文档流水线](dev/doc-pipeline.md)**。
 
 !!! info "关于旧的 `ARCHITECTURE.md`"
     早期单页 `docs/ARCHITECTURE.md` 已被本文档集的**架构**与**安全与信任模型**两章取代（superseded）。

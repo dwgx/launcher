@@ -274,13 +274,17 @@ fs::write(out_helix, final_bytes)?;
 登录成功签发 cookie `launcher_admin`，值 `issued_at:username:user_id:role:sig`（`admin.rs:144-162`）。签名：
 
 ```rust
-// admin.rs:100-118  HMAC-SHA256, key = admin_password
-let mut mac = HmacSha256::new_from_slice(state.cfg.admin_password.as_bytes())...;
+// admin.rs:100-118  HMAC-SHA256, key = 独立的 admin_cookie_secret（非 admin_password）
+let mut mac = HmacSha256::new_from_slice(state.admin_cookie_secret.as_slice())...;
 mac.update(b"launcher.admin.session.v1:");
 mac.update(issued_at.to_string().as_bytes()); ... username ... user_id ... role
 ```
 
-校验 `verify_admin_cookie_sig` 用 `mac.verify_slice`（常量时间，`admin.rs:120-142`），再查 `issued_at` 新鲜度（≤12h 且不在未来，`admin.rs:183-186`）、非 bootstrap 时回查 `admin_operators` 表确认 `enabled` 与 `user_id` 一致（`admin.rs:216-232`）。域 `launcher.admin.session.v1`。
+HMAC 密钥是**独立的 32 字节 `admin_cookie_secret`**，与 `admin_password` 解耦（`state.rs:20-62`）：配置提供
+≥32 字节 hex 则解码采用，否则启动用 `OsRng` 随机生成（`state.rs:45-63`）。校验 `verify_admin_cookie_sig` 用
+`mac.verify_slice`（常量时间，`admin.rs:120-142`），再查 `issued_at` 新鲜度（≤12h 且不在未来，`admin.rs:183-186`）、
+非 bootstrap 时回查 `admin_operators` 表确认 `enabled` 与 `user_id` 一致（`admin.rs:216-232`）。域
+`launcher.admin.session.v1`。
 
 ### 6.2 bootstrap 登录
 
@@ -290,13 +294,13 @@ mac.update(issued_at.to_string().as_bytes()); ... username ... user_id ... role
 
 API 侧鉴权 `require_actor_or_admin_key`：先试 cookie session，否则 query `key == admin_password` 即授予 bootstrap actor（`admin_customization.rs:255-274`）。用于 `admin_users` 等 JSON API（`admin_users.rs:107-113,159-165,206-215`）。
 
-!!! warning "审计项：cookie HMAC 密钥 = admin_password"
-    admin cookie 的 HMAC key 直接是 `admin_password`（`admin.rs:107,131`）。含义：
-    (a) 任何知道 `admin_password` 者可**离线伪造任意 role 的合法 cookie**（无需登录端点）；
-    (b) 轮换 `admin_password` 会使所有存量 cookie 立即失效（可视作附带的全局登出，但非独立会话密钥）。
-    没有独立的 session 签名密钥，密码与会话完整性密钥耦合。参见 `security-audit-2026-07`。
+!!! success "已修复：cookie HMAC 密钥独立于 admin_password（原审计 High）"
+    admin cookie 的 HMAC key 曾复用 `admin_password`。当前是独立的 `admin_cookie_secret`（`admin.rs:107,131`、
+    `state.rs:20-62`）。因此：(a) 泄露 `admin_password` 已**不能**离线伪造合法 cookie；(b) 会话完整性密钥与登录
+    口令解耦，轮换口令不再连带登出。运维需在生产 `config.toml` 显式配置 `admin_cookie_secret`，否则每次重启随机
+    生成会使已登录 admin 会话失效（`state.rs:59-61` 的 warn）。
 
-!!! warning "审计项：`?key=admin_password` 明文出现在 URL"
+!!! warning "审计项（仍开放）：`?key=admin_password` 明文出现在 URL"
     `require_actor_or_admin_key` 接受 query string 里的 `key`（`admin_customization.rs:265,270`）。URL 参数会进入访问日志、反代日志、浏览器历史、Referer，等于把最高权限口令写进多处明文，且可重放。属已知 bootstrap 后门路径，交叉引用安全审计中的 admin `?key=` bypass 项。
 
 ---
@@ -312,7 +316,7 @@ API 侧鉴权 `require_actor_or_admin_key`：先试 cookie session，否则 quer
 | 内容签名 | Ed25519 + BLAKE3 | `signer/private.key` / `signing_public_key_hex` | `signer/main.rs:99-184` | **客户端验签未实现**；proto 注释不符 |
 | 本地存储 | DPAPI(user) | Windows 用户主密钥 | `dpapi_seal.cpp`, `registry.cpp:98` | AES-GCM 层未实现（注释超前） |
 | 字符串/导入混淆 | 编译期 XOR / 动态解析 | `kCryptStrSeed` | `crypt_str.h`, `dyn_api.cpp` | 轻量，非加密 |
-| Admin 会话 | HMAC-SHA256 | `admin_password`（复用为 HMAC key） | `admin.rs:100-142` | **key=密码**；`?key=` 明文 URL |
+| Admin 会话 | HMAC-SHA256 | 独立 `admin_cookie_secret`（随机/配置） | `admin.rs:100-142`、`state.rs:20-62` | key 已独立化（原「key=密码」已修）；`?key=admin_password` 明文 URL 仍开放 |
 
 !!! danger "信任模型现状总结"
-    设计上「服务器被打穿也伪造不了签名，因为客户端验签」——但**客户端验签当前无代码**（§4.2）。在落地前，`.helix` 内容完整性的实际保障仅停留在 signer 一侧；同时 HWID 门禁不强制（§2.3）、admin 存在 `?key=` 明文引导后门（§6.3）。这些是当前而非假想的缺口，随产品路线 Phase D/E 收敛。
+    设计上「服务器被打穿也伪造不了签名，因为客户端验签」——但**客户端验签当前无代码**（§4.2）。在落地前，`.helix` 内容完整性的实际保障仅停留在 signer 一侧；同时 HWID 门禁不强制（§2.3）、admin 仍存在 `?key=admin_password` 明文引导后门（§6.3）。这些是当前而非假想的缺口，随产品路线 Phase D/E 收敛。（原「cookie HMAC 密钥复用口令」已修——见 §6.1 的 success 框。）

@@ -1,7 +1,8 @@
 # 数据模型（PostgreSQL）
 
-后端数据库由 `SystemBackend/migrations/0001..0018` 顺序演进而来，从 0001 的 7 张表扩展到覆盖身份/会话/订阅/
-邀请/聊天/媒体/表情包/市场/角色/社区/论坛/工单/成长/后台配置的完整模型。`users` 是全库 CASCADE 枢纽。
+后端数据库由 `SystemBackend/migrations/0001..0019` 顺序演进而来，从 0001 的 7 张表扩展到覆盖身份/会话/订阅/
+邀请/聊天/媒体/表情包/市场/角色/社区/论坛/工单/成长/后台配置的完整模型（0019 为媒体缩略图/BlurHash 列）。
+`users` 是全库 CASCADE 枢纽。
 
 ## 约定
 
@@ -55,7 +56,7 @@ erDiagram
 - `chat_dm_index`（`0005:21-27`）：DM 两个 user_id 排序后 unique，`CHECK(user_lo < user_hi)` 防重复。
 - `chat_members`（`0005:30-38`）：PK(chat_id,user_id), `role`(member/admin/owner), `last_read_message_id`, `muted_until`。
 - `messages`（`0005:51-62`）：`id`(BIGSERIAL), `msg_type`(text/image/video/gif/sticker/pack_share/system), `payload`(JSONB), `reply_to_id`(自引用), 软删 `deleted_at`。触发器 `trg_bump_chat`（`0005:138-146`）在插入时更新 `chats.last_message_at`。`0013` 加 `client_msg_id`+`sender_device_id` 做幂等发送（唯一索引 `ux_messages_client_msg`）。
-- `media_files`（`0005:76-88`）：`sha256` 唯一（内容寻址去重）+ 尺寸/时长/相对路径。
+- `media_files`（`0005:76-88`）：`sha256` 唯一（内容寻址去重）+ 尺寸/时长/相对路径。`0019` 追加两列（全 additive，`IF NOT EXISTS`）：`blurhash TEXT`（上传时算的 4×3 BlurHash 串，客户端画模糊占位）、`has_thumbs BOOLEAN NOT NULL DEFAULT FALSE`（是否已生成兄弟缩略图文件）。缩略图是**内容寻址派生**的兄弟文件 `<sha>_s<slot>.jpg|png`（档位 64/128/256/400/512，与原图同目录），读取端 `?s=<px>` 按档返回、缺失回退原图（见 [图片管线 §3](../client/image-pipeline.md)）。旧行 `blurhash=NULL`/`has_thumbs=false`，需一次性 backfill 任务补齐（`0019:13-24` 注释，迁移不自动执行）。
 - 表情包链：`stickers` → `sticker_packs` → `sticker_pack_items`(M:N) → `user_sticker_packs`（安装）。
 - `0013` 还加 `chat_events`(可回放事件流) 与 `user_client_settings`(PK user_id+scope+key, JSONB value)。
 - `0014` 全局审核：`user_mutes`(全局禁言)、`message_mentions`。

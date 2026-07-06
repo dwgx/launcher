@@ -13,6 +13,11 @@
     因此下文「订阅缓存流」与「启动路径」中凡涉及跨模块编排的部分，是**各构件能力 + 契约**，而非已落地调用链，
     均标注 `unverified（未落地）`。端到端视角见 [端到端数据流](../architecture/data-flow.md)。
 
+!!! important "本页描述的是 `src/` 骨架，不是出货客户端"
+    实际联通后端的客户端是 `tools/preview-d2d/`（D2D）。它有**自己**的网络栈（`net.h` WinHTTP + keep-alive 连接
+    复用）与图片下载/解码管线，与本页 `src/net` 的 libcurl 封装是两套实现。跨端图片链路（含 D2D 下载池、后端
+    缩略图/变体服务）见 [图片管线](image-pipeline.md)。
+
 ## 一、net：HTTP 客户端 {#http}
 
 ### 类型与接口

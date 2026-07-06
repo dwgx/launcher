@@ -69,7 +69,7 @@ graph TD
 
 要点：
 
-- 用户名校验 `validate_username`（`auth.rs:33-47`）：长度 3-32、字符集 `[a-zA-Z0-9_.-]`、不能以 `.`/`-` 开头。密码 `>=8`，`hwid_hex` 必须恰好 64 hex 字符（`auth.rs:55-63`）。
+- 用户名校验 `validate_username`（`auth.rs:33-47`）：长度 3-32、字符集 `[a-zA-Z0-9_.-]`、不能以 `.`/`-` 开头。密码 `>=8`。`hwid_hex` **前置校验**必须恰好 64 字符且全为 ascii-hex（`req.hwid_hex.len() != 64 || !...all(is_ascii_hexdigit)`，`auth.rs:58-63`），与 `login`（`auth.rs:270`）对齐——防非 ASCII 边界切片 panic（原 H-2 守卫，见 [安全 · 已修复历史项](../security/index.md)）。
 - **邀请码并发防抢**：设计者在 `auth.rs:164-168` 注释明确指出第 88 行的 `SELECT ... FOR UPDATE` **不起作用**（锁随连接归还即释放），真正的串行化靠 `auth.rs:170-178` 带 `use_count < max_uses AND revoked_at IS NULL AND (expires_at ...)` 条件的原子 `UPDATE`，`rows_affected()==0` 即抢码失败并**补偿删除已建用户行**（`auth.rs:185-192`）。
 - 默认 `nickname = username`（`auth.rs:143`）。UID 为 7 位不前导 0 的数字（`shared/src/uid.rs:6-10`，仅展示，不参与查找），冲突重试上限 5 次。
 - 注册即自动登录，直接铸造 session（无二次 login）。
@@ -97,12 +97,12 @@ graph TD
 限流细节（`auth.rs:269-291`，进程内 `Mutex<HashMap<String, LoginAttemptEntry>>`，`state.rs:7-17`）：
 
 - 键为**明文 username**（未哈希）。滑动窗口 15 分钟、冷却 15 分钟，`count>=5` 触发 `429`，`entry.first_at.elapsed() > window` 时归零重开窗。
-- 反枚举：即使用户不存在，若已有限流 entry 也 `count++`（`auth.rs:303-307`），且统一返回 `401 invalid credentials`。但**未知用户不写 `login_history`**（`user_id` 为 `UUID NOT NULL`，无对应行，`auth.rs:308-309` 注释）。
+- 反枚举（M-2 时序）：未知用户命中时跑一次 `verify_password("x", &s.dummy_password_hash)`（`auth.rs:316-318`），`dummy_password_hash` 在 `AppState::new` 用**与真实密码相同的 argon2 成本参数**启动预算（`state.rs:23,29-34`），使未知用户与已知用户耗时一致，消除用户枚举时序旁路。仍统一返回 `401 invalid credentials`，且**未知用户不写 `login_history`**（`user_id` 为 `UUID NOT NULL`，无对应行，`auth.rs:319-320` 注释）。
 - 登录成功清空该用户限流 entry（`auth.rs:336-338`）。
 
 !!! warning "限流为进程内状态，非持久 / 非集群共享"
-    `login_attempts` 是 `AppState` 内的 `Mutex<HashMap>`（`state.rs:17`），进程重启即清空，且多实例部署下各实例
-    独立计数——横向扩容或频繁重启会削弱暴力破解防护。所有 `.lock().unwrap()`（`auth.rs:271`）在锁中毒时会 panic。
+    `login_attempts` 是 `AppState` 内的 `Mutex<HashMap>`（`state.rs:19`），进程重启即清空，且多实例部署下各实例
+    独立计数——横向扩容或频繁重启会削弱暴力破解防护。锁**已 poison-safe**：`s.login_attempts.lock().unwrap_or_else(|e| e.into_inner())`（`auth.rs:276`）在锁中毒时恢复内部值而非 panic（记忆中「`.lock().unwrap()` 锁中毒会 panic」的旧陈述已过时）。另有 `map.len() > 10_000` 时按 30 分钟窗清理陈旧 entry 防内存膨胀（M-3，`auth.rs:278-280`）。
 
 ## 5. HWID 咨询式绑定（advisory） {#5}
 
@@ -139,12 +139,12 @@ graph TD
 
 - `LoginReq` / `LoginResp`（`auth.rs:245-263`）：`LoginResp` 含 `session_token, expires_at, subscription_tier/expires, user_id, hwid_ok`。
 - `RegisterReq` / `RegisterResp`（`auth.rs:13-31`）：`RegisterReq` 含 `username(永不可改), password, email(可选,未用), hwid_hex, client_ver, invite_code`。
-- `LoginAttemptEntry { count: u32, first_at: Instant }`、`AppState { cfg, db: PgPool, login_attempts: Arc<Mutex<HashMap<String, LoginAttemptEntry>>> }`（`state.rs:7-28`）。
+- `LoginAttemptEntry { count: u32, first_at: Instant }`、`AppState { cfg, db: PgPool, login_attempts: Arc<Mutex<HashMap<String, LoginAttemptEntry>>>, admin_cookie_secret: Arc<[u8;32]>, dummy_password_hash: String }`（`state.rs:9-42`）。后两者分别是与 `admin_password` 解耦的 admin cookie HMAC 密钥、以及 M-2 时序防护用的 dummy argon2 哈希。
 - `users` 关键列：`username_hash`（查找键）、`password_hash`、`hwid_bound`、`uid`、`username`、`nickname`、`password_changed_at`；`sessions(token, user_id, expires_at, created_at)`；`login_history(user_id NOT NULL, success, hwid_short, client_ver, failure_reason)`。完整 schema 见 [数据模型](../data/data-model.md)。
 
 !!! note "其它安全相关行为"
     - `login_history.hwid_short` 只存 `hwid_hex[..16]`（`auth.rs:381,324,228`），非完整指纹。
     - `email` 字段声明但注册流程未使用（`auth.rs:17` 注释「未来用作密保」）。
-    - `admin_password` 存明文 toml（`config.rs:23-24`），与本域交叉：另有「admin cookie HMAC key = admin_password」「admin `?key=` 旁路」的审计发现，属 admin 域，详见 [API 与管理后台 §5](api-admin.md#5)。
+    - `admin_password` 存明文 toml（`config.rs:24`），与本域交叉：admin `?key=` 旁路仍比对它（属 admin 域，详见 [API 与管理后台 §5](api-admin.md#5)）。原「admin cookie HMAC key = admin_password」已修——现用独立 `admin_cookie_secret`（`config.rs:57`、`state.rs:20-62`）。
 
 **未验证项**：`sessions`/`users`/`login_history` 的完整表定义由 SQL 使用点推断，列信息见 [数据模型](../data/data-model.md)；`email` 除声明外无消费点。

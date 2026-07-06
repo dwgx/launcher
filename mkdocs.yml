@@ -82,6 +82,8 @@ nav:
       - App 与 UI 层: client/app-ui.md
       - 网络 / 存储 / 核心: client/net-storage-core.md
       - 加密与原生模块: client/crypto-native.md
+      - 图片管线（跨端）: client/image-pipeline.md
+      - 桌面通知: client/notifications.md
   - 后端:
       - 概览: backend/index.md
       - 认证 / 会话 / 共享加密: backend/auth-session.md
@@ -94,6 +96,7 @@ nav:
       - 加密与验证链: security/crypto-chain.md
   - 开发参考:
       - 构建与部署: dev/build-deploy.md
+      - 视觉冒烟测试: dev/testing-visual-smoke.md
       - 文档流水线: dev/doc-pipeline.md
   - 工作流:
       - Smoke / 审计: AUDIT_WORKFLOW.md
