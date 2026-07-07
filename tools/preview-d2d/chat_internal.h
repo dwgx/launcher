@@ -99,6 +99,7 @@ extern std::vector<std::wstring> g_channel_string_pool;
 
 extern std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 extern std::unordered_map<std::wstring, bool> g_group_collapsed;
+extern std::unordered_map<std::wstring, Tween> g_group_anim;
 extern std::mutex g_streams_mtx;
 
 extern std::unordered_map<int64_t, ReplySnapshot> g_reply_snapshots;
@@ -168,6 +169,8 @@ inline float reactionRowHeight(const Msg& m) {
 }
 
 float clampf(float v, float lo, float hi);
+float groupAnimValue(const std::wstring& name);
+void toggleGroupCollapsed(const std::wstring& name);
 void setPickerOpen(bool open);
 void setPickerTabSmooth(int tab);
 std::wstring localTimeText(time_t tt = time(nullptr));

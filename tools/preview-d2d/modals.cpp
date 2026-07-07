@@ -28,8 +28,6 @@
 
 namespace launcher::d2d::modal {
 
-void dismissTopModal();  // 定义在文件后段;paintDim(匿名命名空间内)经限定名调用。
-
 ChangePwState     g_change_pw;
 ConfirmState      g_confirm;
 CS2State          g_cs2;
@@ -154,11 +152,6 @@ void paintDim(D2DApp& app, float W, float H, float t) {
     const Palette& pal = palette();
     app.ctx()->FillRectangle(D2D1::RectF(0, 0, W, H),
                              app.brushes().solidA(0x000000, 0.40f * t));
-    // 全屏背景遮罩 hit:吞掉落到模态之外的点击,防止穿透触发后面主页面控件;
-    // 点它 = 关闭最上层模态(点外返回)。模态自身的按钮 hit 在此之后注册,
-    // dispatchClick 反向遍历时先命中模态按钮,点模态外才落到这个遮罩上。
-    // dismissTopModal 是 modal 命名空间(非本 anon)的函数,用限定名。
-    hit({ 0, 0, W, H }, [](){ launcher::d2d::modal::dismissTopModal(); }, false);
     (void)pal;
 }
 
@@ -454,7 +447,9 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
 
     // 按钮
     float by = cy + ch - 56;
-    drawGhostBtn(app, cx + 30, by, 130, 38, trW("common.cancel"), t,
+    // cw=380 内容区宽 320:取消 100 + 间隙 20 + Submit 200 = 320,两按钮不再重叠
+    //(旧值取消 130 右缘 cx+160 压到 Submit 左缘 cx+150)。
+    drawGhostBtn(app, cx + 30, by, 100, 38, trW("common.cancel"), t,
                  [](){ closeChangePw(); });
     drawPrimaryBtn(app, cx + cw - 30 - 200, by, 200, 38,
                    g_change_pw.busy ? L"Submitting..." : L"Submit", t,
@@ -2705,10 +2700,12 @@ void paintSearchModal(D2DApp& app, float W, float H) {
                  trW("common.close").c_str(), t, [](){ closeSearch(); });
 }
 
-// 关闭当前最上层的「带背景遮罩」模态(paintDim 遮罩 hit 的回调 = 点模态外返回)。
-// 菜单类(msg/user/chat_more/webview)不走 paintDim,由 onMouseLDown 各自处理,不在此列。
-void dismissTopModal() {
+// 关闭当前打开的浮层(点模态外 = 返回)。一次点击只会有一个打开。
+static void closeOpenOverlay() {
     if (g_search.open) closeSearch();
+    else if (g_msg_menu.open) closeMsgMenu();
+    else if (g_user_menu.open) closeUserMenu();
+    else if (g_chat_more.open) closeChatMoreMenu();
     else if (g_mute_user.open) closeMuteUser();
     else if (g_pack_preview_modal.open) closePackPreview();
     else if (g_edit_bio.open) closeEditBio();
@@ -2728,36 +2725,16 @@ void dismissTopModal() {
 // ============== Event routing ==============
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (!anyOpen()) return false;
-    // Context menu: outside click closes; menu rows are handled by dispatchClick.
-    if (g_msg_menu.open) {
-        bool consumed = dispatchClick(dip);
-        if (!consumed) closeMsgMenu();
-        return true;
-    }
+    // webview modal 特殊:它自己有 HWND 覆盖,点击交给它内部处理,不做 outside-close。
     if (g_webview_modal.open) {
         dispatchClick(dip);
         return true;
     }
-    bool consumed = dispatchClick(dip);
-    if (!consumed) {
-        if (g_search.open) closeSearch();
-        else if (g_user_menu.open) closeUserMenu();
-        else if (g_chat_more.open) closeChatMoreMenu();
-        else if (g_mute_user.open) closeMuteUser();
-        else if (g_pack_preview_modal.open) closePackPreview();
-        else if (g_edit_bio.open) closeEditBio();
-        else if (g_edit_nickname.open) closeEditNickname();
-        else if (g_edit_status.open) closeEditStatusText();
-        else if (g_user_profile.open) closeUserProfile();
-        else if (g_renamepack.open) closeRenamePack();
-        else if (g_createpack.open) closeCreatePack();
-        else if (g_addtag.open) closeAddTag();
-        else if (g_change_pw.open) closeChangePw();
-        else if (g_confirm.open) closeConfirm();
-        else if (g_cs2.open) closeCS2();
-        else if (g_market_detail_modal.open) closeMarketDetail();
-        else if (g_history.open) closeHistory();
-    }
+    // 统一逻辑(所有模态/菜单一致):点击只在「模态层地板」之上的 hit 里匹配。
+    // 命中 = 点了模态自身的按钮/行;未命中 = 点在模态之外 → 关闭当前浮层,
+    // 且绝不穿透到下面 view 的控件(修「点外面关不掉 / 误触发后台 / 只有再点头像才关」)。
+    bool consumed = dispatchClickModalOnly(dip);
+    if (!consumed) closeOpenOverlay();
     return true;
 }
 

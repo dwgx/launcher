@@ -44,6 +44,7 @@ std::vector<std::wstring> g_channel_string_pool;
 
 std::unordered_map<std::wstring, std::vector<Msg>> g_streams;
 std::unordered_map<std::wstring, bool> g_group_collapsed;
+std::unordered_map<std::wstring, Tween> g_group_anim;
 std::mutex g_streams_mtx;
 
 std::unordered_map<int64_t, ReplySnapshot> g_reply_snapshots;
@@ -108,6 +109,26 @@ void setPickerOpen(bool open) {
         g_pack_drag = PackDrag{};
         g_react_target.active = false;   // 关闭 picker 即退出 react 选择模式
     }
+}
+
+// 分组折叠动画进度：0=完全折叠，1=完全展开。
+// 关键：未被点击过的分组在 g_group_anim 里没有条目（started==false），
+// 其值直接由 bool 派生 —— 默认 bool=false → 值=1（完全展开），
+// 保证从未交互的应用（含 visual-smoke 屏 05）逐像素等同于今天的展开布局。
+float groupAnimValue(const std::wstring& name) {
+    auto it = g_group_anim.find(name);
+    if (it != g_group_anim.end() && it->second.started) return it->second.value();
+    return g_group_collapsed[name] ? 0.0f : 1.0f;   // 静止态：由 bool 派生
+}
+
+// 切换分组折叠：翻转 bool 目标态，并从当前可见进度起 tween 到目标（0.22s easeOutCubic）。
+// from=cur 让动画途中再次点击能从当前进度平滑续接，不跳变。
+void toggleGroupCollapsed(const std::wstring& name) {
+    bool now_collapsed = !g_group_collapsed[name];
+    g_group_collapsed[name] = now_collapsed;
+    float cur = groupAnimValue(name);
+    g_group_anim[name].start(cur, now_collapsed ? 0.0f : 1.0f,
+                             0.22f, 0.0f, curve::easeOutCubic);
 }
 
 std::vector<Msg>& streamFor(const std::wstring& slug) {

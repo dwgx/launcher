@@ -394,6 +394,9 @@ const char* tr(const char* key) {
         {"sticker.import_dialog_title","Choose a folder with .png/.jpg/.gif/.webp (bulk import to pack)",
                                                     u8"选择含 .png/.jpg/.gif/.webp 的文件夹（批量导入到表情包）",
                                                                           u8"png/jpg/gif/webp を含むフォルダを選択（スタンプセットへ一括取り込み）"},
+        {"sticker.import_files","Import files",     u8"导入文件",          u8"ファイルを取り込む"},
+        {"sticker.import_files_short","Files",      u8"文件",              u8"ファイル"},
+        {"sticker.import_files_all","All files",    u8"所有文件",          u8"すべてのファイル"},
 
         // === D2D modals / chat hardcoded literals (i18n batch 4) ===
         {"pw.signin_again_hint","Sign in again after password change",

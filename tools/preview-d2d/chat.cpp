@@ -154,6 +154,7 @@ void resetForAccount() {
         std::lock_guard<std::mutex> lk(g_streams_mtx);
         g_streams.clear();
         g_group_collapsed.clear();
+        g_group_anim.clear();
     }
     {
         std::lock_guard<std::mutex> lk(g_reply_snapshots_mtx);
@@ -338,6 +339,7 @@ void tick(float dt) {
     g_popup_t.tick(dt);
     g_top_seg_x.tick(dt); g_top_seg_w.tick(dt);
     g_pack_tab_x.tick(dt); g_pack_tab_w.tick(dt);
+    for (auto& kv : g_group_anim) kv.second.tick(dt);
 }
 
 void appendMedia(const std::wstring& path) {

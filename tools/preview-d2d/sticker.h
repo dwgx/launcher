@@ -114,6 +114,10 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
 // 弹 SHBrowseForFolder + 调 importFromFolder
 void importFromFolderUi(HWND notify, const std::string& pack_id);
 
+// 弹多选文件对话框（PNG/JPEG/GIF/WEBP）+ 逐张 importOneFile 上传/入包
+// 完成后 PostMessage WM_APP+29 (wp = 上传成功数)
+void importFilesUi(HWND notify, const std::string& pack_id);
+
 // 用户名下所有 sticker（含全部自创 pack）总数 — 后端限 50/user
 int totalUserStickers();
 

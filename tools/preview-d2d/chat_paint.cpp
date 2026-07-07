@@ -357,49 +357,69 @@ void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
             prim::fillRR(ctx, ghead.x, ghead.y, ghead.w, ghead.h, 4.0f,
                          br.solidA(pal.text, 0.05f));
         }
-        bool collapsed = g_group_collapsed[gname];
-        prim::drawText_(ctx, collapsed ? L"▸" : L"▾", grp_fmt,
+        // v: 0=完全折叠 1=完全展开。静止态由 bool 派生（默认展开=1），
+        // 只在被点击过的分组才有 tween，保证 smoke 屏 05 逐像素不变。
+        float v = groupAnimValue(group_name);
+        prim::drawText_(ctx, v > 0.5f ? L"▾" : L"▸", grp_fmt,
                         ax + 10, row_y + 4, 12, 14,
                         br.solid(pal.text_muted));
         prim::drawText_(ctx, gname, grp_fmt,
                         ax + 26, row_y + 4, 200, 14,
                         br.solid(pal.text_muted));
         std::wstring gn = group_name;
-        hit(ghead, [gn]() { g_group_collapsed[gn] = !g_group_collapsed[gn]; }, true);
+        hit(ghead, [gn]() { toggleGroupCollapsed(gn); }, true);
         row_y += 24;
 
-        if (collapsed) { row_y += 6; continue; }
-
-        for (auto& c : g_channels) {
-            if (wcscmp(c.group, gname) != 0) continue;
-            bool active = (c.slug == g_active);
-            LayoutRect cr{ ax + 6, row_y, aw - 12, 28 };
-            bool hov = cr.contains(g_mouse);
-            if (active) {
-                prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
-                             br.solidA(pal.primary, 0.14f));
-            } else if (hov) {
-                prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
-                             br.solidA(pal.text, 0.04f));
+        // 子频道带：高度按 v 插值裁剪，下方分组随之平滑滑动。
+        // +6 尾 pad 在两态都恒定（今天展开 +30*n+6 / 折叠 +6），只插值子带。
+        int nchild = 0;
+        for (auto& c : g_channels) if (wcscmp(c.group, gname) == 0) ++nchild;
+        float full_h  = nchild * 30.0f;
+        float drawn_h = full_h * v;
+        if (drawn_h > 0.5f) {
+            ctx->PushAxisAlignedClip(
+                D2D1::RectF(ax, row_y, ax + aw, row_y + drawn_h),
+                D2D1_ANTIALIAS_MODE_ALIASED);
+            // 延迟一点起淡入：v=1 时 a=1（与今天完全一致），先揭示再显影。
+            float a = v <= 0.15f ? 0.0f : (v - 0.15f) / 0.85f;
+            float cy = row_y;
+            for (auto& c : g_channels) {
+                if (wcscmp(c.group, gname) != 0) continue;
+                bool active = (c.slug == g_active);
+                LayoutRect cr{ ax + 6, cy, aw - 12, 28 };
+                bool hov = cr.contains(g_mouse);
+                if (active) {
+                    prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
+                                 br.solidA(pal.primary, 0.14f * a));
+                } else if (hov) {
+                    prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
+                                 br.solidA(pal.text, 0.04f * a));
+                }
+                uint32_t tc = active ? pal.primary : pal.text_muted;
+                prim::drawText_(ctx, L"#", grp_fmt,
+                                cr.x + 12, cr.y + 6, 14, 16,
+                                br.solidA(tc, a));
+                prim::drawText_(ctx, c.name, active ? ch_active : ch_fmt,
+                                cr.x + 26, cr.y + 7, cr.w - 60, 18,
+                                br.solidA(active ? pal.text : pal.text_muted, a));
+                if (c.notice) {
+                    prim::fillCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
+                                     br.solidA(pal.primary, a));
+                    prim::strokeCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
+                                       br.solidA(pal.bg, a), 1.5f);
+                }
+                // 命中门控：仅当展开够（v>0.5）且行中点落在裁剪带内才注册，
+                // 避免半折叠时点到被裁掉一半的行误触。
+                if (v > 0.5f && (cy + 15.0f) < row_y + drawn_h) {
+                    std::wstring tgt = c.slug;
+                    hit(cr, [tgt]() { switchChannel(tgt); }, true);
+                }
+                cy += 30.0f;
             }
-            uint32_t tc = active ? pal.primary : pal.text_muted;
-            prim::drawText_(ctx, L"#", grp_fmt,
-                            cr.x + 12, cr.y + 6, 14, 16,
-                            br.solid(tc));
-            prim::drawText_(ctx, c.name, active ? ch_active : ch_fmt,
-                            cr.x + 26, cr.y + 7, cr.w - 60, 18,
-                            br.solid(active ? pal.text : pal.text_muted));
-            if (c.notice) {
-                prim::fillCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
-                                 br.solid(pal.primary));
-                prim::strokeCircle(ctx, cr.x + cr.w - 18, cr.y + 14, 4.0f,
-                                   br.solid(pal.bg), 1.5f);
-            }
-            std::wstring tgt = c.slug;
-            hit(cr, [tgt]() { switchChannel(tgt); }, true);
-            row_y += 30;
+            ctx->PopAxisAlignedClip();
         }
-        row_y += 6;
+        row_y += drawn_h;   // 下方分组随子带高度平滑滑动
+        row_y += 6;         // 恒定尾 pad，两态一致
     }
 }
 
@@ -1553,15 +1573,28 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     std::wstring imp_lbl = trW("picker.import_short");
     std::wstring exp_lbl = trW("picker.export_short");
     std::wstring new_lbl = trW("picker.new_short");
+    std::wstring files_lbl = trW("sticker.import_files_short");
     auto pbtn_w = [&](const std::wstring& lbl) {
         return (std::max)(48.0f, std::ceil(measureW(app, lbl, hint_fmt)) + 18.0f);
     };
     float bw_new = pbtn_w(new_lbl), bw_imp = pbtn_w(imp_lbl), bw_exp = pbtn_w(exp_lbl);
+    float bw_files = pbtn_w(files_lbl);
     float bgap = 5;
     float right_btn_y = seg_y;
     float bx_new = px + pw - 14 - bw_new;
     float bx_exp = bx_new - bgap - bw_exp;
     float bx_imp = bx_exp - bgap - bw_imp;
+    float bx_files = bx_imp - bgap - bw_files;
+    // [⁝⁝ 导入文件]（多选文件，紧邻文件夹导入左侧）
+    draw_btn(bx_files, right_btn_y, bw_files, 26, files_lbl, pal.text, false, [cur_pid](){
+        if (cur_pid.empty()) {
+            PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
+        } else {
+            auto* payload = new std::string(cur_pid);
+            PostMessageW(GetActiveWindow(), WM_APP + 67,
+                         (WPARAM)payload, 0);
+        }
+    });
     // [↥ 导入]
     draw_btn(bx_imp, right_btn_y, bw_imp, 26, imp_lbl, pal.text, false, [cur_pid](){
         if (cur_pid.empty()) {
@@ -2034,6 +2067,15 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     }, true);
     hit(tab_pk, [](){
         setPickerTabSmooth(g_picker_tab == 0 ? 1 : g_picker_tab);
+    }, true);
+    hit({ bx_files, right_btn_y, bw_files, 26 }, [cur_pid](){
+        if (cur_pid.empty()) {
+            PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
+        } else {
+            auto* payload = new std::string(cur_pid);
+            PostMessageW(GetActiveWindow(), WM_APP + 67,
+                         (WPARAM)payload, 0);
+        }
     }, true);
     hit({ bx_imp, right_btn_y, bw_imp, 26 }, [cur_pid](){
         if (cur_pid.empty()) {

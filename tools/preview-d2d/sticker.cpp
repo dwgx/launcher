@@ -7,10 +7,13 @@
 #include "i18n.h"
 
 #include <ShlObj.h>
+#include <commdlg.h>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 namespace launcher::d2d::sticker {
 
@@ -480,6 +483,43 @@ void installPack(HWND notify, const std::string& short_name) {
     }, a, 0, nullptr);
 }
 
+// 单文件导入管线：上传 media → 创建 sticker → 加进 pack → 写本地缓存 + 记录远端元数据。
+// 成功把 StickerItem 追加到 imported 并返回 true；任何一步失败返回 false（调用方跳过该文件）。
+// 文件夹导入与多选文件导入共用此函数，保证只有一条上传/入包代码路径。
+static bool importOneFile(const std::wstring& path, const std::string& pid,
+                          std::vector<StickerItem>& imported) {
+    // 1. 上传 media。结果保留 media_id/sha256/mime/url，后续 chat payload 不再依赖本地路径。
+    auto media = fetch::uploadMediaFile(path);
+    if (!media.ok) return false;
+
+    // 2. 创建 sticker
+    std::string body = "{\"session_token\":\"" + g_session_token
+                     + "\",\"media_id\":" + std::to_string(media.media_id) + "}";
+    auto sr = net::postJson(L"/api/sticker", body);
+    if (!sr.ok()) return false;
+    // 3. 加到 pack — 后端 create_sticker 不接 pack_id；要再调一次 add_to_pack
+    std::string sticker_id = net::jsonStr(sr.body, "id");
+    if (!sticker_id.empty() && !pid.empty()) {
+        std::string add_body = "{\"session_token\":\"" + g_session_token
+                             + "\",\"pack_id\":\"" + pid
+                             + "\",\"sticker_id\":\"" + sticker_id + "\"}";
+        net::postJson(L"/api/sticker/pack/add", add_body);
+    }
+
+    // 4. 写/复用本地缓存，并保存远端元数据。
+    StickerItem item;
+    item.path = path;
+    item.sticker_id = sticker_id;
+    item.media_id = media.media_id;
+    item.media_url = media.url;
+    item.sha256 = media.sha256;
+    item.mime = media.mime;
+    auto dl = fetch::downloadMediaToCache(media.url, L"stickers");
+    if (dl.ok) item.path = dl.path;
+    imported.push_back(std::move(item));
+    return true;
+}
+
 void importFromFolder(HWND notify, const std::wstring& folder_path,
                       const std::string& pack_id) {
     struct A { std::wstring folder; std::string pid; HWND h; };
@@ -510,36 +550,7 @@ void importFromFolder(HWND notify, const std::wstring& folder_path,
         int success = 0;
         std::vector<StickerItem> imported;
         for (const auto& path : files) {
-            // 1. 上传 media。结果保留 media_id/sha256/mime/url，后续 chat payload 不再依赖本地路径。
-            auto media = fetch::uploadMediaFile(path);
-            if (!media.ok) continue;
-
-            // 2. 创建 sticker
-            std::string body = "{\"session_token\":\"" + g_session_token
-                             + "\",\"media_id\":" + std::to_string(media.media_id) + "}";
-            auto sr = net::postJson(L"/api/sticker", body);
-            if (!sr.ok()) continue;
-            // 3. 加到 pack — 后端 create_sticker 不接 pack_id；要再调一次 add_to_pack
-            std::string sticker_id = net::jsonStr(sr.body, "id");
-            if (!sticker_id.empty() && !a->pid.empty()) {
-                std::string add_body = "{\"session_token\":\"" + g_session_token
-                                     + "\",\"pack_id\":\"" + a->pid
-                                     + "\",\"sticker_id\":\"" + sticker_id + "\"}";
-                net::postJson(L"/api/sticker/pack/add", add_body);
-            }
-
-            // 4. 写/复用本地缓存，并保存远端元数据。
-            StickerItem item;
-            item.path = path;
-            item.sticker_id = sticker_id;
-            item.media_id = media.media_id;
-            item.media_url = media.url;
-            item.sha256 = media.sha256;
-            item.mime = media.mime;
-            auto dl = fetch::downloadMediaToCache(media.url, L"stickers");
-            if (dl.ok) item.path = dl.path;
-            imported.push_back(std::move(item));
-            success++;
+            if (importOneFile(path, a->pid, imported)) success++;
         }
 
         // 加进对应 pack
@@ -574,6 +585,80 @@ void importFromFolderUi(HWND notify, const std::string& pack_id) {
         importFromFolder(notify, path, pack_id);
     }
     CoTaskMemFree(pidl);
+}
+
+// 弹多选文件对话框（PNG/JPEG/GIF/WEBP）→ 逐张走 importOneFile 上传/入包。
+// 与 importFromFolder 共用 g_mtx 入包 + PostMessage(WM_APP+29) 收尾。
+void importFilesUi(HWND notify, const std::string& pack_id) {
+    // 多选缓冲：nMaxFile 以 wchar 计。folder\0file1\0file2\0\0 可能很长，取 64K wchar。
+    static std::vector<wchar_t> fnbuf(64 * 1024);
+    fnbuf[0] = 0;
+
+    // lpstrFilter 必须存活到 GetOpenFileNameW 返回（同步调用，局部 wstring 即可）。
+    std::wstring filter = trW("sticker.import_files");
+    filter.push_back(L'\0');
+    filter += L"*.png;*.jpg;*.jpeg;*.gif;*.webp";
+    filter.push_back(L'\0');
+    filter += trW("sticker.import_files_all");
+    filter.push_back(L'\0');
+    filter += L"*.*";
+    filter.push_back(L'\0');
+    filter.push_back(L'\0');
+
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = notify;
+    ofn.lpstrFilter = filter.c_str();
+    ofn.lpstrFile = fnbuf.data();
+    ofn.nMaxFile = (DWORD)fnbuf.size();
+    ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST
+              | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+
+    // 解析 double-null 结果。
+    //   单选：buf = 完整路径\0，紧跟其后的字符为 \0。
+    //   多选：buf = 目录\0file1\0file2\0...\0\0，逐段拼 目录\file。
+    std::vector<std::wstring> paths;
+    const wchar_t* p = fnbuf.data();
+    std::wstring first = p;                 // 目录（多选）或完整路径（单选）
+    p += first.size() + 1;                  // 跳到下一段
+    if (*p == L'\0') {
+        // 单选：first 本身即完整路径。
+        if (!first.empty()) paths.push_back(first);
+    } else {
+        // 多选：first = 目录，后续每段是文件名。
+        std::wstring dir = first;
+        while (dir.size() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+        while (*p) {
+            std::wstring name = p;
+            paths.push_back(dir + L"\\" + name);
+            p += name.size() + 1;
+        }
+    }
+    if (paths.empty()) return;
+
+    struct A { std::vector<std::wstring> files; std::string pid; HWND h; };
+    auto* a = new A{ std::move(paths), pack_id, notify };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        int success = 0;
+        std::vector<StickerItem> imported;
+        for (const auto& path : a->files) {
+            if (importOneFile(path, a->pid, imported)) success++;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (auto& pk : g_packs) {
+                if (pk.id == a->pid) {
+                    for (auto& item : imported) addItemToPack(pk, std::move(item));
+                    break;
+                }
+            }
+        }
+        auto* payload = new std::string(a->pid);
+        PostMessageW(a->h, WM_APP + 29, (WPARAM)success, (LPARAM)payload);
+        return 0;
+    }, a, 0, nullptr);
 }
 
 int totalUserStickers() {

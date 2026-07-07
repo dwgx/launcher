@@ -237,17 +237,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_MOUSEWHEEL: {
-            if (stages::g_stage == stages::Stage::Main && !modal::anyOpen()) {
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && !modal::anyOpen()) {
+                // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
                 int delta = GET_WHEEL_DELTA_WPARAM(wp);
-                if (stages::g_view == stages::View::Chat) {
-                    // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
-                    chat::onWheel(delta);
-                } else if (stages::g_view == stages::View::Home
-                        || stages::g_view == stages::View::Market
-                        || stages::g_view == stages::View::Settings
-                        || stages::g_view == stages::View::Profile) {
-                    ui::onViewWheel(delta);
-                }
+                chat::onWheel(delta);
             }
             return 0;
         }
@@ -532,6 +527,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 }
                 sticker::importFromFolderUi(hwnd, *pid);
+            }
+            return 0;
+        }
+        case WM_APP + 67: {                    // chat picker → 弹多选文件对话框 + 上传
+            std::unique_ptr<std::string> pid((std::string*)wp);
+            if (pid && !pid->empty()) {
+                int total = sticker::totalUserStickers();
+                if (total >= 50) {
+                    toast::show(trW("toast.over_limit_import"));
+                    return 0;
+                }
+                sticker::importFilesUi(hwnd, *pid);
             }
             return 0;
         }

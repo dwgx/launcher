@@ -28,6 +28,7 @@ namespace launcher::d2d {
 std::vector<HitArea> g_hits;
 POINT g_mouse{ -1, -1 };
 bool  g_mouse_pressed{ false };
+size_t g_modal_hit_floor{ 0 };
 }
 
 namespace launcher::d2d::auth {

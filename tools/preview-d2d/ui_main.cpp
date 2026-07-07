@@ -1354,17 +1354,13 @@ void paintMain(D2DApp& app, float W, float H) {
     float ax = kSidebarW, ay = kTopbarH;
     float aw = W - kSidebarW, ah = H - kTopbarH;
     switch (stages::g_view) {
-        case stages::View::Home:
-            paintScrollableView(app, paintHomeView, stages::View::Home, ax, ay, aw, ah); break;
+        case stages::View::Home:     paintHomeView(app, ax, ay, aw, ah);     break;
         case stages::View::Lunching: paintLunchingView(app, ax, ay, aw, ah); break;
         case stages::View::Chat:     chat::paintChatView(app, ax, ay, aw, ah); break;
-        case stages::View::Market:
-            paintScrollableView(app, paintMarketView, stages::View::Market, ax, ay, aw, ah); break;
+        case stages::View::Market:   paintMarketView(app, ax, ay, aw, ah);   break;
         case stages::View::Cloud:    paintCloudView(app, ax, ay, aw, ah);    break;
-        case stages::View::Settings:
-            paintScrollableView(app, paintSettingsView, stages::View::Settings, ax, ay, aw, ah); break;
-        case stages::View::Profile:
-            paintScrollableView(app, paintProfileView, stages::View::Profile, ax, ay, aw, ah); break;
+        case stages::View::Settings: paintSettingsView(app, ax, ay, aw, ah); break;
+        case stages::View::Profile:  paintProfileView(app, ax, ay, aw, ah);  break;
     }
 
     // 非 Lunching view 时隐藏 CS2 瓦片视频，别让 webview HWND 漏到其他页面。
@@ -1375,6 +1371,11 @@ void paintMain(D2DApp& app, float W, float H) {
     // dropdown 在 view 之上
     paintAccountDropdown(app, W);
     registerDropdownDismissHits(W, H);
+
+    // 记下「模态层地板」:此刻 g_hits 里全是 view/chrome/dropdown 的 hit。
+    // 之后模态 paint 注册的 hit 都在这条线之上;模态打开时点击只在地板之上匹配,
+    // 点模态外命中不到 → 关闭且不穿透触发下面的控件(见 hit.h dispatchClickModalOnly)。
+    g_modal_hit_floor = g_hits.size();
 
     // modals 在最顶层
     modal::paintCS2Modal(app, W, H);
