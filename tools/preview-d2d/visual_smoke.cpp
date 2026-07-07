@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <functional>
 
 namespace launcher::d2d::visual_smoke {
 
@@ -196,12 +197,26 @@ static void resetOverlays() {
     ui::g_account_dropdown = false;
     closeTween(ui::g_dropdown_t);
 
-    modal::g_change_pw.open = false;    closeTween(modal::g_change_pw.t);
-    modal::g_confirm.open = false;      closeTween(modal::g_confirm.t);
-    modal::g_user_profile.open = false; closeTween(modal::g_user_profile.t);
-    modal::g_edit_status.open = false;  closeTween(modal::g_edit_status.t);
-    modal::g_edit_bio.open = false;     closeTween(modal::g_edit_bio.t);
-    modal::g_search.open = false;       closeTween(modal::g_search.t);
+    // 全部 18 个浮层都必须归零 —— 之前只关了一部分,残留的 market_detail/cs2/history
+    // 等会让 anyOpen() 在下一个 case 仍为真,污染 modal::onMouseLDown 判定。交互矩阵
+    // 逐个 case 依赖「干净基底」,故这里穷举所有 .open + 各自 tween。
+    modal::g_change_pw.open = false;          closeTween(modal::g_change_pw.t);
+    modal::g_confirm.open = false;            closeTween(modal::g_confirm.t);
+    modal::g_cs2.open = false;                closeTween(modal::g_cs2.t);
+    modal::g_market_detail_modal.open = false; closeTween(modal::g_market_detail_modal.t);
+    modal::g_history.open = false;            closeTween(modal::g_history.t);
+    modal::g_addtag.open = false;             closeTween(modal::g_addtag.t);
+    modal::g_createpack.open = false;         closeTween(modal::g_createpack.t);
+    modal::g_renamepack.open = false;         closeTween(modal::g_renamepack.t);
+    modal::g_user_profile.open = false;       closeTween(modal::g_user_profile.t);
+    modal::g_user_profile.cur_key.clear();    // 清 dedupe key,避免 I6 case 间互相影响
+    modal::g_edit_status.open = false;        closeTween(modal::g_edit_status.t);
+    modal::g_edit_bio.open = false;           closeTween(modal::g_edit_bio.t);
+    modal::g_edit_nickname.open = false;      closeTween(modal::g_edit_nickname.t);
+    modal::g_mute_user.open = false;          closeTween(modal::g_mute_user.t);
+    modal::g_pack_preview_modal.open = false; closeTween(modal::g_pack_preview_modal.t);
+    modal::g_webview_modal.open = false;      closeTween(modal::g_webview_modal.t);
+    modal::g_search.open = false;             closeTween(modal::g_search.t);
     // 上下文/浮动菜单也归零 —— 统一焦点模型的回归测试依赖 case 间干净基底
     // (菜单在 anyOpen() 内,残留会让 modal::onMouseLDown 误判)。
     modal::g_msg_menu.open = false;     closeTween(modal::g_msg_menu.t);
@@ -407,6 +422,59 @@ static int runInteractionTests(D2DApp& app) {
     check("chat_more.closed_on_outside_click2", !modal::g_chat_more.open);
     check("chat_more.no_leak",
           chat::g_focus_composer == false && chat::g_active == L"general");
+
+    // === 补全:其余 overlay 的「点外关闭」(I1)穷尽覆盖 ===
+    // 用 lambda 统一测:open 后 paintFrame,断言 open;clickReal 点外,断言 closed。
+    auto testOutsideClose = [&](const char* nm, std::function<void()> open,
+                                bool* open_flag) {
+        resetOverlays();
+        stages::g_view = stages::View::Home;
+        open();
+        paintFrame();
+        char b1[96]; _snprintf_s(b1, sizeof b1, _TRUNCATE, "%s.open_after_open", nm);
+        check(b1, *open_flag);
+        clickReal(far_corner);
+        char b2[96]; _snprintf_s(b2, sizeof b2, _TRUNCATE, "%s.closed_on_outside_click", nm);
+        check(b2, !*open_flag);
+    };
+
+    testOutsideClose("history",
+        [](){ modal::g_history.open = true; freezeTween(modal::g_history.t); },
+        &modal::g_history.open);
+    testOutsideClose("addtag",
+        [](){ modal::openAddTag(); freezeTween(modal::g_addtag.t); },
+        &modal::g_addtag.open);
+    testOutsideClose("createpack",
+        [](){ modal::openCreatePack(); freezeTween(modal::g_createpack.t); },
+        &modal::g_createpack.open);
+    testOutsideClose("renamepack",
+        [](){ modal::openRenamePack("pid1", L"MyPack"); freezeTween(modal::g_renamepack.t); },
+        &modal::g_renamepack.open);
+    testOutsideClose("edit_status",
+        [](){ modal::openEditStatusText(); freezeTween(modal::g_edit_status.t); },
+        &modal::g_edit_status.open);
+    testOutsideClose("edit_bio",
+        [](){ modal::g_edit_bio.open = true; freezeTween(modal::g_edit_bio.t); },
+        &modal::g_edit_bio.open);
+    testOutsideClose("edit_nickname",
+        [](){ modal::openEditNickname(); freezeTween(modal::g_edit_nickname.t); },
+        &modal::g_edit_nickname.open);
+    testOutsideClose("market_detail",
+        [](){ modal::openMarketDetail("m1"); freezeTween(modal::g_market_detail_modal.t); },
+        &modal::g_market_detail_modal.open);
+    testOutsideClose("mute_user",
+        [](){ modal::openMuteUser(L"u1", L"someone"); freezeTween(modal::g_mute_user.t); },
+        &modal::g_mute_user.open);
+
+    // confirm 对话框:设计上「点外不关」(必须显式选是/否),验证这个预期行为。
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    modal::openConfirm(L"T", L"Body", nullptr);
+    freezeTween(modal::g_confirm.t);
+    paintFrame();
+    check("confirm.open_after_open", modal::g_confirm.open);
+    clickReal(far_corner);
+    check("confirm.blocks_outside_click_stays_open", modal::g_confirm.open);
 
     resetOverlays();
     if (f) { fprintf(f, "TOTAL_FAILS %d\n", fails); fclose(f); }

@@ -2720,7 +2720,8 @@ static void closeOpenOverlay() {
     else if (g_createpack.open) closeCreatePack();
     else if (g_addtag.open) closeAddTag();
     else if (g_change_pw.open) closeChangePw();
-    else if (g_confirm.open) closeConfirm();
+    // g_confirm 故意不在此:危险操作确认框(删表情包等)点外不关,强制显式
+    // 选「是/否」防误触。取消按钮 + Esc 仍可关(见 paintConfirmModal / onKey)。
     else if (g_cs2.open) closeCS2();
     else if (g_market_detail_modal.open) closeMarketDetail();
     else if (g_history.open) closeHistory();
