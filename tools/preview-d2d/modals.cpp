@@ -1240,6 +1240,10 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    // 卡片区吞噬 hit(空回调):点卡片内空白也算「在模态内」→ dispatchClickModalOnly
+    // 命中它 → 不关闭;只有点卡片矩形外才关。注册在 g_modal_hit_floor 之上、
+    // 卡内具体按钮之前(按钮后注册优先级更高,先命中)。
+    hit({ cx, cy, cw, ch }, [](){}, false);
 
     // 头部主色 banner
     prim::fillRR(ctx, cx, cy, cw, 100, 16.0f, br.solidA(pal.primary, t));

@@ -207,6 +207,93 @@ static void resetOverlays() {
 }
 
 // ----------------------------------------------------------------------------
+//  runInteractionTests() — 程序化交互冒烟。
+//  真实代码路径:先 paint 一帧(注册 hit + 设 g_modal_hit_floor),再模拟点击调
+//  modal::onMouseLDown(pt),然后断言状态。专测反复出问题的「点模态外关闭」逻辑。
+//  结果写到 <outputDir>\interaction-report.txt(主进程读),返回失败数。
+// ----------------------------------------------------------------------------
+static int runInteractionTests(D2DApp& app) {
+    // 结果用最朴素的 ASCII 文件 + OutputDebugString,避免 fopen ccs 编码/缓冲的坑。
+    std::wstring report = outputDir() + L"\\interaction-report.txt";
+    FILE* f = _wfopen(report.c_str(), L"wb");
+    int fails = 0;
+    auto line = [&](const char* s) {
+        OutputDebugStringA(s); OutputDebugStringA("\n");
+        if (f) { fputs(s, f); fputc('\n', f); fflush(f); }
+    };
+    auto check = [&](const char* name, bool ok) {
+        if (!ok) ++fails;
+        char buf[128]; _snprintf_s(buf, sizeof buf, _TRUNCATE, "%s %s", ok ? "PASS" : "FAIL", name);
+        line(buf);
+    };
+    auto trace = [&](const char* where) {
+        char buf[128]; _snprintf_s(buf, sizeof buf, _TRUNCATE, "-- %s", where);
+        line(buf);
+    };
+    trace("ENTER");
+    // paintFrame:跑一帧让当前状态注册 hit + 设 g_modal_hit_floor(paint 是纯函数)。
+    auto paintFrame = [&]() {
+        if (app.beginFrame()) { stages::paint(app); app.endFrame(); }
+    };
+    // 屏幕中心 & 远离任何模态的角落(用于「点模态外」)。1100x720 dip。
+    const POINT center{ 550, 360 };
+    const POINT far_corner{ 30, 700 };   // 左下角,任何居中模态都不覆盖
+
+    // --- 测 1:资料卡点外关闭 ---
+    trace("t1.reset");     resetOverlays();
+    stages::g_view = stages::View::Chat;
+    trace("t1.open");      modal::openUserProfile(L"me");
+    trace("t1.freeze");    freezeTween(modal::g_user_profile.t);
+    trace("t1.paint");     paintFrame();
+    check("user_profile.open_after_open", modal::g_user_profile.open);
+    trace("t1.click");     modal::onMouseLDown(nullptr, far_corner);   // 点卡片外
+    check("user_profile.closed_on_outside_click", !modal::g_user_profile.open);
+
+    // --- 测 2:资料卡点内不关 ---
+    resetOverlays();
+    modal::openUserProfile(L"me");
+    freezeTween(modal::g_user_profile.t);
+    paintFrame();
+    modal::onMouseLDown(nullptr, center);       // 点卡片内(居中区)
+    check("user_profile.stays_open_on_inside_click", modal::g_user_profile.open);
+
+    // --- 测 3:搜索点外关闭 ---
+    resetOverlays();
+    modal::g_search.open = true;
+    freezeTween(modal::g_search.t);
+    paintFrame();
+    check("search.open_after_open", modal::g_search.open);
+    modal::onMouseLDown(nullptr, far_corner);
+    check("search.closed_on_outside_click", !modal::g_search.open);
+
+    // --- 测 4:三个点菜单点外关闭 ---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    modal::openChatMoreMenu(POINT{ 1050, 100 });
+    freezeTween(modal::g_chat_more.t);
+    paintFrame();
+    check("chat_more.open_after_open", modal::g_chat_more.open);
+    modal::onMouseLDown(nullptr, far_corner);
+    check("chat_more.closed_on_outside_click", !modal::g_chat_more.open);
+
+    // --- 测 5:改密码模态点外关闭 ---
+    resetOverlays();
+    modal::g_change_pw.open = true;
+    freezeTween(modal::g_change_pw.t);
+    paintFrame();
+    modal::onMouseLDown(nullptr, far_corner);
+    check("change_pw.closed_on_outside_click", !modal::g_change_pw.open);
+
+    // --- 测 6:无模态时点击不被 onMouseLDown 吞(返回 false,交给下层) ---
+    resetOverlays();
+    paintFrame();
+    check("no_modal.onMouseLDown_returns_false", !modal::onMouseLDown(nullptr, center));
+
+    resetOverlays();
+    if (f) { fprintf(f, "TOTAL_FAILS %d\n", fails); fclose(f); }
+    return fails;
+}
+
 //  run() — 驱动全部 scenario，逐屏截图。见 PLAN-scenario_matrix。
 // ----------------------------------------------------------------------------
 int run(D2DApp& app, HWND hwnd) {
@@ -315,6 +402,10 @@ int run(D2DApp& app, HWND hwnd) {
     chat::g_picker_open = true;
     freezeTween(chat::g_picker_t);
     shot(L"17_overlay_picker.png");
+
+    // ---- 交互冒烟：程序化模拟点击，验证「点模态外关闭 / 点内不关」等逻辑。----
+    // 走真实代码路径(paint 建立 hit + g_modal_hit_floor → modal::onMouseLDown)。
+    failures += runInteractionTests(app);
 
     return failures == 0 ? 0 : 2;
 }
