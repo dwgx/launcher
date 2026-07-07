@@ -1925,6 +1925,13 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                     std::wstring path = cur_pack.stickers[i];
                     bool can_delete = cur_pack.is_owner;
                     auto send_sticker = [path]() {
+                        // React 模式:后端 reactions 仅存 <=16 字符的 emoji 文本
+                        // (chat.rs react),贴纸/GIF 是文件引用无法作为反应存储/广播。
+                        // 不再误把贴纸当成一条频道消息发出——阻止并提示改用 Emoji 标签。
+                        if (g_react_target.active) {
+                            toast::show(trW("toast.react_emoji_only"));
+                            return;
+                        }
                         if (!requireActiveChannelWrite()) return;
                         Msg m;
                         auto sd2 = path.find_last_of(L'.');

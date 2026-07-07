@@ -16,6 +16,7 @@
 #include "modals.h"
 #include "fetch.h"
 #include "user_state.h"
+#include "hit.h"             // dispatchClick — clickReal 复刻真实 WM_LBUTTONDOWN 派发顺序
 
 #include <wrl/client.h>
 #include <wincodec.h>
@@ -201,6 +202,11 @@ static void resetOverlays() {
     modal::g_edit_status.open = false;  closeTween(modal::g_edit_status.t);
     modal::g_edit_bio.open = false;     closeTween(modal::g_edit_bio.t);
     modal::g_search.open = false;       closeTween(modal::g_search.t);
+    // 上下文/浮动菜单也归零 —— 统一焦点模型的回归测试依赖 case 间干净基底
+    // (菜单在 anyOpen() 内,残留会让 modal::onMouseLDown 误判)。
+    modal::g_msg_menu.open = false;     closeTween(modal::g_msg_menu.t);
+    modal::g_user_menu.open = false;    closeTween(modal::g_user_menu.t);
+    modal::g_chat_more.open = false;    closeTween(modal::g_chat_more.t);
 
     chat::g_picker_open = false;
     closeTween(chat::g_picker_t);
@@ -238,6 +244,15 @@ static int runInteractionTests(D2DApp& app) {
     // 屏幕中心 & 远离任何模态的角落(用于「点模态外」)。1100x720 dip。
     const POINT center{ 550, 360 };
     const POINT far_corner{ 30, 700 };   // 左下角,任何居中模态都不覆盖
+
+    // clickReal:复刻 main.cpp:213-220 真实 WM_LBUTTONDOWN 三路派发顺序,让测试走
+    // 真正的泄漏路径(而非旧测试只直呼 modal::onMouseLDown 的模态路径)。picker 只活在
+    // chat 路径下,只有经此才能暴露「点 picker 外泄漏到身后视图」的 bug。
+    auto clickReal = [&](POINT pt) {
+        if (modal::onMouseLDown(nullptr, pt)) return;
+        if (stages::g_view == stages::View::Chat) chat::onMouseLDown(nullptr, pt);
+        else dispatchClick(pt);
+    };
 
     // --- 测 1:资料卡点外关闭 ---
     trace("t1.reset");     resetOverlays();
@@ -288,6 +303,110 @@ static int runInteractionTests(D2DApp& app) {
     resetOverlays();
     paintFrame();
     check("no_modal.onMouseLDown_returns_false", !modal::onMouseLDown(nullptr, center));
+
+    // ========================================================================
+    //  统一焦点模型回归:msg_menu / user_menu / chat_more / picker 的
+    //  「点浮层外关闭 + 不泄漏到身后视图」。旧测试只走 modal 路径且漏了
+    //  msg_menu/user_menu/picker —— 正是这类 bug 得以出厂的原因。这里用
+    //  clickReal(真实三路派发)+ 可观测泄漏探针(g_focus_composer / g_active)。
+    // ========================================================================
+
+    // --- T-picker-1:点 picker 外(输入框)不泄漏出输入框焦点 [修复前 FAIL,修复后 PASS] ---
+    // 这是「先失败后通过」的核心证明:修复前 chat::onMouseLDown 在关闭前先
+    // dispatchClick,命中输入框 -> g_focus_composer=true -> FAIL;修复后点外提前
+    // 吞掉 -> g_focus_composer 保持 false -> PASS。
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::g_active = L"general";
+    chat::g_focus_composer = false;
+    chat::setPickerOpen(true);
+    freezeTween(chat::g_picker_t);
+    paintFrame();
+    {
+        // 输入框中心;picker 浮在输入框上方,其中心应在 picker 矩形之外。
+        POINT composer_center{
+            (LONG)(chat::g_composer.bounds.x + chat::g_composer.bounds.w * 0.5f),
+            (LONG)(chat::g_composer.bounds.y + chat::g_composer.bounds.h * 0.5f) };
+        check("picker.composer_outside_picker",
+              !chat::g_picker_rect.contains(composer_center));
+        clickReal(composer_center);
+        check("picker.no_leak_composer_focus", chat::g_focus_composer == false);
+    }
+
+    // --- T-picker-2:点远角(空白)关闭 picker [两侧都过,固定行为] ---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::setPickerOpen(true);
+    freezeTween(chat::g_picker_t);
+    paintFrame();
+    clickReal(far_corner);
+    check("picker.closed_on_outside_click", !chat::g_picker_open);
+
+    // --- T-picker-3:点频道列(x<240)不泄漏成切频道 [修复前 FAIL,修复后 PASS] ---
+    // seed 第 2 个频道,点频道列内、picker 外的一点,断言 g_active 未翻转。
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::g_active = L"general";
+    {
+        std::lock_guard<std::mutex> lk(chat::g_streams_mtx);
+        auto& r = chat::g_streams[L"random"];
+        if (r.empty()) { chat::Msg m; m.kind = chat::MsgKind::Text; m.body = L"x"; r.push_back(m); }
+    }
+    chat::setPickerOpen(true);
+    freezeTween(chat::g_picker_t);
+    paintFrame();
+    {
+        // 频道列列宽约 240dip;选一点在列内且在 picker 矩形之外。
+        POINT chan_pt{ 120, 300 };
+        if (!chat::g_picker_rect.contains(chan_pt)) {
+            clickReal(chan_pt);
+            check("picker.no_leak_channel_switch", chat::g_active == L"general");
+        } else {
+            check("picker.no_leak_channel_switch (skipped: rect overlap)", true);
+        }
+    }
+
+    // --- T-msg-1/2:右键消息菜单 点外关闭 + 不泄漏 [HEAD 应过,回归守卫] ---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::g_active = L"general";
+    chat::g_focus_composer = false;
+    modal::openMsgContextMenu(POINT{ 550, 300 }, 0);
+    freezeTween(modal::g_msg_menu.t);
+    paintFrame();
+    check("msg_menu.open_after_open", modal::g_msg_menu.open);
+    clickReal(far_corner);
+    check("msg_menu.closed_on_outside_click", !modal::g_msg_menu.open);
+    check("msg_menu.no_leak",
+          chat::g_focus_composer == false && chat::g_active == L"general");
+
+    // --- T-user-1/2:用户上下文菜单 点外关闭 + 不泄漏 [HEAD 应过,回归守卫] ---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::g_active = L"general";
+    chat::g_focus_composer = false;
+    modal::openUserContextMenu(POINT{ 550, 300 }, L"alice", L"alice");
+    freezeTween(modal::g_user_menu.t);
+    paintFrame();
+    check("user_menu.open_after_open", modal::g_user_menu.open);
+    clickReal(far_corner);
+    check("user_menu.closed_on_outside_click", !modal::g_user_menu.open);
+    check("user_menu.no_leak",
+          chat::g_focus_composer == false && chat::g_active == L"general");
+
+    // --- T-more-1:三点菜单 点外不泄漏(扩展测 4:补 no-leak 探针) ---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::g_active = L"general";
+    chat::g_focus_composer = false;
+    modal::openChatMoreMenu(POINT{ 1050, 100 });
+    freezeTween(modal::g_chat_more.t);
+    paintFrame();
+    check("chat_more.open_after_open2", modal::g_chat_more.open);
+    clickReal(far_corner);
+    check("chat_more.closed_on_outside_click2", !modal::g_chat_more.open);
+    check("chat_more.no_leak",
+          chat::g_focus_composer == false && chat::g_active == L"general");
 
     resetOverlays();
     if (f) { fprintf(f, "TOTAL_FAILS %d\n", fails); fclose(f); }

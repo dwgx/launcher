@@ -388,6 +388,15 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     bool picker_was_open = g_picker_open;
     bool clicked_picker = picker_was_open && g_picker_rect.contains(dip);
     bool clicked_emoji_button = g_emoji_button_rect.contains(dip);
+    // 统一焦点模型:picker 是唯一活在模态地板之下的浮层。它打开时,点击其外部
+    // (且不是切换按钮)必须「关闭焦点浮层并吞掉点击」——绝不下发给身后的视图控件
+    // (头像/频道/输入框)。在任何 dispatchClick 之前拦截,消除点击穿透泄漏。
+    if (picker_was_open && !clicked_picker && !clicked_emoji_button) {
+        g_composer_drag.active = false;
+        g_pack_drag = PackDrag{};
+        setPickerOpen(false);
+        return true;   // 关闭焦点浮层 + 吞点击,不泄漏到身后视图
+    }
     bool clicked_composer = g_composer.bounds.contains(dip);
     if (clicked_composer && canWriteActiveChannel()) {
         g_focus_composer = true;
@@ -420,9 +429,9 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (g_composer_drag.active && !g_composer.hasSelection()) {
         g_composer.clearSel();
     }
-    if (picker_was_open && g_picker_open && !clicked_picker && !clicked_emoji_button) {
-        setPickerOpen(false);
-    } else if (g_picker_open && !consumed) {
+    // 注:picker 打开时的「点外关闭」已在函数开头拦截并吞掉;此处只保留
+    // picker 已关状态下的兜底(点空白处未命中任何控件时确保 picker 保持关闭)。
+    if (g_picker_open && !consumed) {
         setPickerOpen(false);
     }
     return consumed;
