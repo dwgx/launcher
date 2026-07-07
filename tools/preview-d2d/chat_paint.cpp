@@ -1495,7 +1495,10 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     auto* ctx = app.ctx();
     auto& br = app.brushes();
 
-    float pw = 330, ph = 340;
+    // 480(原 330):左侧 表情/表情包 标签(右缘 ~px+160)与右侧 4 个按钮
+    //(导入文件/导入/导出/新建,约 247 宽)在窄面板下重叠;480 宽下按钮组左缘
+    // 约 px+219,离标签 px+160 有 ~59px 余量。
+    float pw = 480, ph = 340;
     float px = anchor_x;
     float py = anchor_y - ph - 8 + (1.0f - t) * 14.0f;
     g_picker_origin_x = px; g_picker_origin_y = py;
