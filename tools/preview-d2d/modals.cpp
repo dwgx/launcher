@@ -2054,8 +2054,9 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
     g_msg_menu.menu_rect = { mx, my, mw, mh };
 
     // Register a full-screen catchall hit; item hits consume clicks first.
-    // Clicking outside the menu closes it.
-    hit({ 0, 0, W, H }, [](){ closeMsgMenu(); }, false);
+    // 统一焦点:不再注册全屏 backdrop hit。菜单打开时 onMouseLDown 走
+    // dispatchClickModalOnly:命中行=交互,未命中=closeOpenOverlay 关闭。
+    // 全屏 backdrop 依赖"菜单已画过一帧才注册",真实交互中时序易错位 → 移除。
 
     prim::drawShadow(ctx, br, mx, my, mw, mh, 10.0f, pal.shadow_card_hover, t, 4.0f, 3);
     prim::fillRR(ctx, mx, my, mw, mh, 10.0f, br.solidA(pal.card, t));
@@ -2151,7 +2152,7 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
     if (my < 8) my = 8;
     g_user_menu.menu_rect = { mx, my, mw, mh };
 
-    hit({ 0, 0, W, H }, [](){ closeUserMenu(); }, false);
+    // 统一焦点:不注册全屏 backdrop(见 paintMsgContextMenu 同处说明)。
 
     prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);
@@ -2283,7 +2284,7 @@ void paintChatMoreMenu(D2DApp& app, float W, float H) {
     if (my < 8) my = 8;
     g_chat_more.menu_rect = { mx, my, mw, mh };
 
-    hit({ 0, 0, W, H }, [](){ closeChatMoreMenu(); }, false);
+    // 统一焦点:不注册全屏 backdrop(见 paintMsgContextMenu 同处说明)。
 
     prim::fillRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 8, br.solidA(pal.divider, t), 1.0f);

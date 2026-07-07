@@ -36,6 +36,16 @@ extern bool  g_mouse_pressed;
 // 点模态外 = 命中不到任何模态 hit → 关闭,且绝不穿透触发下面 view 的控件。
 extern size_t g_modal_hit_floor;
 
+// 统一浮层几何(重构:确定性关闭,不依赖 backdrop hit / floor / paint 时序)。
+// 每个 overlay 在 paint 自己的卡片/菜单矩形时调 markOverlayRect() 记下;每帧 paint
+// 开头由 clearOverlayRects() 清零。onMouseLDown 直接用 pointInAnyOverlay() 判定:
+// 点击落在任一 overlay 矩形内=交给其按钮;落在全部矩形外=关闭最顶层浮层并吞掉点击。
+// 这样"点外面关闭"只取决于矩形几何,与 hit 注册顺序/floor/是否先画过一帧无关。
+struct LayoutRect;
+void clearOverlayRects();
+void markOverlayRect(float x, float y, float w, float h);
+bool pointInAnyOverlay(POINT p);
+
 inline void hitClear() { g_hits.clear(); }
 
 inline void hit(LayoutRect r, std::function<void()> cb, bool button = false) {

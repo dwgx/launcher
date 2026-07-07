@@ -29,6 +29,17 @@ std::vector<HitArea> g_hits;
 POINT g_mouse{ -1, -1 };
 bool  g_mouse_pressed{ false };
 size_t g_modal_hit_floor{ 0 };
+
+// 统一浮层几何(见 hit.h)。每帧 paintMain 开头 clear,各 overlay paint 时 mark。
+static std::vector<LayoutRect> g_overlay_rects;
+void clearOverlayRects() { g_overlay_rects.clear(); }
+void markOverlayRect(float x, float y, float w, float h) {
+    g_overlay_rects.push_back(LayoutRect{ x, y, w, h });
+}
+bool pointInAnyOverlay(POINT p) {
+    for (auto& r : g_overlay_rects) if (r.contains(p)) return true;
+    return false;
+}
 }
 
 namespace launcher::d2d::auth {

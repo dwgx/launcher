@@ -260,21 +260,16 @@ static int runInteractionTests(D2DApp& app) {
     const POINT center{ 550, 360 };
     const POINT far_corner{ 30, 700 };   // 左下角,任何居中模态都不覆盖
 
-    // clickReal:复刻真实 WM_LBUTTONDOWN 全链路,**含 WM_NCHITTEST 门**——
-    // 这是之前测试假过的根因:旧测试直呼 onMouseLDown 跳过了 NCHITTEST,而真实点击
-    // 若 NCHITTEST 返回 HTCAPTION 就被 Windows 当拖拽、根本不派发。这里先模拟
-    // main.cpp 的 NCHITTEST 逻辑:overlay 开时整客户区 HTCLIENT(必派发);否则按
-    // hoverInteractive。HTCAPTION ⇒ 点击不派发(return,等同真实行为)。
-    auto ncHitClient = [&](POINT pt) -> bool {
-        if (modal::anyOpen() || chat::g_picker_open || ui::g_account_dropdown) return true;
-        return hoverInteractive(pt, app.widthDip(), app.heightDip());
-    };
+    // clickReal:复刻 main.cpp:213-220 真实 WM_LBUTTONDOWN 三路派发顺序,让测试走
+    // 真正的泄漏路径(而非旧测试只直呼 modal::onMouseLDown 的模态路径)。picker 只活在
+    // chat 路径下,只有经此才能暴露「点 picker 外泄漏到身后视图」的 bug。
     auto clickReal = [&](POINT pt) {
-        g_mouse = pt;                       // 真实路径先设 g_mouse(main.cpp:211)
-        if (!ncHitClient(pt)) return;       // NCHITTEST=HTCAPTION → 不派发(拖拽)
-        if (modal::onMouseLDown(nullptr, pt)) return;
+        g_mouse = pt;   // 关键:真实 WM_LBUTTONDOWN 先设 g_mouse,测试之前漏了 → 行为偏差
+        g_mouse_pressed = true;
+        if (modal::onMouseLDown(nullptr, pt)) { g_mouse_pressed = false; return; }
         if (stages::g_view == stages::View::Chat) chat::onMouseLDown(nullptr, pt);
         else dispatchClick(pt);
+        g_mouse_pressed = false;
     };
 
     // --- 测 1:资料卡点外关闭 ---
