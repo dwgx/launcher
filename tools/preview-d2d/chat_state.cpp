@@ -24,7 +24,7 @@ std::vector<Channel> g_channels = {
     { L"trades",        L"trades",        L"SHOP",      false, "", 1 },
 };
 std::wstring g_active = L"general";
-InputBox     g_composer;
+MultilineEdit g_composer;
 bool         g_focus_composer = false;
 PendingReply g_pending_reply;
 std::vector<PendingMention> g_pending_mentions;

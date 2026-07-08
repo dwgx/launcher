@@ -6,6 +6,7 @@
 
 #include "d2d_app.h"
 #include "inputbox.h"
+#include "textedit.h"
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -32,7 +33,7 @@ struct Channel {
 
 extern std::vector<Channel> g_channels;
 extern std::wstring g_active;        // 当前频道 slug
-extern InputBox     g_composer;
+extern MultilineEdit g_composer;
 extern bool         g_focus_composer;
 
 struct PendingReply {

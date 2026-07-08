@@ -96,6 +96,19 @@ int cursorFromComposerPoint(float x) {
     return best;
 }
 
+// 多行 composer 高度:按逻辑行数(\n 分隔)自动增高。
+// 单行 64;每多一行 +kComposerLineH;封顶 kComposerMaxLines 行后内部滚动。
+static constexpr float kComposerLineH   = 20.0f;   // 每行文字带高
+static constexpr float kComposerBaseH   = 64.0f;   // 1 行时的整条高度(含上下 padding)
+static constexpr int   kComposerMaxLines = 6;      // 封顶行数
+float composerHeight() {
+    int lines = g_composer.logicalLineCount();
+    if (lines < 1) lines = 1;
+    if (lines > kComposerMaxLines) lines = kComposerMaxLines;
+    float extra = (float)(lines - 1) * kComposerLineH;
+    return kComposerBaseH + extra;
+}
+
 struct WrappedText;  // 定义见 chat_internal.h
 
 float dwriteMaxLineWidth(D2DApp& app, const std::wstring& text,
@@ -1073,7 +1086,13 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
 
     const float ico_sz = 30.0f;
     float ix = ax + 14.0f;
-    float iy = ay + reply_h + ((ah - reply_h) - ico_sz) * 0.5f;
+    // emoji 按钮:单行时居中;多行时贴底(与增高的文本区/发送键同底对齐)。
+    int _nlines = g_composer.logicalLineCount();
+    if (_nlines < 1) _nlines = 1;
+    if (_nlines > kComposerMaxLines) _nlines = kComposerMaxLines;
+    float _fh_pre = ico_sz + (float)(_nlines - 1) * kComposerLineH;
+    float _fy_pre = ay + reply_h + ((ah - reply_h) - _fh_pre) * 0.5f;
+    float iy = _fy_pre + _fh_pre - ico_sz;   // 贴文本区底
     LayoutRect emoji_btn{ ix, iy, ico_sz, ico_sz };
     bool ehov = emoji_btn.contains(g_mouse);
     if (ehov) {
@@ -1089,72 +1108,106 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         setPickerOpen(!g_picker_open);
     }, true);
 
-    // textarea
+    // textarea(多行:硬换行 \n 分行,输入框随行数增高)
     float fx = ix + ico_sz + 10.0f;
     float send_w = 38.0f;
     float fw = aw - (fx - ax) - 14.0f - send_w - 10.0f;
-    float fh = ico_sz;
-    float fy = iy;
+    // 按逻辑行数算文本区高度;单行时与原 ico_sz 一致(圆角胶囊),多行时变圆角矩形。
+    int   n_lines = g_composer.logicalLineCount();
+    if (n_lines < 1) n_lines = 1;
+    if (n_lines > kComposerMaxLines) n_lines = kComposerMaxLines;
+    float fh = ico_sz + (float)(n_lines - 1) * kComposerLineH;
+    float fy = ay + reply_h + ((ah - reply_h) - fh) * 0.5f;
+    float radius = (n_lines <= 1) ? fh * 0.5f : 14.0f;   // 单行胶囊,多行圆角矩形
     g_composer.bounds = { fx, fy, fw, fh };
 
-    prim::fillRR(ctx, fx, fy, fw, fh, fh * 0.5f, br.solid(pal.card));
+    prim::fillRR(ctx, fx, fy, fw, fh, radius, br.solid(pal.card));
     auto* border = (g_focus_composer && writable) ? br.solid(pal.primary) : br.solid(pal.divider);
-    prim::strokeRR(ctx, fx, fy, fw, fh, fh * 0.5f, border,
+    prim::strokeRR(ctx, fx, fy, fw, fh, radius, border,
                    (g_focus_composer && writable) ? 1.4f : 1.0f);
     if (g_focus_composer && writable) {
-        prim::strokeRR(ctx, fx - 2, fy - 2, fw + 4, fh + 4, fh * 0.5f + 2,
+        prim::strokeRR(ctx, fx - 2, fy - 2, fw + 4, fh + 4, radius + 2,
                        br.solidA(pal.primary, 0.10f), 3.0f);
     }
 
     auto* tx_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
     const float pad_l = 16.0f;
-    const float text_y = fy + (fh - 14.0f) * 0.5f;
     const float text_w = fw - pad_l * 2;
-    float caret_w = g_composer.text.empty()
-        ? 0.0f
-        : caretMeasureW(app, g_composer.displaySlice(0, g_composer.cursor), tx_fmt);
-    float text_scroll_x = (std::max)(0.0f, caret_w - text_w + 6.0f);
-    g_composer_caret_xs.clear();
-    g_composer_caret_xs.reserve(g_composer.text.size() + 1);
-    for (int i = 0; i <= (int)g_composer.text.size(); ++i) {
-        g_composer_caret_xs.push_back(
-            fx + pad_l + caretMeasureW(app, g_composer.displaySlice(0, i), tx_fmt) - text_scroll_x);
-    }
 
     if (g_composer.text.empty()) {
+        const float text_y = fy + (fh - 14.0f) * 0.5f;
         prim::drawText_(ctx, writable ? trW("chat.composer_placeholder") : activeWriteBlockedMessage(), tx_fmt,
                         fx + pad_l, text_y, text_w, 18,
                         br.solid(pal.text_muted));
+        g_composer_caret_xs.clear();
+        g_composer_caret_xs.push_back(fx + pad_l);   // 空文本:光标在行首
     } else {
+        // 拆逻辑行(\n),每行一个显示行。总行数可能超过可视 kComposerMaxLines → 垂直滚动
+        // 让光标所在行可见(简单策略:显示以光标行为基准的窗口)。
+        std::vector<std::pair<int,int>> lines;   // 每行 [start,end) 字符偏移
+        {
+            int s = 0;
+            const std::wstring& t = g_composer.text;
+            for (int i = 0; i <= (int)t.size(); ++i) {
+                if (i == (int)t.size() || t[i] == L'\n') { lines.push_back({s, i}); s = i + 1; }
+            }
+        }
+        int total_lines = (int)lines.size();
+        // 光标所在行
+        int caret_line = 0;
+        for (int i = 0; i < total_lines; ++i)
+            if (g_composer.cursor >= lines[i].first && g_composer.cursor <= lines[i].second) { caret_line = i; break; }
+        // 垂直滚动:让 caret_line 落在可视 kComposerMaxLines 窗口内
+        int first_vis = 0;
+        if (total_lines > kComposerMaxLines) {
+            first_vis = caret_line - (kComposerMaxLines - 1);
+            if (first_vis < 0) first_vis = 0;
+            if (first_vis > total_lines - kComposerMaxLines) first_vis = total_lines - kComposerMaxLines;
+        }
+        int last_vis = (std::min)(total_lines, first_vis + kComposerMaxLines);
+
         ctx->PushAxisAlignedClip(D2D1::RectF(fx + pad_l, fy + 4,
                                              fx + pad_l + text_w, fy + fh - 4),
                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        // 选区
-        if (g_focus_composer && writable && g_composer.hasSelection()) {
-            float pre_w = caretMeasureW(app,
-                g_composer.displaySlice(0, g_composer.selStart()), tx_fmt);
-            float in_w = caretMeasureW(app,
-                g_composer.displaySlice(g_composer.selStart(), g_composer.selEnd()), tx_fmt);
-            prim::fillRect(ctx,
-                           fx + pad_l + pre_w - text_scroll_x, text_y - 1, in_w, 18,
-                           br.solidA(pal.primary, 0.38f));
+        // 重建 caret x 映射(整串偏移 -> 屏幕坐标),仅可视行内有效;不可见行给个远点。
+        g_composer_caret_xs.assign(g_composer.text.size() + 1, -1e9f);
+        int sel_s = g_composer.selStart(), sel_e = g_composer.selEnd();
+        bool has_sel = g_focus_composer && writable && g_composer.hasSelection();
+        for (int li = first_vis; li < last_vis; ++li) {
+            int ls = lines[li].first, le = lines[li].second;
+            float line_y = fy + 8.0f + (float)(li - first_vis) * kComposerLineH;
+            std::wstring line = g_composer.text.substr(ls, le - ls);
+            // 选区高亮(本行与 [sel_s,sel_e) 的交集)
+            if (has_sel) {
+                int a = (std::max)(sel_s, ls), b = (std::min)(sel_e, le);
+                if (a < b) {
+                    float pre = caretMeasureW(app, g_composer.text.substr(ls, a - ls), tx_fmt);
+                    float in  = caretMeasureW(app, g_composer.text.substr(a, b - a), tx_fmt);
+                    prim::fillRect(ctx, fx + pad_l + pre, line_y - 1, in, 18,
+                                   br.solidA(pal.primary, 0.38f));
+                }
+            }
+            prim::drawText_(ctx, line, tx_fmt, fx + pad_l, line_y, text_w + 200.0f, 18,
+                            br.solid(pal.text));
+            // 本行每个字符偏移的 caret x
+            for (int off = ls; off <= le; ++off) {
+                g_composer_caret_xs[off] =
+                    fx + pad_l + caretMeasureW(app, g_composer.text.substr(ls, off - ls), tx_fmt);
+            }
         }
-        prim::drawText_(ctx, g_composer.text, tx_fmt,
-                        fx + pad_l - text_scroll_x, text_y,
-                        (std::max)(text_w, caretMeasureW(app, g_composer.text, tx_fmt) + 4.0f), 18,
-                        br.solid(pal.text));
         ctx->PopAxisAlignedClip();
-    }
 
-    // caret
-    if (g_focus_composer && writable && !g_composer.hasSelection()) {
-        float pre_w = caret_w - text_scroll_x;
-        int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
-        if (phase < 500) {
-            prim::drawLine(ctx,
-                           fx + pad_l + pre_w, fy + 7,
-                           fx + pad_l + pre_w, fy + fh - 7,
-                           br.solid(pal.primary), 1.5f);
+        // caret(竖线)——在光标所在可视行
+        if (g_focus_composer && writable && !g_composer.hasSelection()
+            && caret_line >= first_vis && caret_line < last_vis) {
+            int ls = lines[caret_line].first;
+            float cx = fx + pad_l + caretMeasureW(app,
+                g_composer.text.substr(ls, g_composer.cursor - ls), tx_fmt);
+            float cy = fy + 8.0f + (float)(caret_line - first_vis) * kComposerLineH;
+            int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
+            if (phase < 500) {
+                prim::drawLine(ctx, cx, cy - 1, cx, cy + 16, br.solid(pal.primary), 1.5f);
+            }
         }
     }
 
@@ -1163,9 +1216,10 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         g_focus_composer = true;
     }, true);
 
-    // send btn
+    // send btn(贴文本区底部对齐,多行增高时按钮不动)
     float sx = ax + aw - 14 - send_w;
-    float sy = iy + (fh - send_w) * 0.5f;
+    float sy = fy + fh - send_w - 0.0f;
+    if (sy < fy) sy = fy;
     bool can_send = writable && !g_composer.text.empty();
     LayoutRect send_btn{ sx, sy, send_w, send_w };
     bool sh_ = send_btn.contains(g_mouse);
@@ -1253,7 +1307,7 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
 
     // stream
-    float comp_h = 64;
+    float comp_h = composerHeight();
     float stream_y = ay + hdr_h;
     float stream_h = ah - hdr_h - comp_h;
     g_chat_stream_rect = { ax, stream_y, aw, stream_h };
@@ -2158,7 +2212,7 @@ void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {
     paintChatPane(app, ax + lw + 1, ay, aw - lw - 1, ah);
 
     // picker 在 composer 上面浮起
-    float comp_h = 64;
+    float comp_h = composerHeight();
     paintPicker(app, ax + lw + 1 + 14, ay + ah - comp_h);
 }
 

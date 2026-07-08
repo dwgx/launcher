@@ -508,7 +508,15 @@ void onChar(HWND hwnd, wchar_t c, bool ctrl) {
         g_focus_composer = false;
         return;
     }
-    g_composer.onChar(c, ctrl, hwnd);
+    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    int r = g_composer.onChar(c, ctrl, shift, hwnd);
+    if (r == 2) {   // Enter(无 Shift)-> 发送
+        if (!g_composer.text.empty()) {
+            if (sendTextMessage(hwnd, g_composer.text)) {
+                g_composer.reset();
+            }
+        }
+    }
 }
 
 void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
@@ -517,16 +525,10 @@ void onKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         g_focus_composer = false;
         return;
     }
-    if (vk == VK_RETURN) {
-        if (!g_composer.text.empty()) {
-            if (sendTextMessage(hwnd, g_composer.text)) {
-                g_composer.text.clear();
-                g_composer.cursor = 0;
-                g_composer.clearSel();
-            }
-        }
-        return;
-    }
+    // Ctrl+Shift+Z -> 重做(WM_CHAR 收不到,这里处理)
+    if (ctrl && shift && (vk == 'Z')) { g_composer.redo(); return; }
+    // Enter 的发送 / Shift+Enter 换行统一在 onChar(WM_CHAR)处理,避免 KEYDOWN+CHAR 双触发。
+    if (vk == VK_RETURN) return;
     if (vk == VK_ESCAPE) { g_focus_composer = false; return; }
     g_composer.onKey(vk, shift, ctrl);
 }
