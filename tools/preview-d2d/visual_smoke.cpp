@@ -17,6 +17,7 @@
 #include "fetch.h"
 #include "user_state.h"
 #include "hit.h"             // dispatchClick — clickReal 复刻真实 WM_LBUTTONDOWN 派发顺序
+#include "overlay.h"         // g_overlays — 统一浮层栈(派发单一真源)
 
 #include <wrl/client.h>
 #include <wincodec.h>
@@ -225,12 +226,16 @@ static void resetOverlays() {
 
     chat::g_picker_open = false;
     closeTween(chat::g_picker_t);
+
+    // 浮层栈也清零 —— 派发已全走 g_overlays。虽然每个 case 都会 paintFrame() 重建栈,
+    // 但"无浮层→点击应返回 false"这类 case 若不先 paint 会读到上一 case 的残留栈。
+    g_overlays.clear();
 }
 
 // ----------------------------------------------------------------------------
 //  runInteractionTests() — 程序化交互冒烟。
-//  真实代码路径:先 paint 一帧(注册 hit + 设 g_modal_hit_floor),再模拟点击调
-//  modal::onMouseLDown(pt),然后断言状态。专测反复出问题的「点模态外关闭」逻辑。
+//  真实代码路径:先 paint 一帧(注册 hit + 重建浮层栈 g_overlays),再模拟点击调
+//  modal::onMouseLDown(pt)/clickReal(pt),然后断言状态。专测反复出问题的浮层交互。
 //  结果写到 <outputDir>\interaction-report.txt(主进程读),返回失败数。
 // ----------------------------------------------------------------------------
 static int runInteractionTests(D2DApp& app) {
@@ -252,7 +257,7 @@ static int runInteractionTests(D2DApp& app) {
         line(buf);
     };
     trace("ENTER");
-    // paintFrame:跑一帧让当前状态注册 hit + 设 g_modal_hit_floor(paint 是纯函数)。
+    // paintFrame:跑一帧让当前状态注册 hit + 重建浮层栈 g_overlays(paint 是纯函数)。
     auto paintFrame = [&]() {
         if (app.beginFrame()) { stages::paint(app); app.endFrame(); }
     };
@@ -479,6 +484,212 @@ static int runInteractionTests(D2DApp& app) {
     clickReal(far_corner);
     check("confirm.blocks_outside_click_stays_open", modal::g_confirm.open);
 
+    // ================= 重构新增覆盖(统一浮层栈 OverlayStack) =================
+    // escReal / rdownReal:复刻 WndProc 的 ESC 与右键真实派发(都走 g_overlays)。
+    auto escReal   = [&](){ return g_overlays.onEsc(); };
+    auto rdownReal = [&](POINT p){ return modal::onMouseRDown(nullptr, p); };
+
+    // --- N1: ESC 关最顶层浮层(此前 modal::onKey 分支;现走统一栈)---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    modal::openUserProfile(L"me");
+    freezeTween(modal::g_user_profile.t);
+    paintFrame();
+    check("esc.closes_modal", (escReal(), !modal::g_user_profile.open));
+
+    // --- N2: Confirm 点外不关,但 ESC 能关(取消语义)---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    modal::openConfirm(L"T", L"Body", nullptr);
+    freezeTween(modal::g_confirm.t);
+    paintFrame();
+    check("esc.closes_confirm", (escReal(), !modal::g_confirm.open));
+
+    // --- N3: 账号下拉点外关闭(GAP2 —— 此前靠全窗背景吞击,现入栈统一判定)---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    ui::g_account_dropdown = true;
+    freezeTween(ui::g_dropdown_t);
+    paintFrame();
+    check("dropdown.open_after_open", ui::g_account_dropdown);
+    clickReal(center);   // 中心远离右上角下拉卡片
+    check("dropdown.closed_on_outside_click", !ui::g_account_dropdown);
+
+    // --- N4: 账号下拉 ESC 关闭 ---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    ui::g_account_dropdown = true;
+    freezeTween(ui::g_dropdown_t);
+    paintFrame();
+    check("dropdown.closed_on_esc", (escReal(), !ui::g_account_dropdown));
+
+    // --- N4b: 模态打开时 dim 背景禁止拖窗(修 C4 —— WM_NCHITTEST 之前把 dim 上
+    // 的按拖判成 HTCAPTION 拖走整窗,导致点外关闭静默失效)。pointBlocksDrag 应对
+    // 阻塞浮层的整窗(含 dim)返回 true → WndProc 返回 HTCLIENT 而非 HTCAPTION。---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    modal::openMarketDetail("m1");
+    freezeTween(modal::g_market_detail_modal.t);
+    paintFrame();
+    check("modal.dim_blocks_window_drag", g_overlays.pointBlocksDrag(far_corner));
+    // 无浮层时空白处应可拖窗(pointBlocksDrag=false)。
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    paintFrame();
+    check("no_overlay.bg_draggable", !g_overlays.pointBlocksDrag(far_corner));
+
+    // --- N5: 模态点"内"不关(inside-click 生效面 —— 此前仅 user_profile 覆盖)---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    modal::openMarketDetail("m1");
+    freezeTween(modal::g_market_detail_modal.t);
+    paintFrame();
+    clickReal(center);   // 居中模态,center 落在卡片内
+    check("market_detail.stays_open_on_inside_click", modal::g_market_detail_modal.open);
+
+    // --- N6: picker 点"内"不关(defer 回 chat,修 C7 pack 拖拽路径的前提)---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    chat::setPickerOpen(true);
+    freezeTween(chat::g_picker_t);
+    paintFrame();
+    {
+        // picker 卡片中心(g_picker_rect 在 paint 时设定)。
+        POINT pin{ (LONG)(chat::g_picker_rect.x + chat::g_picker_rect.w * 0.5f),
+                   (LONG)(chat::g_picker_rect.y + chat::g_picker_rect.h * 0.5f) };
+        clickReal(pin);
+        check("picker.stays_open_on_inside_click", chat::g_picker_open);
+    }
+
+    // --- N7: 右键菜单点"外"关闭(onMouseRDown 走统一栈,此前无覆盖)---
+    resetOverlays();
+    stages::g_view = stages::View::Chat;
+    modal::openChatMoreMenu(POINT{ 1050, 100 });
+    freezeTween(modal::g_chat_more.t);
+    paintFrame();
+    check("chat_more.open_for_rdown", modal::g_chat_more.open);
+    rdownReal(far_corner);
+    check("chat_more.closed_on_outside_rdown", !modal::g_chat_more.open);
+
+    // --- N8: 无浮层时点击不消费(栈空 → onLDown 返回 false,交给下层 view)---
+    resetOverlays();
+    stages::g_view = stages::View::Home;
+    paintFrame();
+    check("no_overlay.ldown_returns_false", !modal::onMouseLDown(nullptr, center));
+
+    // ============== 贴近实机:真实右键路径复现(Bug A + Bug B) ==============
+    // 现有 msg_menu 测试直呼 openMsgContextMenu()+clickReal,绕过了真实右键命中检测
+    // (chat::onMouseRDown 遍历 g_msg_row_hits/g_msg_hits)与真实坐标。这里 seed
+    // text/image/sticker 三类消息,paint 填充命中表,再走真实 chat::onMouseRDown
+    // 在每条消息实际矩形上右键,断言菜单开;然后点菜单外断言关。
+    {
+        // seed 三类消息到 general
+        {
+            std::lock_guard<std::mutex> lk(chat::g_streams_mtx);
+            auto& msgs = chat::g_streams[L"general"];
+            msgs.clear();
+            auto mk = [&](chat::MsgKind k, const std::wstring& body, int64_t sid){
+                chat::Msg m; m.kind = k; m.from = L"peer"; m.author = L"alice";
+                m.author_key = L"alice"; m.peer_key = L"alice"; m.body = body;
+                m.time = L"12:00"; m.send_state = chat::MsgSendState::Sent;
+                m.server_id = sid; msgs.push_back(m);
+            };
+            mk(chat::MsgKind::Text,    L"plain text message", 1001);
+            mk(chat::MsgKind::Image,   L"C:/nonexistent/img.png", 1002);
+            mk(chat::MsgKind::Sticker, L"C:/nonexistent/sticker.png", 1003);
+        }
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        chat::g_focus_composer = false;
+        paintFrame();   // 填充 g_msg_row_hits(每条可见消息一行)
+
+        // 快照命中表(idx -> 行矩形中心),再逐类右键
+        auto rowCenterForIdx = [&](int idx, POINT* out)->bool {
+            for (auto& h : chat::g_msg_row_hits) {
+                if (h.idx == idx) {
+                    out->x = (LONG)(h.rect.x + h.rect.w * 0.5f);
+                    out->y = (LONG)(h.rect.y + h.rect.h * 0.5f);
+                    return true;
+                }
+            }
+            return false;
+        };
+        const char* kindName[3] = { "text", "image", "sticker" };
+        for (int idx = 0; idx < 3; ++idx) {
+            resetOverlays();
+            stages::g_view = stages::View::Chat;
+            chat::g_active = L"general";
+            paintFrame();
+            POINT rc{};
+            bool has_row = rowCenterForIdx(idx, &rc);
+            char bh[96]; _snprintf_s(bh, sizeof bh, _TRUNCATE,
+                "rmenu.%s.has_row_hit", kindName[idx]);
+            check(bh, has_row);   // Bug A:每类消息都应有行命中矩形
+            if (!has_row) continue;
+            // 真实右键路径:先 modal 栈(无浮层→false),再 chat::onMouseRDown
+            bool handled = chat::onMouseRDown(nullptr, rc);
+            freezeTween(modal::g_msg_menu.t);
+            char bo[96]; _snprintf_s(bo, sizeof bo, _TRUNCATE,
+                "rmenu.%s.opens_on_rclick", kindName[idx]);
+            check(bo, handled && modal::g_msg_menu.open);   // Bug A:菜单应弹出
+            paintFrame();   // 让菜单注册进 g_overlays
+            // 点菜单外(远角)→ 应关闭
+            clickReal(far_corner);
+            char bc[96]; _snprintf_s(bc, sizeof bc, _TRUNCATE,
+                "rmenu.%s.closes_on_outside", kindName[idx]);
+            check(bc, !modal::g_msg_menu.open);   // Bug B:点外应关
+        }
+    }
+
+    // ===== NCHITTEST 根因回归(真正的 bug 源:菜单外/消息行被判 HTCAPTION 吞点击)=====
+    // Bug B 真因:菜单(无 dim)打开时,菜单外的点被 NCHITTEST 判成 HTCAPTION →
+    // Windows 进入拖窗、不发 WM_LBUTTONDOWN → onLDown 收不到 → 点外关不掉。
+    // 修复:任一 dismiss_on_outside 浮层打开时,pointBlocksDrag 对整窗返回 true。
+    {
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        modal::openChatMoreMenu(POINT{ 1050, 100 });
+        freezeTween(modal::g_chat_more.t);
+        paintFrame();
+        // 菜单外的远角:必须 blocksDrag=true(否则拖窗吞点击,菜单关不掉)
+        check("nchit.menu_open_blocks_drag_outside", g_overlays.pointBlocksDrag(far_corner));
+        // 菜单内的点:也应 blocksDrag=true
+        check("nchit.menu_open_blocks_drag_inside", g_overlays.pointBlocksDrag(POINT{ 960, 130 }));
+    }
+    {
+        // 无浮层时空白仍可拖窗(不能因为修复把整窗永久锁死)
+        resetOverlays();
+        stages::g_view = stages::View::Home;
+        paintFrame();
+        check("nchit.no_overlay_bg_draggable", !g_overlays.pointBlocksDrag(far_corner));
+    }
+    // Bug A 真因:纯文本消息行只进 g_msg_row_hits、不进 g_hits → hoverInteractive 判
+    // HTCAPTION → 右键落拖窗、收不到 WM_RBUTTONDOWN。修复:chat 消息流区域 = HTCLIENT。
+    {
+        {
+            std::lock_guard<std::mutex> lk(chat::g_streams_mtx);
+            auto& msgs = chat::g_streams[L"general"];
+            msgs.clear();
+            chat::Msg m; m.kind = chat::MsgKind::Text; m.from = L"peer";
+            m.author = L"alice"; m.author_key = L"alice"; m.peer_key = L"alice";
+            m.body = L"plain text"; m.time = L"12:00";
+            m.send_state = chat::MsgSendState::Sent; m.server_id = 2001;
+            msgs.push_back(m);
+        }
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        paintFrame();
+        // 消息流区域内一点必须判为 stream(→ NCHITTEST HTCLIENT → 右键可达)
+        POINT sp{ (LONG)(chat::g_chat_stream_rect.x + chat::g_chat_stream_rect.w * 0.5f),
+                  (LONG)(chat::g_chat_stream_rect.y + chat::g_chat_stream_rect.h * 0.5f) };
+        check("nchit.chat_stream_is_client", chat::pointInStream(sp));
+        // 顶栏区域(y<48)不应算 stream(留给拖窗)
+        check("nchit.topbar_not_stream", !chat::pointInStream(POINT{ 550, 20 }));
+    }
+
     resetOverlays();
     if (f) { fprintf(f, "TOTAL_FAILS %d\n", fails); fclose(f); }
     return fails;
@@ -594,7 +805,7 @@ int run(D2DApp& app, HWND hwnd) {
     shot(L"17_overlay_picker.png");
 
     // ---- 交互冒烟：程序化模拟点击，验证「点模态外关闭 / 点内不关」等逻辑。----
-    // 走真实代码路径(paint 建立 hit + g_modal_hit_floor → modal::onMouseLDown)。
+    // 走真实代码路径(paint 建立 hit + 重建浮层栈 g_overlays → modal::onMouseLDown)。
     failures += runInteractionTests(app);
 
     return failures == 0 ? 0 : 2;
