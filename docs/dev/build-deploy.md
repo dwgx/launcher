@@ -55,16 +55,21 @@ cargo build --release -p launcher-api    # 产出 bin: systembackend
 cargo build --release -p signer         # 离线签名 CLI
 ```
 
-!!! note "sqlx 编译期校验与 .sqlx 缓存"
-    sqlx `query!` 宏在编译期连库校验 SQL。离线构建靠提交的 `.sqlx` 缓存；缓存陈旧会导致编译失败或校验偏差。
-    部分守卫（如 B2 owner-only）刻意用运行时 `query_scalar` 避开离线缓存依赖（`admin_users.rs:67-68`）。
-    如何重建缓存 / SSH 隧道连生产 Postgres 的步骤见记忆 `backend-build-and-db-access`（本机 gitignore 文档）。
+!!! warning "sqlx 编译期校验与 .sqlx 缓存(接手必读)"
+    sqlx `query!` 宏在编译期连库校验 SQL。**`.sqlx/` 缓存目录被 gitignore、不入库**(见 `.gitignore`),
+    因此**干净 clone 后无法离线构建后端** —— 必须二选一:
+    (a) 设 `DATABASE_URL` 指向一个有完整 schema 的 Postgres(本地起库跑 migration,或 SSH 隧道连生产库),
+    在线校验构建;或 (b) 先在有库的环境跑 `cargo sqlx prepare` 生成 `.sqlx/`,再 `SQLX_OFFLINE=true cargo build`。
+    生产部署走 (a):在服务器 `build_src/SystemBackend` 下带真实 `DATABASE_URL` 构建(见下方部署流程)。
+    部分守卫(如 B2 owner-only)刻意用运行时 `query_scalar` 避开离线缓存依赖(`admin_users.rs:67-68`)。
+    重建缓存 / SSH 隧道连生产 Postgres 的具体步骤见记忆 `backend-build-and-db-access`(本机 gitignore 文档)。
 
 ### 迁移
 
-数据库迁移在 `SystemBackend/migrations/0001..0019`，服务启动时自动跑（`crates/api/src/main.rs:46-47`）。最新
-`0019_media_thumbs.sql` 给 `media_files` 加 `blurhash`/`has_thumbs` 两列，全 additive + `IF NOT EXISTS`，对现网
-旧行无破坏、可幂等重复登记（迁移不含 backfill，见 [图片管线 §3.4](../client/image-pipeline.md)）。schema 详见
+数据库迁移在 `SystemBackend/migrations/0001..0020`,服务启动时自动跑(`crates/api/src/main.rs:46-47`)。
+`0019_media_thumbs.sql` 给 `media_files` 加 `blurhash`/`has_thumbs`,`0020_recall_reaction_media.sql` 加消息撤回
+(`messages.recalled_at`)与反应媒体列(`message_reactions.sticker_ref`)。迁移均 additive + `IF NOT EXISTS`,对现网
+旧行无破坏、可幂等重复登记。schema 详见
 [数据模型](../data/data-model.md)。
 
 ### 配置
