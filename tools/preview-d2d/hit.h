@@ -31,16 +31,9 @@ extern std::vector<HitArea> g_hits;
 extern POINT g_mouse;
 extern bool  g_mouse_pressed;
 
-// 「模态层地板」——在所有 view/chrome 的 hit 注册完、模态 paint 之前记下 g_hits.size()。
-// 模态/浮层打开时,点击只应命中这条线之后注册的 hit(模态自己的按钮),
-// 点模态外 = 命中不到任何模态 hit → 关闭,且绝不穿透触发下面 view 的控件。
-extern size_t g_modal_hit_floor;
-
-// 统一浮层几何(重构:确定性关闭,不依赖 backdrop hit / floor / paint 时序)。
-// 每个 overlay 在 paint 自己的卡片/菜单矩形时调 markOverlayRect() 记下;每帧 paint
-// 开头由 clearOverlayRects() 清零。onMouseLDown 直接用 pointInAnyOverlay() 判定:
-// 点击落在任一 overlay 矩形内=交给其按钮;落在全部矩形外=关闭最顶层浮层并吞掉点击。
-// 这样"点外面关闭"只取决于矩形几何,与 hit 注册顺序/floor/是否先画过一帧无关。
+// 统一浮层几何(旧机制,过渡期保留:markOverlayRect/pointInAnyOverlay 仍被少量
+// 代码填充,但派发已全部走 overlay.h 的 OverlayStack)。
+// TODO(cleanup): markOverlayRect / g_overlay_rects 可随后续清理移除,派发已不依赖它。
 struct LayoutRect;
 void clearOverlayRects();
 void markOverlayRect(float x, float y, float w, float h);
@@ -69,18 +62,6 @@ inline bool dispatchClick(POINT p) {
     return false;
 }
 
-// 只在「模态层地板」之后注册的 hit 里找命中(即只考虑模态/浮层自己的 hit,
-// 不碰下面 view 的控件)。模态打开时用它:命中=点了模态内按钮;未命中=点了模态外。
-inline bool dispatchClickModalOnly(POINT p) {
-    if (g_modal_hit_floor > g_hits.size()) return false;
-    for (size_t i = g_hits.size(); i-- > g_modal_hit_floor; ) {
-        if (g_hits[i].rect.contains(p)) {
-            if (g_hits[i].click) g_hits[i].click();
-            return true;
-        }
-    }
-    return false;
-}
 
 inline bool anyHover(POINT p) {
     for (auto& h : g_hits) if (h.rect.contains(p)) return true;

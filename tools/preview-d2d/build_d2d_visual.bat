@@ -40,7 +40,7 @@ if defined LAUNCHER_DEFAULT_PORT set "HOST_DEF=%HOST_DEF% /DLAUNCHER_DEFAULT_POR
 
 cl /nologo /std:c++17 /EHsc /O2 /utf-8 /DUNICODE /D_UNICODE /DLAUNCHER_VISUAL_SMOKE %HOST_DEF% ^
    /I. /I..\..\third_party\webview2\build\native\include ^
-   d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp ^
+   d2d_app.cpp stages.cpp auth.cpp icons.cpp ui_main.cpp user_state.cpp overlay.cpp ^
    chat.cpp chat_state.cpp chat_announcements.cpp chat_identity.cpp chat_net.cpp chat_paint.cpp modals.cpp persist.cpp toast.cpp i18n.cpp fetch.cpp ws_user.cpp ^
    tray.cpp sticker.cpp webview.cpp render\decode_worker.cpp download_pool.cpp visual_smoke.cpp main.cpp /link ^
    /SUBSYSTEM:WINDOWS /OUT:LauncherD2D.exe

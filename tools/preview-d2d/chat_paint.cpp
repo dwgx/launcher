@@ -6,6 +6,7 @@
 // chat.cpp。所有 render helper 与状态声明见 chat_internal.h。
 #include "chat.h"
 #include "chat_internal.h"
+#include "overlay.h"
 #include "icons.h"
 #include "palette.h"
 #include "user_state.h"
@@ -246,13 +247,25 @@ void paintAnnouncementModal(D2DApp& app, float W, float H) {
     const Palette& pal = palette();
     auto* ctx = app.ctx();
     auto& br = app.brushes();
-    hit({ 0, 0, W, H }, [](){}, false);
     prim::fillRect(ctx, 0, 0, W, H, br.solidA(0x000000, 0.42f * t));
 
     float mw = (std::min)(420.0f, W - 48.0f);
     float mh = 260.0f;
     float mx = (W - mw) * 0.5f;
     float my = (H - mh) * 0.5f + (1.0f - t) * 12.0f;
+    // 浮层栈:公告弹窗是 Popup(dim + 吞滚轮)。修 GAP1——此前它缺席整个统一系统:
+    // ESC 不关反而最小化托盘、滚轮穿透、其他 modal 能叠上来。dismiss_on_outside=false
+    // 保留原语义(点外吞掉但不关,须用「知道了/查看」按钮);但 ESC 现在能关(onEsc)。
+    // 取代原来的全窗 hit({0,0,W,H}) 背景吞击。
+    launcher::d2d::g_overlays.add(launcher::d2d::OV_ANNOUNCEMENT,
+        launcher::d2d::OverlayKind::Popup, { mx, my, mw, mh },
+        [](){
+            std::string id = g_popup_announcement.id;
+            g_popup_open = false;
+            g_popup_t.start(g_popup_t.value(), 0.0f, 0.14f, 0, curve::easeOutCubic);
+            markAnnouncementsReadLocal(true, id);
+        },
+        /*dismiss_on_outside*/false, /*blocks_wheel*/true, /*blocks_drag_bg*/true);
     prim::drawShadow(ctx, br, mx, my, mw, mh, 12.0f, pal.shadow_card_hover, 0.75f * t, 6.0f, 5);
     prim::fillRR(ctx, mx, my, mw, mh, 12.0f, br.solidA(pal.card, t));
     prim::strokeRR(ctx, mx, my, mw, mh, 12.0f,
@@ -1517,6 +1530,22 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     float py = anchor_y - ph - 8 + (1.0f - t) * 14.0f;
     g_picker_origin_x = px; g_picker_origin_y = py;
     g_picker_rect = { px, py, pw, ph };
+    markOverlayRect(px, py, pw, ph);   // 统一 overlay 几何
+    // 浮层栈:picker 是 Popover。关键(修 C5)——把表情切换按钮并入"内部"矩形,
+    // 这样点它时走 dispatchClick 命中按钮自身 hit(toggle 关闭),而非被点外逻辑吞掉。
+    // 不吞滚轮:chat::onWheel 自己分流(picker 打开时滚 emoji grid)。
+    {
+        LayoutRect eb = g_emoji_button_rect;
+        float ux = (std::min)(px, eb.x), uy = (std::min)(py, eb.y);
+        float uxr = (std::max)(px + pw, eb.x + eb.w), uyb = (std::max)(py + ph, eb.y + eb.h);
+        // 注意:并集矩形仅用于"点内交给按钮 hit"判定;不影响绘制。
+        launcher::d2d::g_overlays.add(launcher::d2d::OV_PICKER,
+            launcher::d2d::OverlayKind::Popover, { ux, uy, uxr - ux, uyb - uy },
+            [](){ launcher::d2d::chat::setPickerOpen(false); },
+            /*dismiss_on_outside*/true, /*blocks_wheel*/false,
+            /*blocks_drag_bg*/false, /*owns_child_hwnd*/false,
+            /*defer_inside_to_caller*/true);
+    }
     g_picker_content_rect = { px + 14, py + 50, pw - 28, ph - 62 };
     hit(g_picker_rect, [](){}, false);
 

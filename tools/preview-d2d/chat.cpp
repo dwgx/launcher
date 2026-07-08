@@ -384,19 +384,12 @@ void appendMedia(const std::wstring& path) {
 }
 
 // ============== 事件 ==============
+// picker 的"点外关闭"已由统一浮层栈(g_overlays)接管;本函数只在栈把 picker 内部
+// 点击 defer 回来时、或 picker 未开时被 WndProc 调用。职责纯化为:composer 聚焦/
+// 选区拖拽起点、pack tab 拖拽起点、以及一般 view 控件的 dispatchClick。
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
-    bool picker_was_open = g_picker_open;
-    bool clicked_picker = picker_was_open && g_picker_rect.contains(dip);
+    bool clicked_picker = g_picker_open && g_picker_rect.contains(dip);
     bool clicked_emoji_button = g_emoji_button_rect.contains(dip);
-    // 统一焦点模型:picker 是唯一活在模态地板之下的浮层。它打开时,点击其外部
-    // (且不是切换按钮)必须「关闭焦点浮层并吞掉点击」——绝不下发给身后的视图控件
-    // (头像/频道/输入框)。在任何 dispatchClick 之前拦截,消除点击穿透泄漏。
-    if (picker_was_open && !clicked_picker && !clicked_emoji_button) {
-        g_composer_drag.active = false;
-        g_pack_drag = PackDrag{};
-        setPickerOpen(false);
-        return true;   // 关闭焦点浮层 + 吞点击,不泄漏到身后视图
-    }
     bool clicked_composer = g_composer.bounds.contains(dip);
     if (clicked_composer && canWriteActiveChannel()) {
         g_focus_composer = true;
@@ -429,11 +422,6 @@ bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
     if (g_composer_drag.active && !g_composer.hasSelection()) {
         g_composer.clearSel();
     }
-    // 注:picker 打开时的「点外关闭」已在函数开头拦截并吞掉;此处只保留
-    // picker 已关状态下的兜底(点空白处未命中任何控件时确保 picker 保持关闭)。
-    if (g_picker_open && !consumed) {
-        setPickerOpen(false);
-    }
     return consumed;
 }
 
@@ -445,6 +433,10 @@ bool onMouseMove(HWND /*hwnd*/, POINT dip) {
     }
     g_composer.cursor = cursorFromComposerPoint((float)dip.x);
     return true;
+}
+
+bool pointInStream(POINT dip) {
+    return g_chat_stream_rect.contains(dip);
 }
 
 bool onMouseRDown(HWND hwnd, POINT dip) {

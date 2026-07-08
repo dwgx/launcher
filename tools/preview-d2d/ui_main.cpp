@@ -4,6 +4,7 @@
 // 视觉骨架对齐 GDI+ Preview。Chat 和 Modals 在独立文件。
 
 #include "ui_main.h"
+#include "overlay.h"
 #include "hwid.h"
 #include "icons.h"
 #include "palette.h"
@@ -499,10 +500,11 @@ void registerDropdownDismissHits(float W, float H) {
         g_dropdown_t.start(g_dropdown_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
         g_status_fold_t.start(g_status_fold_t.value(), 0.0f, 0.15f, 0, curve::easeOutCubic);
     };
-    hit(LayoutRect{ 0, 0, dx, kTopbarH }, dismiss, true);
-    hit(LayoutRect{ 0, kTopbarH, dx, H - kTopbarH }, dismiss, true);
-    hit(LayoutRect{ dx + dw, kTopbarH, W - (dx + dw), H - kTopbarH }, dismiss, true);
-    hit(LayoutRect{ dx, dy + dh, dw, H - (dy + dh) }, dismiss, true);
+    // 浮层栈:下拉是 Dropdown(无 dim、不吞滚轮、点外关)。取代旧的 4 个全窗背景吞击
+    // 矩形(GAP2)——点外关闭现在只取决于卡片矩形几何,与 hit 注册顺序无关。
+    g_overlays.add(OV_DROPDOWN, OverlayKind::Dropdown, { dx, dy, dw, dh },
+                   dismiss, /*dismiss_on_outside*/true, /*blocks_wheel*/false,
+                   /*blocks_drag_bg*/false);
 }
 
 // ============================== Views ==============================
@@ -1345,6 +1347,8 @@ void tickMain(float dt) {
 
 void paintMain(D2DApp& app, float W, float H) {
     hitClear();
+    clearOverlayRects();   // 统一 overlay 几何:每帧清零,各 overlay paint 时 markOverlayRect
+    g_overlays.clear();    // 浮层栈每帧重建(paint 顺序 = z-order),各 overlay paint 时 add
     const Palette& pal = palette();
     app.ctx()->Clear(argbToColorF(pal.bg));
 
@@ -1371,11 +1375,6 @@ void paintMain(D2DApp& app, float W, float H) {
     // dropdown 在 view 之上
     paintAccountDropdown(app, W);
     registerDropdownDismissHits(W, H);
-
-    // 记下「模态层地板」:此刻 g_hits 里全是 view/chrome/dropdown 的 hit。
-    // 之后模态 paint 注册的 hit 都在这条线之上;模态打开时点击只在地板之上匹配,
-    // 点模态外命中不到 → 关闭且不穿透触发下面的控件(见 hit.h dispatchClickModalOnly)。
-    g_modal_hit_floor = g_hits.size();
 
     // modals 在最顶层
     modal::paintCS2Modal(app, W, H);

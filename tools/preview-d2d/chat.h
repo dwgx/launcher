@@ -56,6 +56,7 @@ void addMentionToComposer(const std::wstring& user_id, const std::wstring& label
 // Emoji / sticker picker
 extern bool  g_picker_open;
 extern Tween g_picker_t;
+void setPickerOpen(bool open);   // 公开:统一 overlay 派发(modals.cpp)关闭 picker 用
 extern int   g_picker_tab;     // 0 = emoji, 1+ = sticker pack idx (1+ = 索引到 sticker::g_packs[idx-1])
 
 // 顶部 tab 滑块动画（[表情] [表情包] pill）
@@ -164,6 +165,9 @@ bool onMouseMove(HWND hwnd, POINT dip);
 bool onMouseLUp(HWND hwnd, POINT dip);
 // 右键命中消息 → 弹消息菜单；命中头像 → 看主页
 bool onMouseRDown(HWND hwnd, POINT dip);
+// 点是否落在消息流区域(NCHITTEST 用:流区应为 HTCLIENT,否则纯文本消息行
+// 会被判成 HTCAPTION 拖窗 → 右键收不到 WM_RBUTTONDOWN → 菜单弹不出)。
+bool pointInStream(POINT dip);
 // 滚轮：delta = WHEEL_DELTA 的倍数（120 = 一格）
 void onWheel(int delta);
 void onChar(HWND hwnd, wchar_t c, bool ctrl);

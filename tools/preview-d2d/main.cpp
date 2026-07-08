@@ -18,6 +18,7 @@
 #include "palette.h"
 #include "auth.h"
 #include "hit.h"
+#include "overlay.h"
 #include "ui_main.h"
 #include "chat.h"
 #include "modals.h"
@@ -189,6 +190,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd, &pt);
             POINT dip = physToDip(pt);
+            // 修 C4:有阻塞浮层(modal/popup)打开时,其 dim 背景整片不可拖窗——否则在
+            // dim 上按住拖动会被判成 HTCAPTION 拖走整窗,导致"点外关闭"静默失效。
+            // 浮层栈统一判定:落在禁止拖窗的浮层(卡片 or 其 dim)→ HTCLIENT。
+            if (g_overlays.pointBlocksDrag(dip)) return HTCLIENT;
+            // Bug A 修复:chat 消息流区域必须是 HTCLIENT,否则纯文本消息行(只进
+            // g_msg_row_hits、不进 g_hits)会被 hoverInteractive 判成 HTCAPTION →
+            // 右键落到拖窗、收不到 WM_RBUTTONDOWN → 右键菜单弹不出。图片/表情包/
+            // 链接气泡本就注册了 g_hits 故"能弹",纯文本不能——这就是"触发不全"的真因。
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && launcher::d2d::chat::pointInStream(dip)) {
+                return HTCLIENT;
+            }
             // 统一判定(所有视图一致,含 chat):悬停在真实交互区(气泡/频道/
             // 输入框/按钮等局部 hit)时让给客户区,空白处可拖动整窗。
             // hoverInteractive 会忽略整窗遮罩 hit,避免 chat 里整片拖不动
@@ -213,8 +227,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (modal::onMouseLDown(hwnd, g_mouse)) return 0;
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat) {
-                // chat 自己的 onMouseLDown 处理 picker dismiss / pack drag /
-                // composer 焦点 — 别只走 dispatchClick 否则这些都不生效
+                // 浮层栈已接管 picker 点外关闭;chat::onMouseLDown 处理 composer 焦点/
+                // pack tab 拖拽起点/一般 view 控件(picker 内部点击由栈 defer 回这里)。
                 chat::onMouseLDown(hwnd, g_mouse);
             } else if (inAuthOrMain()) {
                 dispatchClick(g_mouse);
@@ -239,8 +253,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL: {
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat
-                && !modal::anyOpen()) {
-                // picker 打开时滚 emoji grid，关闭时滚 chat 流 — chat::onWheel 自己分流
+                && !g_overlays.blocksWheel()) {
+                // 浮层栈统一 gate:阻塞浮层(modal/popup)打开时吞滚轮(修 C6/GAP1 穿透);
+                // picker 是 Popover 且 blocks_wheel=false,所以它打开时滚轮仍到达
+                // chat::onWheel —— 后者自己分流(picker 打开滚 emoji grid,否则滚 chat 流)。
                 int delta = GET_WHEEL_DELTA_WPARAM(wp);
                 chat::onWheel(delta);
             }
@@ -250,22 +266,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (wp == VK_ESCAPE) {
-                if (modal::onKey(hwnd, (int)wp, shift, ctrl)) return 0;
-                if (ui::g_account_dropdown) {
-                    ui::g_account_dropdown = false;
-                    ui::g_status_fold_open = false;
-                    ui::g_dropdown_t.start(ui::g_dropdown_t.value(), 0.0f, 0.15f,
-                                            0, curve::easeOutCubic);
-                    ui::g_status_fold_t.start(ui::g_status_fold_t.value(), 0.0f, 0.15f,
-                                               0, curve::easeOutCubic);
-                    return 0;
-                }
-                if (chat::g_picker_open) {
-                    chat::g_picker_open = false;
-                    chat::g_picker_t.start(chat::g_picker_t.value(), 0, 0.12f,
-                                           0, curve::easeOutCubic);
-                    return 0;
-                }
+                // 统一浮层栈:ESC 关最顶层浮层(modal/menu/picker/dropdown/popup 全含,
+                // 真正 LIFO)。取代旧的 modal::onKey→dropdown→picker 三段分支。
+                // 注:Confirm/Popup 虽 dismiss_on_outside=false,onEsc 仍允许关闭(取消)。
+                if (g_overlays.onEsc()) return 0;
                 if (stages::g_stage == stages::Stage::Main) {
                     // ESC 最小化到托盘，不真退出
                     tray::hideToTray(hwnd);

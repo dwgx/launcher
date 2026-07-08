@@ -1,6 +1,7 @@
 // Modals implementation. See modals.h; simplified D2D modal surface.
 
 #include "modals.h"
+#include "overlay.h"
 #include "icons.h"
 #include "palette.h"
 #include "user_state.h"
@@ -406,6 +407,11 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_CHANGE_PW, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeChangePw(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
@@ -490,6 +496,11 @@ void paintConfirmModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_CONFIRM, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeConfirm(); },
+                   /*dismiss_on_outside*/false, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
@@ -544,6 +555,11 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_CS2, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeCS2(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     // Title bar stays outside the WebView bounds.
     float bar_h = 44.0f;
@@ -701,6 +717,11 @@ void paintMarketDetailModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_MARKET_DETAIL, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeMarketDetail(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     // 关闭按钮
     {
@@ -847,6 +868,11 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_HISTORY, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeHistory(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
@@ -1068,6 +1094,11 @@ void paintAddTagModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_ADDTAG, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeAddTag(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
@@ -1148,6 +1179,11 @@ void paintCreatePackModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_CREATEPACK, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeCreatePack(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
@@ -1240,9 +1276,14 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    // 卡片区吞噬 hit(空回调):点卡片内空白也算「在模态内」→ dispatchClickModalOnly
-    // 命中它 → 不关闭;只有点卡片矩形外才关。注册在 g_modal_hit_floor 之上、
-    // 卡内具体按钮之前(按钮后注册优先级更高,先命中)。
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_USER_PROFILE, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeUserProfile(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
+    // 卡片区吞噬 hit(空回调):点卡片内空白落到它上,让 g_overlays.onLDown 的
+    // dispatchClick 命中一个"无操作"目标而非穿透。卡内具体按钮后注册(优先级更高,
+    // 先命中)。点卡片外则由浮层栈判定为"外部"→ 关闭。
     hit({ cx, cy, cw, ch }, [](){}, false);
 
     // 头部主色 banner
@@ -1450,6 +1491,11 @@ void paintEditStatusTextModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_EDIT_STATUS, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeEditStatusText(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
@@ -1512,6 +1558,11 @@ void paintEditBioModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_EDIT_BIO, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeEditBio(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     prim::drawText_(ctx, trW("profile.bio"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
@@ -1584,6 +1635,11 @@ void paintEditNicknameModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_EDIT_NICKNAME, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeEditNickname(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     prim::drawText_(ctx, trW("profile.nickname"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
@@ -1671,6 +1727,11 @@ void paintWebViewModal(D2DApp& app, float W, float H) {
 
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_WEBVIEW, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeWebViewModal(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/true);
     prim::fillRect(ctx, cx, cy + bar_h - 1, cw, 1, br.solidA(pal.divider, t));
 
     // Title bar.
@@ -1738,6 +1799,11 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_RENAMEPACK, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeRenamePack(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
     prim::drawText_(ctx, trW("renamepack.title"), h1, cx + 30, cy + 22, cw - 60, 22, br.solidA(pal.text, t));
@@ -2059,11 +2125,14 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_msg_menu.menu_rect = { mx, my, mw, mh };
+    markOverlayRect(mx, my, mw, mh);
+    g_overlays.add(OV_MSG_MENU, OverlayKind::Menu, { mx, my, mw, mh },
+                   [](){ closeMsgMenu(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/false,
+                   /*blocks_drag_bg*/false);
 
-    // Register a full-screen catchall hit; item hits consume clicks first.
-    // 统一焦点:不再注册全屏 backdrop hit。菜单打开时 onMouseLDown 走
-    // dispatchClickModalOnly:命中行=交互,未命中=closeOpenOverlay 关闭。
-    // 全屏 backdrop 依赖"菜单已画过一帧才注册",真实交互中时序易错位 → 移除。
+    // 不注册全屏 backdrop hit。菜单打开时 onMouseLDown 走浮层栈 g_overlays:
+    // 命中菜单矩形=交给行 hit,未命中=关闭栈顶菜单并吞点击。不依赖 paint 时序。
 
     prim::drawShadow(ctx, br, mx, my, mw, mh, 10.0f, pal.shadow_card_hover, t, 4.0f, 3);
     prim::fillRR(ctx, mx, my, mw, mh, 10.0f, br.solidA(pal.card, t));
@@ -2158,6 +2227,11 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_user_menu.menu_rect = { mx, my, mw, mh };
+    markOverlayRect(mx, my, mw, mh);
+    g_overlays.add(OV_USER_MENU, OverlayKind::Menu, { mx, my, mw, mh },
+                   [](){ closeUserMenu(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/false,
+                   /*blocks_drag_bg*/false);
 
     // 统一焦点:不注册全屏 backdrop(见 paintMsgContextMenu 同处说明)。
 
@@ -2290,6 +2364,11 @@ void paintChatMoreMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_chat_more.menu_rect = { mx, my, mw, mh };
+    markOverlayRect(mx, my, mw, mh);
+    g_overlays.add(OV_CHAT_MORE, OverlayKind::Menu, { mx, my, mw, mh },
+                   [](){ closeChatMoreMenu(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/false,
+                   /*blocks_drag_bg*/false);
 
     // 统一焦点:不注册全屏 backdrop(见 paintMsgContextMenu 同处说明)。
 
@@ -2320,6 +2399,12 @@ void paintMuteUserModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f;
     float cy = (H - ch) * 0.5f;
     prim::fillRR(ctx, cx, cy, cw, ch, 14, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_MUTE_USER, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeMuteUser(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
+    markOverlayRect(cx, cy, cw, ch);   // 统一 overlay 几何:点外关闭判定用
     prim::strokeRR(ctx, cx, cy, cw, ch, 14, br.solidA(pal.divider, t), 1.0f);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
@@ -2387,6 +2472,11 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_PACK_PREVIEW, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closePackPreview(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
@@ -2632,6 +2722,11 @@ void paintSearchModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
+    markOverlayRect(cx, cy, cw, ch);
+    g_overlays.add(OV_SEARCH, OverlayKind::Modal, { cx, cy, cw, ch },
+                   [](){ closeSearch(); },
+                   /*dismiss_on_outside*/true, /*blocks_wheel*/true,
+                   /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
 
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(13.0f),
                                   DWRITE_FONT_WEIGHT_BOLD);
@@ -2712,62 +2807,19 @@ void paintSearchModal(D2DApp& app, float W, float H) {
                  trW("common.close").c_str(), t, [](){ closeSearch(); });
 }
 
-// 关闭当前打开的浮层(点模态外 = 返回)。一次点击只会有一个打开。
-static void closeOpenOverlay() {
-    if (g_search.open) closeSearch();
-    else if (g_msg_menu.open) closeMsgMenu();
-    else if (g_user_menu.open) closeUserMenu();
-    else if (g_chat_more.open) closeChatMoreMenu();
-    else if (g_mute_user.open) closeMuteUser();
-    else if (g_pack_preview_modal.open) closePackPreview();
-    else if (g_edit_bio.open) closeEditBio();
-    else if (g_edit_nickname.open) closeEditNickname();
-    else if (g_edit_status.open) closeEditStatusText();
-    else if (g_user_profile.open) closeUserProfile();
-    else if (g_renamepack.open) closeRenamePack();
-    else if (g_createpack.open) closeCreatePack();
-    else if (g_addtag.open) closeAddTag();
-    else if (g_change_pw.open) closeChangePw();
-    // g_confirm 故意不在此:危险操作确认框(删表情包等)点外不关,强制显式
-    // 选「是/否」防误触。取消按钮 + Esc 仍可关(见 paintConfirmModal / onKey)。
-    else if (g_cs2.open) closeCS2();
-    else if (g_market_detail_modal.open) closeMarketDetail();
-    else if (g_history.open) closeHistory();
-}
-
 // ============== Event routing ==============
+// 统一浮层派发:全部委托给 g_overlays(单一命中测试机制)。栈每帧按 paint 顺序重建,
+// z-order = 栈顺序,WndProc 在两帧之间读它(此时栈是完整的上一帧快照)。
+//   点在栈顶浮层矩形内 → dispatchClick(命中其按钮/行);
+//   点在全部浮层外 → 关栈顶(若 dismiss_on_outside),吞掉点击绝不穿透;
+//   picker 内部点击 defer 回 WndProc → chat::onMouseLDown(composer/pack 拖拽)。
+// 取代旧的 anyOpen()/pointInAnyOverlay()/closeOpenOverlay() 手写级联 + 死的 floor。
 bool onMouseLDown(HWND /*hwnd*/, POINT dip) {
-    if (!anyOpen()) return false;
-    // webview modal 特殊:它自己有 HWND 覆盖,点击交给它内部处理,不做 outside-close。
-    if (g_webview_modal.open) {
-        dispatchClick(dip);
-        return true;
-    }
-    // 统一逻辑(所有模态/菜单一致):点击只在「模态层地板」之上的 hit 里匹配。
-    // 命中 = 点了模态自身的按钮/行;未命中 = 点在模态之外 → 关闭当前浮层,
-    // 且绝不穿透到下面 view 的控件(修「点外面关不掉 / 误触发后台 / 只有再点头像才关」)。
-    bool consumed = dispatchClickModalOnly(dip);
-    if (!consumed) closeOpenOverlay();
-    return true;
+    return g_overlays.onLDown(dip);
 }
 
 bool onMouseRDown(HWND /*hwnd*/, POINT dip) {
-    if (g_msg_menu.open) {
-        bool inside = g_msg_menu.menu_rect.contains(dip);
-        if (!inside) closeMsgMenu();
-        return inside;
-    }
-    if (g_user_menu.open) {
-        bool inside = g_user_menu.menu_rect.contains(dip);
-        if (!inside) closeUserMenu();
-        return inside;
-    }
-    if (g_chat_more.open) {
-        bool inside = g_chat_more.menu_rect.contains(dip);
-        if (!inside) closeChatMoreMenu();
-        return inside;
-    }
-    return hasBlockingModalOpen();
+    return g_overlays.onRDown(dip);
 }
 
 bool onChar(HWND hwnd, wchar_t c, bool ctrl) {
