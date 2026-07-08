@@ -141,6 +141,7 @@ struct Msg {
     std::wstring reply_author;
     std::wstring reply_preview;
     bool         waiting_reply_target = false;
+    bool         recalled = false;     // 已撤回:保留行但渲染「X 撤回了一条消息」墓碑
     std::vector<Reaction> reactions;   // emoji 反应聚合（WS 事件驱动，见 Reaction 注释）
 };
 
@@ -214,6 +215,9 @@ void applySendResult();
 
 // 删除消息 — 本地立即移 + 后端软删除（仅自己消息有效）
 void deleteMessage(HWND hwnd, const std::wstring& slug, int64_t server_id);
+// 撤回消息 — 30秒时窗内(全局配置),留「已撤回」墓碑(仅自己消息)
+void recallMessage(HWND hwnd, const std::wstring& slug, int64_t server_id);
+void onWsMessageRecalled(int64_t server_id);
 
 // WS 收到 type=delete 事件 — 在所有 stream 里找匹配 server_id 摘掉
 void onWsMessageDeleted(int64_t server_id);

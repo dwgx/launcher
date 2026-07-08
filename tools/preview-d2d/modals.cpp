@@ -2009,6 +2009,13 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
             closeMsgMenu();
         }, false });
     }
+    if (g_msg_menu.from == L"me" && g_msg_menu.server_id > 0) {
+        // 撤回:仅自己已发出的消息;时窗(默认30秒)由后端校验,超时返回错误提示。
+        items.push_back({ trW("msg.recall"), [](){
+            chat::recallMessage(GetActiveWindow(), g_msg_menu.slug, g_msg_menu.server_id);
+            closeMsgMenu();
+        }, false });
+    }
     if (g_msg_menu.from == L"me") {
         items.push_back({ trW("msg.delete"), [](){
             auto& msgs = chat::streamFor(g_msg_menu.slug);

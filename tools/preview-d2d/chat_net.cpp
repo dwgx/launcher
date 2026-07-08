@@ -115,6 +115,11 @@ void fetchHistory(HWND notify, const std::wstring& slug) {
             else if (kind == "system") m.kind = MsgKind::System;
             else m.kind = MsgKind::Text;
             m.server_id = net::jsonInt(obj, "id");
+            {   // recalled:后端 MessageOut.recalled=true → 渲染「已撤回」墓碑(不跳过)
+                auto pr = obj.find("\"recalled\":");
+                if (pr != std::string::npos && obj.compare(pr + 11, 4, "true") == 0)
+                    m.recalled = true;
+            }
             m.client_msg_id = net::jsonStr(obj, "client_msg_id");
             // sender_id 是 UUID — 跟当前 user_id 比较决定 me / 别人
             std::string sender = net::jsonStr(obj, "sender_id");
@@ -432,6 +437,37 @@ void deleteMessage(HWND hwnd, const std::wstring& slug, int64_t server_id) {
         PostMessageW(a->h, WM_APP + 53, r.ok() ? 1 : 0, 0);
         return 0;
     }, a, 0, nullptr);
+}
+
+// 异步撤回消息 — 调后端 chat/recall(30秒时窗,留痕迹)。本地立即标 recalled。
+void recallMessage(HWND hwnd, const std::wstring& slug, int64_t server_id) {
+    {
+        auto& msgs = streamFor(slug);
+        for (auto& m : msgs) {
+            if (m.server_id == server_id) { m.recalled = true; break; }
+        }
+    }
+    if (server_id == 0 || g_session_token.empty()) return;
+    struct A { int64_t mid; HWND h; };
+    auto* a = new A{ server_id, hwnd };
+    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
+        std::unique_ptr<A> a((A*)lp);
+        char buf[64]; sprintf_s(buf, "%lld", (long long)a->mid);
+        std::string body = "{\"session_token\":\"" + g_session_token
+                         + "\",\"message_id\":" + buf + "}";
+        auto r = net::postJson(L"/api/chat/recall", body);
+        PostMessageW(a->h, WM_APP + 68, r.ok() ? 1 : 0, 0);
+        return 0;
+    }, a, 0, nullptr);
+}
+
+// WS 收到别人撤回 — 在所有 stream 里找 server_id 标 recalled
+void onWsMessageRecalled(int64_t server_id) {
+    for (auto& kv : g_streams) {
+        for (auto& m : kv.second) {
+            if (m.server_id == server_id) { m.recalled = true; return; }
+        }
+    }
 }
 
 // WS 收到别人删除 — 在所有 stream 里找 server_id 摘掉

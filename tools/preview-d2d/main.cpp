@@ -186,16 +186,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps); return 0; }
         case WM_NCHITTEST: {
             if (!inAuthOrMain()) return HTCAPTION;
-            // 关键:任何 overlay(模态/菜单/表情选择器/账号下拉)打开时,整个客户区
-            // 都必须是 HTCLIENT —— 否则无边框 WS_POPUP 下,点空白/dim 区会被判为
-            // HTCAPTION,Windows 当标题栏拖拽处理、根本不发 WM_LBUTTONDOWN,
-            // closeOpenOverlay 永不执行 → 「点外面关不掉」。overlay 拥有全部输入。
-            if (modal::anyOpen() || chat::g_picker_open || ui::g_account_dropdown)
-                return HTCLIENT;
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd, &pt);
             POINT dip = physToDip(pt);
-            // 无 overlay 时:悬停真实交互区让给客户区,空白处可拖动整窗。
+            // 统一判定(所有视图一致,含 chat):悬停在真实交互区(气泡/频道/
+            // 输入框/按钮等局部 hit)时让给客户区,空白处可拖动整窗。
+            // hoverInteractive 会忽略整窗遮罩 hit,避免 chat 里整片拖不动
+            // (上一版把 chat body 全锁 HTCLIENT 是错的 —— 只有顶栏能拖)。
             return hoverInteractive(dip, g_app.widthDip(), g_app.heightDip())
                        ? HTCLIENT : HTCAPTION;
         }
@@ -612,6 +609,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP + 53: {                    // 删消息结果（仅自己消息）
             if (wp == 0) toast::show(launcher::d2d::trW("toast.delete_fail"));
+            return 0;
+        }
+        case WM_APP + 68: {                    // 撤回结果（失败=超时窗/无权,提示;乐观标记已置）
+            if (wp == 0) toast::show(launcher::d2d::trW("toast.recall_fail"));
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_APP + 54: {                    // myProfile 拉回

@@ -427,6 +427,8 @@ void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
 // 用来在真画之前一次过算 total，给 scroll offset 定位。
 float measureBubbleHeight(D2DApp& app, const Msg& m, float maxw, bool prev_same_author) {
     auto* body_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+    // 已撤回:居中墓碑单行(与 paintBubble 一致),固定高度
+    if (m.recalled) return 30;
     // 空 body 直接占 0 高度（与 paintBubble 行为一致）
     if (m.kind == MsgKind::Text && m.body.empty()) return 0;
     if (m.kind == MsgKind::DayDivider) return 30;
@@ -496,6 +498,18 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
     const Palette& pal = palette();
     auto* ctx = app.ctx();
     auto& br = app.brushes();
+
+    // 已撤回:居中灰字墓碑「XX 撤回了一条消息」,不画气泡/头像,不注册 hit(不可再操作)。
+    if (m.recalled) {
+        auto* tomb_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(8.5f));
+        std::wstring who = (m.from == L"me")
+            ? (g_user.nickname.empty() ? g_user.username : g_user.nickname)
+            : (m.author.empty() ? L"对方" : m.author);
+        std::wstring txt = who + L" " + trW("msg.recalled");
+        prim::drawText_(ctx, txt, tomb_fmt, x, y + 8, maxw, 16,
+                        br.solid(pal.text_muted), DWRITE_TEXT_ALIGNMENT_CENTER);
+        return 30;
+    }
 
     // Text 类型 + body 全空 — 整条直接跳过（避免画了头像/作者却没气泡的"幽灵行"）
     if (m.kind == MsgKind::Text && m.body.empty()) {

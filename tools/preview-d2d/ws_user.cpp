@@ -238,6 +238,9 @@ void drain() {
         } else if (is_deleted) {
             int64_t mid = net::jsonInt(m, "message_id");
             if (mid > 0) chat::onWsMessageDeleted(mid);
+        } else if (type == "event" && (event_type == "message_recalled" || legacy_type == "message_recalled")) {
+            int64_t mid = net::jsonInt(m, "message_id");
+            if (mid > 0) { chat::onWsMessageRecalled(mid); if (g_notify) PostMessageW(g_notify, WM_APP + 10, 0, 0); }
         } else if (type == "event" && (event_type == "member_muted" || event_type == "member_unmuted")) {
             std::string chat_id = net::jsonStr(m, "chat_id");
             std::string data = net::jsonObject(m, "data");

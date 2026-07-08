@@ -155,6 +155,8 @@ const char* tr(const char* key) {
         {"msg.react",           "☺ React",          u8"☺ 表情回应",        u8"☺ リアクション"},
         {"msg.add_emoji",       "⊕ Add to emoji",   u8"⊕ 添加到表情",      u8"⊕ 絵文字に追加"},
         {"msg.delete",          "✕ Delete",         u8"✕ 删除",            u8"✕ 削除"},
+        {"msg.recall",          "↺ Recall",         u8"↺ 撤回",            u8"↺ 取り消し"},
+        {"msg.recalled",        "recalled a message", u8"撤回了一条消息",   u8"メッセージを取り消しました"},
 
         {"chat.read_receipt",   "Read",             u8"已读",              u8"既読"},
 
@@ -168,6 +170,7 @@ const char* tr(const char* key) {
                                                     u8"反应仅支持 emoji，请在表情标签选择。",
                                                     u8"リアクションは絵文字のみ対応。絵文字タブから選んでください。"},
         {"toast.delete_fail",   "Delete failed",    u8"删除失败",          u8"削除失敗"},
+        {"toast.recall_fail",   "Recall failed (past time limit?)", u8"撤回失败(超过时限?)", u8"取り消し失敗(制限時間超過?)"},
         {"toast.exported_n",    "Exported {n} stickers ✓",
                                                     u8"已导出 {n} 张到目标文件夹 ✓",
                                                                           u8"{n} 個エクスポート完了 ✓"},

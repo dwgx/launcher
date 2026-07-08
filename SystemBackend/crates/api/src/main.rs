@@ -138,6 +138,7 @@ fn api_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
         .route("/chat/read", post(chat::mark_read))
         .route("/chat/react", post(chat::react))
         .route("/chat/delete", post(chat::delete_msg))
+        .route("/chat/recall", post(chat::recall))
         .route("/chat/moderation/member", get(chat::moderation_member))
         .route("/chat/moderation/mute", post(chat::mute_user))
         .route("/chat/moderation/unmute", post(chat::unmute_user))

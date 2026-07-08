@@ -582,6 +582,17 @@ pub struct MentionOut {
     pub nickname: Option<String>,
 }
 
+/// 一条消息上按 (emoji/sticker) 聚合的反应。emoji 为去重键（贴纸时等于 sticker_ref）；
+/// sticker_ref 非空表示这是贴纸/GIF 反应，客户端据此渲染媒体而非文字 emoji。
+#[derive(Serialize, Clone)]
+pub struct ReactionOut {
+    pub emoji: String,
+    pub sticker_ref: Option<String>,
+    pub count: i64,
+    /// 参与该反应的用户 id 列表（字符串）。
+    pub user_ids: Vec<String>,
+}
+
 fn message_preview(payload: &serde_json::Value, msg_type: &str) -> String {
     if let Some(text) = payload.get("text").and_then(|v| v.as_str()) {
         return text.chars().take(140).collect();
@@ -685,6 +696,50 @@ async fn mentions_for_message(
     Ok(out)
 }
 
+/// 聚合一条消息的反应：按 (emoji, sticker_ref) 分组，返回计数与参与者。
+/// 贴纸反应的 emoji 列存的是 sticker_ref 值（去重键），此处一并回传 sticker_ref
+/// 供客户端区分渲染。
+async fn reactions_for_message(
+    state: &AppState,
+    message_id: i64,
+) -> Result<Vec<ReactionOut>, (StatusCode, String)> {
+    let rows = sqlx::query(
+        r#"SELECT emoji, sticker_ref, user_id
+           FROM message_reactions
+           WHERE message_id = $1
+           ORDER BY reacted_at ASC"#,
+    )
+    .bind(message_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    // 按 (emoji, sticker_ref) 聚合，保持首次出现顺序。
+    let mut order: Vec<(String, Option<String>)> = Vec::new();
+    let mut map: std::collections::HashMap<(String, Option<String>), Vec<String>> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let emoji: String = r.try_get("emoji").map_err(internal)?;
+        let sticker_ref: Option<String> = r.try_get("sticker_ref").map_err(internal)?;
+        let user_id: Uuid = r.try_get("user_id").map_err(internal)?;
+        let key = (emoji, sticker_ref);
+        if !map.contains_key(&key) {
+            order.push(key.clone());
+        }
+        map.entry(key).or_default().push(user_id.to_string());
+    }
+    let mut out = Vec::with_capacity(order.len());
+    for (emoji, sticker_ref) in order {
+        let user_ids = map.remove(&(emoji.clone(), sticker_ref.clone())).unwrap_or_default();
+        out.push(ReactionOut {
+            emoji,
+            sticker_ref,
+            count: user_ids.len() as i64,
+            user_ids,
+        });
+    }
+    Ok(out)
+}
+
 async fn message_out_from_row(
     state: &AppState,
     row: &PgRow,
@@ -723,12 +778,17 @@ async fn message_out_from_row(
             .try_get::<Option<DateTime<Utc>>, _>("deleted_at")
             .map_err(internal)?
             .is_some(),
+        recalled: row
+            .try_get::<Option<DateTime<Utc>>, _>("recalled_at")
+            .map_err(internal)?
+            .is_some(),
         client_msg_id: row
             .try_get::<Option<Uuid>, _>("client_msg_id")
             .map_err(internal)?
             .map(|v| v.to_string()),
         sender_device_id: row.try_get("sender_device_id").map_err(internal)?,
         mentions: mentions_for_message(state, id).await?,
+        reactions: reactions_for_message(state, id).await?,
         event_id,
     })
 }
@@ -982,7 +1042,7 @@ pub async fn list_chats(
         // 最后一条消息
         let last = sqlx::query(
             r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at,
-                      edited_at, deleted_at, client_msg_id, sender_device_id
+                      edited_at, deleted_at, recalled_at, client_msg_id, sender_device_id
                FROM messages WHERE chat_id = $1 AND deleted_at IS NULL
                ORDER BY id DESC LIMIT 1"#,
         )
@@ -1096,9 +1156,11 @@ pub struct MessageOut {
     pub created_at: i64,
     pub edited_at: Option<i64>,
     pub deleted: bool,
+    pub recalled: bool,
     pub client_msg_id: Option<String>,
     pub sender_device_id: Option<String>,
     pub mentions: Vec<MentionOut>,
+    pub reactions: Vec<ReactionOut>,
     pub event_id: Option<i64>,
 }
 
@@ -1404,7 +1466,7 @@ pub async fn send(
     if let Some(client_msg_id) = req.client_msg_id {
         if let Some(existing) = sqlx::query(
             r#"SELECT id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
-                      client_msg_id, sender_device_id
+                      recalled_at, client_msg_id, sender_device_id
                FROM messages
                WHERE chat_id = $1 AND sender_id = $2 AND client_msg_id = $3"#,
         )
@@ -1454,7 +1516,7 @@ pub async fn send(
                  WHERE client_msg_id IS NOT NULL AND sender_id IS NOT NULL
                  DO NOTHING
                RETURNING id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
-                         client_msg_id, sender_device_id"#)
+                         recalled_at, client_msg_id, sender_device_id"#)
             .bind(req.chat_id)
             .bind(me)
             .bind(&req.msg_type)
@@ -1469,7 +1531,7 @@ pub async fn send(
                 // 并发重发的失败方：回查既存消息并幂等返回。
                 let existing = sqlx::query(
                     r#"SELECT id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
-                              client_msg_id, sender_device_id
+                              recalled_at, client_msg_id, sender_device_id
                        FROM messages
                        WHERE chat_id = $1 AND sender_id = $2 AND client_msg_id = $3"#,
                 )
@@ -1493,7 +1555,7 @@ pub async fn send(
                   (chat_id, sender_id, msg_type, payload, reply_to_id, sender_device_id)
                VALUES ($1, $2, $3, $4, $5, $6)
                RETURNING id, created_at, msg_type, payload, reply_to_id, edited_at, deleted_at,
-                         client_msg_id, sender_device_id"#,
+                         recalled_at, client_msg_id, sender_device_id"#,
         )
         .bind(req.chat_id)
         .bind(me)
@@ -1584,7 +1646,7 @@ pub async fn history(
     let before = q.before_id.unwrap_or(i64::MAX);
     let rows = sqlx::query(
         r#"SELECT id, sender_id, msg_type, payload, reply_to_id, created_at, edited_at, deleted_at,
-                  client_msg_id, sender_device_id
+                  recalled_at, client_msg_id, sender_device_id
            FROM messages WHERE chat_id = $1 AND id < $2 AND deleted_at IS NULL
            ORDER BY id DESC LIMIT $3"#,
     )
@@ -1764,7 +1826,12 @@ pub async fn mark_read(
 pub struct ReactReq {
     pub session_token: String,
     pub message_id: i64,
+    /// 纯 emoji 反应（<=16 字符）；贴纸/GIF 反应时可为空，改用 sticker_ref。
+    #[serde(default)]
     pub emoji: String,
+    /// 贴纸 id / 媒体 URL。给定时按贴纸反应处理，其值同时作为去重键写入 emoji 列。
+    #[serde(default)]
+    pub sticker_ref: Option<String>,
     pub remove: bool,
 }
 
@@ -1777,28 +1844,45 @@ pub async fn react(
     if !can_access_chat(&s, me, chat_id).await? {
         return Err((StatusCode::FORBIDDEN, "not a member".into()));
     }
-    let emoji = req.emoji.trim();
-    if emoji.is_empty() || emoji.chars().count() > 16 {
-        return Err((StatusCode::BAD_REQUEST, "bad emoji".into()));
-    }
+    // 反应可为纯 emoji 或贴纸/媒体引用。sticker_ref 优先：其值既存进 sticker_ref 列
+    // （供客户端渲染贴纸），也作为去重键塞进 emoji 列（PK 含 emoji，不含 sticker_ref）。
+    let sticker_ref = req
+        .sticker_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (dedup_key, sticker_ref_val): (String, Option<&str>) = match sticker_ref {
+        Some(sr) => {
+            if sr.chars().count() > 512 {
+                return Err((StatusCode::BAD_REQUEST, "bad sticker_ref".into()));
+            }
+            (sr.to_string(), Some(sr))
+        }
+        None => {
+            let emoji = req.emoji.trim();
+            if emoji.is_empty() || emoji.chars().count() > 16 {
+                return Err((StatusCode::BAD_REQUEST, "bad emoji".into()));
+            }
+            (emoji.to_string(), None)
+        }
+    };
     if req.remove {
-        sqlx::query!(
-            "DELETE FROM message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3",
-            req.message_id,
-            me,
-            emoji
-        )
-        .execute(&s.db)
-        .await
-        .map_err(internal)?;
+        sqlx::query("DELETE FROM message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3")
+            .bind(req.message_id)
+            .bind(me)
+            .bind(&dedup_key)
+            .execute(&s.db)
+            .await
+            .map_err(internal)?;
     } else {
-        let inserted = sqlx::query!(
-            r#"INSERT INTO message_reactions (message_id, user_id, emoji)
-               VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
-            req.message_id,
-            me,
-            emoji
+        let inserted = sqlx::query(
+            r#"INSERT INTO message_reactions (message_id, user_id, emoji, sticker_ref)
+               VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING"#,
         )
+        .bind(req.message_id)
+        .bind(me)
+        .bind(&dedup_key)
+        .bind(sticker_ref_val)
         .execute(&s.db)
         .await
         .map_err(internal)?;
@@ -1838,13 +1922,20 @@ pub async fn react(
             }
         }
     }
+    // 事件/广播里保留 emoji 兼容字段（贴纸反应时等于 dedup_key），
+    // 并附带 sticker_ref 供新客户端渲染贴纸/GIF 反应。
+    let event_data = serde_json::json!({
+        "emoji": dedup_key,
+        "sticker_ref": sticker_ref_val,
+        "remove": req.remove,
+    });
     let event_id = create_event(
         &s,
         Some(chat_id),
         "reaction",
         Some(req.message_id),
         Some(me),
-        serde_json::json!({ "emoji": emoji, "remove": req.remove }),
+        event_data.clone(),
     )
     .await?;
     let payload = serde_json::json!({
@@ -1854,7 +1945,7 @@ pub async fn react(
         "message_id": req.message_id,
         "chat_id": chat_id.to_string(),
         "actor_id": me.to_string(),
-        "data": { "emoji": emoji, "remove": req.remove },
+        "data": event_data,
         "legacy_type": "reaction"
     });
     broadcast_chat_event(&s, chat_id, &payload).await?;
@@ -1917,6 +2008,100 @@ pub async fn delete_msg(
         "legacy_type": "message_deleted"
     });
     broadcast_chat_event(&s, row.chat_id, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------- 撤回消息（tombstone，区别于永久软删除） ----------------
+const RECALL_WINDOW_DEFAULT_SECS: i64 = 30;
+
+/// 读取全局撤回时间窗（秒）。缺失 / NULL / 解析失败均回退默认 30s。
+/// 无应用级缓存，每次撤回直查一次，与现有 config 读取模式一致（admin_customization.rs:454）。
+async fn recall_window_secs(state: &AppState) -> i64 {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT value FROM app_config_entries WHERE key = $1 AND enabled = TRUE",
+    )
+    .bind("limits.recall_window_secs")
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    value
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n >= 0)
+        .unwrap_or(RECALL_WINDOW_DEFAULT_SECS)
+}
+
+#[derive(Deserialize)]
+pub struct RecallReq {
+    pub session_token: String,
+    pub message_id: i64,
+}
+
+pub async fn recall(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<RecallReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let me = auth_user(&s, &req.session_token).await?;
+    // 仅取未删除、未撤回的消息；撤回不设 deleted_at，行须保持可见以渲染墓碑。
+    let row = sqlx::query(
+        "SELECT sender_id, chat_id, created_at FROM messages \
+         WHERE id = $1 AND deleted_at IS NULL AND recalled_at IS NULL",
+    )
+    .bind(req.message_id)
+    .fetch_optional(&s.db)
+    .await
+    .map_err(internal)?
+    .ok_or((StatusCode::NOT_FOUND, "msg not found".into()))?;
+    let sender_id: Option<Uuid> = row.try_get("sender_id").map_err(internal)?;
+    let chat_id: Uuid = row.try_get("chat_id").map_err(internal)?;
+    let created_at: DateTime<Utc> = row.try_get("created_at").map_err(internal)?;
+    if !can_access_chat(&s, me, chat_id).await? {
+        return Err((StatusCode::FORBIDDEN, "not a member".into()));
+    }
+    if sender_id != Some(me) {
+        return Err((StatusCode::FORBIDDEN, "not your message".into()));
+    }
+    let window = recall_window_secs(&s).await;
+    let age_secs = (Utc::now() - created_at).num_seconds();
+    if age_secs > window {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "recall window expired".into(),
+        ));
+    }
+    // 只标记 recalled_at，绝不动 deleted_at，否则行会被 history/sync 过滤掉、失去墓碑。
+    let updated = sqlx::query(
+        "UPDATE messages SET recalled_at = now() \
+         WHERE id = $1 AND sender_id = $2 AND recalled_at IS NULL AND deleted_at IS NULL",
+    )
+    .bind(req.message_id)
+    .bind(me)
+    .execute(&s.db)
+    .await
+    .map_err(internal)?;
+    if updated.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "msg not found".into()));
+    }
+    let event_id = create_event(
+        &s,
+        Some(chat_id),
+        "message_recalled",
+        Some(req.message_id),
+        Some(me),
+        serde_json::json!({ "message_id": req.message_id }),
+    )
+    .await?;
+    let payload = serde_json::json!({
+        "type": "event",
+        "event_id": event_id,
+        "event_type": "message_recalled",
+        "message_id": req.message_id,
+        "chat_id": chat_id.to_string(),
+        "actor_id": me.to_string(),
+        "data": { "message_id": req.message_id },
+        "legacy_type": "message_recalled"
+    });
+    broadcast_chat_event(&s, chat_id, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
