@@ -5,6 +5,9 @@
 
 #include "ui_main.h"
 #include "overlay.h"
+#include "anim_settings.h"
+#include "anim_store.h"
+#include "persist.h"
 #include "hwid.h"
 #include "icons.h"
 #include "palette.h"
@@ -201,9 +204,11 @@ void paintTopbar(D2DApp& app, float W) {
     float pill_y = ty + (kTopbarH - pill_h) * 0.5f;
 
     bool pill_hover = LayoutRect{ pill_x, pill_y, pill_w, pill_h }.contains(g_mouse);
-    if (pill_hover) {
+    float pill_h_a = g_anim.hoverAnim() ? anim::hover(anim::key("topbar.pill"), pill_hover)
+                                        : (pill_hover ? 1.0f : 0.0f);
+    if (pill_h_a > 0.001f) {
         prim::fillRR(ctx, pill_x, pill_y, pill_w, pill_h, 16.0f,
-                     br.solidA(pal.text, 0.04f));
+                     br.solidA(pal.text, 0.04f * pill_h_a));
     }
     prim::drawText_(ctx, top_name, nick_fmt,
                     pill_x + pill_pad_l, pill_y + 8.0f, name_w, 16.0f,
@@ -241,22 +246,33 @@ void paintSidebar(D2DApp& app, float H) {
 
     auto* item_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(10.5f));
 
-    float my = kTopbarH + 14.0f;
+    const float item_top0 = kTopbarH + 14.0f;
+    // active 指示条:滑动到当前 active item 的 Y(单一 tween,在项间滑)。
+    int active_idx = 0, ii = 0;
+    for (auto& m : kMenu) { if (m.view == stages::g_view) active_idx = ii; ++ii; }
+    float ind_tgt = item_top0 + active_idx * 42.0f + 9.0f;   // 指示条目标 y
+    float ind_y = g_anim.viewSwitch()
+                ? anim::toward(anim::key("sidebar.indicator"), ind_tgt, 0.16f)
+                : ind_tgt;
+    prim::fillRR(ctx, sx + 1.0f, ind_y, 3.0f, 38.0f - 18.0f, 1.5f, br.solid(pal.primary));
+
+    float my = item_top0;
+    int idx = 0;
     for (auto& m : kMenu) {
         bool active = (m.view == stages::g_view);
         LayoutRect item{ sx + 10.0f, my, kSidebarW - 20.0f, 38.0f };
         bool hover = item.contains(g_mouse);
-
-        if (hover && !active) {
+        // hover 底色渐变(hover 类别门控)
+        float h = g_anim.hoverAnim() ? anim::hover(anim::key("sidebar.nav", idx), hover && !active)
+                                     : ((hover && !active) ? 1.0f : 0.0f);
+        if (h > 0.001f) {
             prim::fillRR(ctx, item.x, item.y, item.w, item.h, 8.0f,
-                         br.solidA(pal.primary, 0.08f));
+                         br.solidA(pal.primary, 0.08f * h));
         }
-        if (active) {
-            // 左侧 3px 主色指示条
-            prim::fillRR(ctx, sx + 1.0f, item.y + 9.0f, 3.0f, item.h - 18.0f, 1.5f,
-                         br.solid(pal.primary));
-        }
-        uint32_t tc = active ? pal.primary : (hover ? pal.text : pal.text_muted);
+        // 图标/文字色:muted → (hover)text → (active)primary,随进度插值
+        uint32_t base = hover ? pal.text : pal.text_muted;
+        uint32_t tc = active ? pal.primary : lerpArgb(pal.text_muted, pal.text, h);
+        (void)base;
 
         icons::drawIcon(app, m.icon, item.x + 12.0f, item.y + 9.0f, 20.0f, tc);
         std::wstring lbl = trW(m.label_key);
@@ -273,6 +289,7 @@ void paintSidebar(D2DApp& app, float H) {
         stages::View target = m.view;
         hit(item, [target]() { switchView(target); }, true);
         my += 42.0f;
+        ++idx;
     }
 }
 
@@ -1040,6 +1057,63 @@ void paintSettingsView(D2DApp& app, float ax, float ay, float aw, float ah) {
     }
     sy_ += seg_h + 28;
 
+    // ===== 动画 =====
+    prim::drawText_(ctx, trW("settings.animation"), lab_fmt,
+                    vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
+    sy_ += 26;
+    // --- 启用动画(总开关):pill toggle,旋钮平滑滑动 ---
+    {
+        float row_w = 360, row_h = 30;
+        float knob_w = 42, knob_h = 22;
+        float kx = vx + row_w - knob_w, ky = sy_ + (row_h - knob_h) * 0.5f;
+        prim::drawText_(ctx, trW("settings.anim_master"), sub, vx, sy_ + 7,
+                        row_w - knob_w - 12, 18, br.solidA(pal.text, op));
+        float p = anim::toward(anim::key("settings.toggle", 0), g_anim.master ? 1.0f : 0.0f, 0.16f);
+        uint32_t track = lerpArgb(pal.surface, pal.primary, p);
+        prim::fillRR(ctx, kx, ky, knob_w, knob_h, knob_h * 0.5f, br.solidA(track, op));
+        float dot = knob_h - 6;
+        float dx = kx + 3 + p * (knob_w - dot - 6);
+        prim::fillCircle(ctx, dx + dot * 0.5f, ky + knob_h * 0.5f, dot * 0.5f,
+                         br.solidA(0xFFFFFF, op));
+        hit(LayoutRect{ vx, sy_, row_w, row_h }, [](){
+            g_anim.master = !g_anim.master; persist::saveAnim(animBits(g_anim));
+        }, true);
+        sy_ += row_h + 10;
+    }
+
+    // --- 动画速度:滑条 + 数值(0.25×..3.0×)。掌管全局所有动画快慢。 ---
+    {
+        float slop = g_anim.master ? op : op * 0.4f;
+        prim::drawText_(ctx, trW("settings.anim_speed"), sub, vx, sy_ + 2, 200, 18,
+                        br.solidA(pal.text, slop));
+        // 数值(右侧,如 1.00×)
+        wchar_t num[16]; swprintf(num, 16, L"%.2f×", g_anim.clampedSpeed());
+        prim::drawText_(ctx, num, sub, vx + 300, sy_ + 2, 60, 18,
+                        br.solidA(pal.primary, slop), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        sy_ += 24;
+        // 滑轨
+        const float smin = 0.25f, smax = 3.0f;
+        float tr_x = vx, tr_w = 360, tr_y = sy_ + 8, tr_h = 4;
+        float tv = (g_anim.clampedSpeed() - smin) / (smax - smin);   // 0..1
+        prim::fillRR(ctx, tr_x, tr_y, tr_w, tr_h, tr_h * 0.5f, br.solidA(pal.surface, slop));
+        prim::fillRR(ctx, tr_x, tr_y, tr_w * tv, tr_h, tr_h * 0.5f, br.solidA(pal.primary, slop));
+        // 滑块 knob
+        float kn = 16.0f, knx = tr_x + tr_w * tv - kn * 0.5f, kny = tr_y + tr_h * 0.5f - kn * 0.5f;
+        prim::fillCircle(ctx, knx + kn * 0.5f, kny + kn * 0.5f, kn * 0.5f, br.solidA(pal.primary, slop));
+        prim::fillCircle(ctx, knx + kn * 0.5f, kny + kn * 0.5f, kn * 0.5f - 3, br.solidA(0xFFFFFF, slop));
+        // 拖动 / 点击:命中整条轨道(含上下 padding),按 x 定速度并持久化
+        LayoutRect track_hit{ tr_x - kn, sy_ - 2, tr_w + kn * 2, 22 };
+        if (g_anim.master && track_hit.contains(g_mouse) && g_mouse_pressed) {
+            float nx = ((float)g_mouse.x - tr_x) / tr_w;
+            nx = (std::max)(0.0f, (std::min)(1.0f, nx));
+            g_anim.speed = smin + nx * (smax - smin);
+            persist::saveAnim(animBits(g_anim));
+        }
+        hit(track_hit, [](){}, false);   // 占位:命中让 NCHITTEST 知道是交互区
+        sy_ += 26;
+    }
+    sy_ += 20;
+
     // 关于
     prim::drawText_(ctx, trW("settings.about"), lab_fmt,
                     vx, sy_, 200, 18, br.solidA(pal.text_muted, op));
@@ -1314,7 +1388,9 @@ void paintScrollableView(D2DApp& app, ViewPaintFn fn, stages::View view,
 void switchView(stages::View v) {
     if (v == stages::g_view) return;
     stages::g_view = v;
-    stages::g_view_fade.start(0.0f, 1.0f, 0.25f, 0, curve::easeOutQuint);
+    // 受动画总开关/视图切换开关门控:关了就极短时长(瞬发)。
+    float d = AnimSettings::dur(g_anim.viewSwitch(), 0.55f);   // 明显放慢
+    stages::g_view_fade.start(0.0f, 1.0f, d, 0, curve::easeOutCubic);
 }
 
 // 主视图滚轮 — 复刻 chat.cpp:77-81，但 top-anchored（offset 0 = 顶）。
@@ -1343,6 +1419,7 @@ void tickMain(float dt) {
     g_seg_theme_w.tick(dt);
     chat::tick(dt);
     modal::tickAll(dt);
+    anim::tickAll(dt);   // 通用 keyed 动画基元推进 + 清理
 }
 
 void paintMain(D2DApp& app, float W, float H) {
@@ -1357,14 +1434,24 @@ void paintMain(D2DApp& app, float W, float H) {
 
     float ax = kSidebarW, ay = kTopbarH;
     float aw = W - kSidebarW, ah = H - kTopbarH;
+    // 视图切换滑动:过渡期(fade<1)内容从右侧滑入到位。chat 有内嵌 webview/HWND,
+    // 平移会与子窗错位,故 chat 不加平移(仅 fade)。
+    float slide_dx = 0.0f;
+    if (g_anim.viewSwitch() && stages::g_view_fade.started
+        && !stages::g_view_fade.done()
+        && stages::g_view != stages::View::Chat
+        && stages::g_view != stages::View::Lunching) {
+        slide_dx = (1.0f - stages::g_view_fade.value()) * 70.0f;   // 右→0(明显位移)
+    }
+    float vax = ax + slide_dx;
     switch (stages::g_view) {
-        case stages::View::Home:     paintHomeView(app, ax, ay, aw, ah);     break;
+        case stages::View::Home:     paintHomeView(app, vax, ay, aw, ah);     break;
         case stages::View::Lunching: paintLunchingView(app, ax, ay, aw, ah); break;
         case stages::View::Chat:     chat::paintChatView(app, ax, ay, aw, ah); break;
-        case stages::View::Market:   paintMarketView(app, ax, ay, aw, ah);   break;
-        case stages::View::Cloud:    paintCloudView(app, ax, ay, aw, ah);    break;
-        case stages::View::Settings: paintSettingsView(app, ax, ay, aw, ah); break;
-        case stages::View::Profile:  paintProfileView(app, ax, ay, aw, ah);  break;
+        case stages::View::Market:   paintMarketView(app, vax, ay, aw, ah);   break;
+        case stages::View::Cloud:    paintCloudView(app, vax, ay, aw, ah);    break;
+        case stages::View::Settings: paintSettingsView(app, vax, ay, aw, ah); break;
+        case stages::View::Profile:  paintProfileView(app, vax, ay, aw, ah);  break;
     }
 
     // 非 Lunching view 时隐藏 CS2 瓦片视频，别让 webview HWND 漏到其他页面。

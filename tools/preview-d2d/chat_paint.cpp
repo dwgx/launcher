@@ -7,6 +7,8 @@
 #include "chat.h"
 #include "chat_internal.h"
 #include "overlay.h"
+#include "anim_settings.h"
+#include "anim_store.h"
 #include "icons.h"
 #include "palette.h"
 #include "user_state.h"
@@ -414,14 +416,20 @@ void paintChatList(D2DApp& app, float ax, float ay, float aw, float ah) {
                 bool active = (c.slug == g_active);
                 LayoutRect cr{ ax + 6, cy, aw - 12, 28 };
                 bool hov = cr.contains(g_mouse);
-                if (active) {
+                // active 淡入 + hover 淡入(anim_store,keyed by slug)。切频道时新行主色渐显。
+                uint64_t akey = anim::keyStr(c.slug, "chan.active");
+                uint64_t hkey = anim::keyStr(c.slug, "chan.hover");
+                float af = g_anim.channelAnim() ? anim::hover(akey, active) : (active ? 1.0f : 0.0f);
+                float hf = g_anim.hoverAnim() ? anim::hover(hkey, hov && !active) : ((hov && !active) ? 1.0f : 0.0f);
+                if (af > 0.001f) {
                     prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
-                                 br.solidA(pal.primary, 0.14f * a));
-                } else if (hov) {
-                    prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
-                                 br.solidA(pal.text, 0.04f * a));
+                                 br.solidA(pal.primary, 0.14f * a * af));
                 }
-                uint32_t tc = active ? pal.primary : pal.text_muted;
+                if (hf > 0.001f) {
+                    prim::fillRR(ctx, cr.x, cr.y, cr.w, cr.h, 6.0f,
+                                 br.solidA(pal.text, 0.04f * a * hf));
+                }
+                uint32_t tc = lerpArgb(pal.text_muted, pal.primary, af);
                 prim::drawText_(ctx, L"#", grp_fmt,
                                 cr.x + 12, cr.y + 6, 14, 16,
                                 br.solidA(tc, a));

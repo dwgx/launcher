@@ -19,6 +19,7 @@
 #include "auth.h"
 #include "hit.h"
 #include "overlay.h"
+#include "anim_settings.h"
 #include "ui_main.h"
 #include "chat.h"
 #include "modals.h"
@@ -809,6 +810,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     g_dark = persist::loadTheme(true);
     int lang = persist::loadLang((int)detectSystemLang());
     if (lang >= 0 && lang <= 2) g_lang = (Lang)lang;
+    // 默认:master=1(bit0) + speed=1.00×(100<<1=200)→ 合计 201。
+    // (曾误用 0xFFFFFFFF 当默认,导致 speed 解析成 21M 被 clamp 到 3.0× = 最快,动画看着"太快")
+    launcher::d2d::animFromBits(launcher::d2d::g_anim, persist::loadAnim(201u));
     readSteamInfo();
 
     WNDCLASSEXW wc{ sizeof(wc) };
@@ -925,7 +929,10 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             DispatchMessageW(&msg);
         }
         if (quit) break;
-        if (r != WAIT_OBJECT_0) continue;
+        // 注意:不能因 waitFrame 超时就 continue 跳过 tick/paint —— app 空闲时
+        // frame-latency 可等待对象停发信号,若跳过则"启动后第一次交互无动画"
+        // (tween 已启动但没被推进/绘制,要等下次信号才恢复)。改为始终 tick+paint。
+        // WAIT_OBJECT_0 时说明后台缓冲就绪,是理想帧点;超时也照常出一帧,代价极小。
 
         auto now = std::chrono::steady_clock::now();
         float dt = std::chrono::duration<float>(now - last).count();
@@ -937,10 +944,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         toast::tick(dt);
         stages::driveTransitions(g_app, sw, sh);
 
+
         if (g_app.beginFrame()) {
             stages::paint(g_app);
             g_app.endFrame();
         }
+        (void)r;
     }
 
     launcher::d2d::decodeService().stop();   // join worker 线程（须在 g_app.shutdown 前）

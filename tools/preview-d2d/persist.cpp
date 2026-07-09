@@ -109,6 +109,17 @@ bool loadTheme(bool dflt) {
     ensure(); if (!g_hk) return dflt;
     DWORD v; return readDword(g_hk, L"_t", v) ? (v != 0) : dflt;
 }
+void saveAnim(unsigned bits) {
+    if (disabled()) return;
+    ensure(); if (!g_hk) return;
+    DWORD d = bits;
+    RegSetValueExW(g_hk, L"_a", 0, REG_DWORD, (LPBYTE)&d, sizeof(d));
+}
+unsigned loadAnim(unsigned dflt) {
+    if (disabled()) return dflt;
+    ensure(); if (!g_hk) return dflt;
+    DWORD v; return readDword(g_hk, L"_a", v) ? (unsigned)v : dflt;
+}
 void saveCreds(const std::wstring& u, const std::wstring& p) {
     if (disabled()) return;
     ensure(); if (!g_hk) return;

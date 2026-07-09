@@ -16,6 +16,8 @@ namespace launcher::d2d::persist {
 
 void saveLang(int v);
 void saveTheme(bool dark);
+void saveAnim(unsigned bits);
+unsigned loadAnim(unsigned dflt);
 int  loadLang(int dflt);
 bool loadTheme(bool dflt);
 void saveCreds(const std::wstring& u, const std::wstring& p);

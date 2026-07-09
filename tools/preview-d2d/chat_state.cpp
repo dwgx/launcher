@@ -5,6 +5,7 @@
 // 各翻译单元共享同一份状态。公共符号（chat.h 里 extern 的）也在此定义。
 #include "chat.h"
 #include "chat_internal.h"
+#include "anim_settings.h"
 #include "render/primitives.h"
 
 #include <ctime>
@@ -127,8 +128,9 @@ void toggleGroupCollapsed(const std::wstring& name) {
     bool now_collapsed = !g_group_collapsed[name];
     g_group_collapsed[name] = now_collapsed;
     float cur = groupAnimValue(name);
+    float d = AnimSettings::dur(g_anim.channelAnim(), 0.22f);
     g_group_anim[name].start(cur, now_collapsed ? 0.0f : 1.0f,
-                             0.22f, 0.0f, curve::easeOutCubic);
+                             d, 0.0f, curve::easeOutCubic);
 }
 
 std::vector<Msg>& streamFor(const std::wstring& slug) {
