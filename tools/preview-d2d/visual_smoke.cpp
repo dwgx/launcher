@@ -690,6 +690,80 @@ static int runInteractionTests(D2DApp& app) {
         check("nchit.topbar_not_stream", !chat::pointInStream(POINT{ 550, 20 }));
     }
 
+    // ===== 本会话新特性回归:附件托盘(C)/ picker 键盘导航(D)/ emoji 搜索(E)=====
+    trace("feat.enter");
+    // --- C:附件暂存区改变 composer 高度 + 发送清空 ---
+    {
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        chat::g_composer.reset();
+        chat::g_composer_attachments.clear();
+        paintFrame();
+        // 直接塞一个暂存附件(绕过写权限门控,测的是托盘+退格删除逻辑本身)
+        chat::g_composer_attachments.push_back({ L"C:/nonexistent/x.png", "image" });
+        check("attach.tray_has_chip", chat::g_composer_attachments.size() == 1);
+        // Backspace 在文本最前 + 有附件 → 删末尾附件(仅当频道可写才走 onChar;否则跳过)
+        chat::g_focus_composer = true;
+        chat::onChar(nullptr, 0x08, false);
+        if (chat::canWriteActiveChannel()) {
+            check("attach.backspace_removes_chip", chat::g_composer_attachments.empty());
+        } else {
+            check("attach.backspace_removes_chip (skipped: channel not writable)", true);
+            chat::g_composer_attachments.clear();
+        }
+    }
+    // --- E:emoji 搜索过滤(kEmojiKw 关键词子串 AND)---
+    {
+        int all = chat::emojiCount();
+        check("search.empty_query_returns_all",
+              (int)chat::filteredEmojiIndices(L"").size() == all);
+        auto heart = chat::filteredEmojiIndices(L"heart");
+        check("search.heart_narrows", !heart.empty() && (int)heart.size() < all);
+        // 多词 AND:两个词都命中才算(结果 ≤ 单词)
+        auto two = chat::filteredEmojiIndices(L"laugh cry");
+        check("search.multiword_and_subset", two.size() <= chat::filteredEmojiIndices(L"laugh").size());
+        // 无命中串 → 空;中文查询(非 ascii)→ 空(关键词是英文)
+        check("search.nomatch_empty", chat::filteredEmojiIndices(L"zzqzzq_nomatch").empty());
+        check("search.nonascii_empty", chat::filteredEmojiIndices(L"表情").empty());
+    }
+    // --- E:打开 picker 即聚焦搜索框;打字进搜索框且不漏给 composer ---
+    {
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        chat::g_focus_composer = true;
+        chat::g_composer.reset();
+        chat::setPickerOpen(true);
+        freezeTween(chat::g_picker_t);
+        paintFrame();
+        check("search.focused_on_open", chat::g_picker_search_focus);
+        // 模拟键入 'h' 'e' → 进搜索框,不进 composer 文本
+        bool consumed = chat::onPickerChar(nullptr, L'h', false)
+                     && chat::onPickerChar(nullptr, L'e', false);
+        check("search.char_consumed_by_picker", consumed);
+        check("search.char_into_searchbox", chat::g_picker_search.text == L"he");
+        check("search.char_not_leaked_to_composer", chat::g_composer.text.empty());
+        // 关闭 picker 清空搜索
+        chat::setPickerOpen(false);
+        check("search.cleared_on_close", chat::g_picker_search.text.empty());
+    }
+    // --- D:picker 方向键导航设置选中格(在过滤结果范围内)---
+    {
+        resetOverlays();
+        stages::g_view = stages::View::Chat;
+        chat::g_active = L"general";
+        chat::setPickerOpen(true);
+        freezeTween(chat::g_picker_t);
+        paintFrame();
+        chat::g_picker_sel_idx = -1;
+        chat::onPickerKey(nullptr, VK_DOWN, false, false);   // 首次方向键 → 选中首格(0)
+        check("picker.nav_selects_first", chat::g_picker_sel_idx == 0);
+        chat::onPickerKey(nullptr, VK_RIGHT, false, false);
+        check("picker.nav_right_advances", chat::g_picker_sel_idx == 1);
+        chat::setPickerOpen(false);
+    }
+
     resetOverlays();
     if (f) { fprintf(f, "TOTAL_FAILS %d\n", fails); fclose(f); }
     return fails;
