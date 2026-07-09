@@ -1142,13 +1142,28 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     const float pad_l = 16.0f;
     const float text_w = fw - pad_l * 2;
 
-    if (g_composer.text.empty()) {
+    if (g_composer.text.empty() && g_ime_composition.empty()) {
         const float text_y = fy + (fh - 14.0f) * 0.5f;
         prim::drawText_(ctx, writable ? trW("chat.composer_placeholder") : activeWriteBlockedMessage(), tx_fmt,
                         fx + pad_l, text_y, text_w, 18,
                         br.solid(pal.text_muted));
         g_composer_caret_xs.clear();
         g_composer_caret_xs.push_back(fx + pad_l);   // 空文本:光标在行首
+        g_composer_caret_dip_x = fx + pad_l;
+        g_composer_caret_dip_y = text_y + 16.0f;
+    } else if (g_composer.text.empty() && !g_ime_composition.empty()) {
+        // 空文本 + IME 组合中:直接在行首画组合串(带下划线)+ 光标
+        const float text_y = fy + (fh - 14.0f) * 0.5f;
+        float cx = fx + pad_l;
+        float cw = caretMeasureW(app, g_ime_composition, tx_fmt);
+        prim::drawText_(ctx, g_ime_composition, tx_fmt, cx, text_y, cw + 4, 18,
+                        br.solid(pal.text));
+        prim::drawLine(ctx, cx, text_y + 16, cx + cw, text_y + 16, br.solid(pal.primary), 1.0f);
+        prim::drawLine(ctx, cx + cw, text_y - 1, cx + cw, text_y + 16, br.solid(pal.primary), 1.5f);
+        g_composer_caret_dip_x = cx + cw;
+        g_composer_caret_dip_y = text_y + 16.0f;
+        g_composer_caret_xs.clear();
+        g_composer_caret_xs.push_back(cx);
     } else {
         // 拆逻辑行(\n),每行一个显示行。总行数可能超过可视 kComposerMaxLines → 垂直滚动
         // 让光标所在行可见(简单策略:显示以光标行为基准的窗口)。
@@ -1212,8 +1227,18 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
             float cx = fx + pad_l + caretMeasureW(app,
                 g_composer.text.substr(ls, g_composer.cursor - ls), tx_fmt);
             float cy = fy + 8.0f + (float)(caret_line - first_vis) * kComposerLineH;
+            // IME 自绘内联组合串(拼音):画在光标处,带下划线;光标推到串尾。
+            if (!g_ime_composition.empty()) {
+                float cw = caretMeasureW(app, g_ime_composition, tx_fmt);
+                prim::drawText_(ctx, g_ime_composition, tx_fmt, cx, cy, cw + 4, 18,
+                                br.solid(pal.text));
+                prim::drawLine(ctx, cx, cy + 16, cx + cw, cy + 16, br.solid(pal.primary), 1.0f);
+                cx += cw;   // 光标移到组合串之后
+            }
+            g_composer_caret_dip_x = cx;
+            g_composer_caret_dip_y = cy + 16.0f;   // 行底,候选窗贴下方
             int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
-            if (phase < 500) {
+            if (phase < 500 || !g_ime_composition.empty()) {
                 prim::drawLine(ctx, cx, cy - 1, cx, cy + 16, br.solid(pal.primary), 1.5f);
             }
         }

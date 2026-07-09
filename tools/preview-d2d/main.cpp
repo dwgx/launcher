@@ -7,6 +7,8 @@
 #include <Windows.h>
 #include <windowsx.h>
 #include <ShlObj.h>
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
 #include <chrono>
 #include <memory>
 #include <string>
@@ -125,9 +127,51 @@ static POINT physToDip(POINT phys) {
     return { (LONG)(phys.x / scale + 0.5f), (LONG)(phys.y / scale + 0.5f) };
 }
 
+static POINT dipToPhys(float dx, float dy) {
+    float scale = g_app.dpi() / 96.0f;
+    if (scale < 0.001f) scale = 1.0f;
+    return { (LONG)(dx * scale + 0.5f), (LONG)(dy * scale + 0.5f) };
+}
+
+// 把 IME 组合窗 + 候选窗定位到 composer 光标处(修候选窗飞到屏幕角)。
+static void positionImeAtCaret(HWND hwnd) {
+    HIMC himc = ImmGetContext(hwnd);
+    if (!himc) return;
+    POINT pt = dipToPhys(launcher::d2d::chat::g_composer_caret_dip_x,
+                         launcher::d2d::chat::g_composer_caret_dip_y);  // 客户区物理 px
+    // 组合串字体:和 composer 文字一致,让内联预编辑串大小对齐(否则默认字体偏大/错位)。
+    LOGFONTW lf{};
+    lf.lfHeight = -(LONG)(14.0 * g_app.dpi() / 96.0);
+    wcscpy_s(lf.lfFaceName, L"Microsoft YaHei UI");
+    ImmSetCompositionFontW(himc, &lf);
+    // 组合窗(内联预编辑串)定位到光标
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos = pt;
+    ImmSetCompositionWindow(himc, &cf);
+    // 候选窗(拼音选字列表)定位到光标下方,并把排除区设为光标行,避免遮挡
+    CANDIDATEFORM caf{};
+    caf.dwIndex = 0;
+    caf.dwStyle = CFS_EXCLUDE;
+    caf.ptCurrentPos = pt;
+    caf.rcArea.left = pt.x;
+    caf.rcArea.top = pt.y - (LONG)(18.0 * g_app.dpi() / 96.0);
+    caf.rcArea.right = pt.x + 1;
+    caf.rcArea.bottom = pt.y;
+    ImmSetCandidateWindow(himc, &caf);
+    ImmReleaseContext(hwnd, himc);
+}
+
 static bool inAuthOrMain() {
     return stages::g_stage == stages::Stage::Auth
         || stages::g_stage == stages::Stage::Main;
+}
+
+// IME 是否应自绘内联(仅 chat composer 聚焦时);其它输入(登录框)用系统默认。
+static bool imeSelfDrawTarget() {
+    return stages::g_stage == stages::Stage::Main
+        && stages::g_view == stages::View::Chat
+        && chat::g_focus_composer;
 }
 
 // 启动后异步：tags + 头像云同步 + sticker packs/stickers + market + 个人 profile
@@ -210,6 +254,56 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // (上一版把 chat body 全锁 HTCLIENT 是错的 —— 只有顶栏能拖)。
             return hoverInteractive(dip, g_app.widthDip(), g_app.heightDip())
                        ? HTCLIENT : HTCAPTION;
+        }
+        case WM_IME_STARTCOMPOSITION: {
+            // composer 聚焦时:自绘内联组合串 → 吞掉系统组合窗(return 0,不给系统画)。
+            // 其它输入场景(登录框/picker 搜索)交给默认处理。
+            if (imeSelfDrawTarget()) {
+                positionImeAtCaret(hwnd);   // 候选窗仍定位到光标
+                return 0;                   // 不让系统画内联组合窗
+            }
+            positionImeAtCaret(hwnd);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        case WM_IME_COMPOSITION: {
+            if (imeSelfDrawTarget()) {
+                HIMC himc = ImmGetContext(hwnd);
+                if (himc) {
+                    // 上屏结果:逐字符插入 composer(等价用户敲入)
+                    if (lp & GCS_RESULTSTR) {
+                        LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+                        if (bytes > 0) {
+                            std::wstring s(bytes / sizeof(wchar_t), L'\0');
+                            ImmGetCompositionStringW(himc, GCS_RESULTSTR, &s[0], bytes);
+                            for (wchar_t ch : s)
+                                if (ch >= 0x20) chat::onChar(hwnd, ch, false);
+                        }
+                        chat::g_ime_composition.clear();
+                    }
+                    // 组合中串(拼音):存下来自绘,不让系统画
+                    if (lp & GCS_COMPSTR) {
+                        LONG bytes = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+                        if (bytes > 0) {
+                            std::wstring s(bytes / sizeof(wchar_t), L'\0');
+                            ImmGetCompositionStringW(himc, GCS_COMPSTR, &s[0], bytes);
+                            chat::g_ime_composition = s;
+                        } else {
+                            chat::g_ime_composition.clear();
+                        }
+                    }
+                    ImmReleaseContext(hwnd, himc);
+                }
+                positionImeAtCaret(hwnd);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;   // 吞掉:系统不画内联组合串
+            }
+            positionImeAtCaret(hwnd);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        case WM_IME_ENDCOMPOSITION: {
+            chat::g_ime_composition.clear();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return DefWindowProcW(hwnd, msg, wp, lp);
         }
         case WM_MOUSEMOVE: {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };

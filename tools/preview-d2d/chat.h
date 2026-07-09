@@ -169,6 +169,11 @@ bool onMouseRDown(HWND hwnd, POINT dip);
 // 点是否落在消息流区域(NCHITTEST 用:流区应为 HTCLIENT,否则纯文本消息行
 // 会被判成 HTCAPTION 拖窗 → 右键收不到 WM_RBUTTONDOWN → 菜单弹不出)。
 bool pointInStream(POINT dip);
+// composer 光标 DIP 坐标(IME 候选窗定位用;paint 每帧更新)。
+extern float g_composer_caret_dip_x;
+extern float g_composer_caret_dip_y;
+// IME 自绘内联:当前组合串(拼音),WM_IME_COMPOSITION 更新,composer paint 在光标处画出。
+extern std::wstring g_ime_composition;
 // 滚轮：delta = WHEEL_DELTA 的倍数（120 = 一格）
 void onWheel(int delta);
 void onChar(HWND hwnd, wchar_t c, bool ctrl);

@@ -141,6 +141,9 @@ extern bool g_announcements_stream_dirty;
 extern PickerScrollDrag g_picker_scroll_drag;
 extern ComposerDrag g_composer_drag;
 extern std::vector<float> g_composer_caret_xs;
+// composer 光标的 DIP 坐标(paint 每帧更新);IME 用它把候选窗定位到光标处。
+extern float g_composer_caret_dip_x;
+extern float g_composer_caret_dip_y;   // 光标行底部 y(候选窗贴其下方)
 
 extern std::unordered_map<std::wstring, HistoryLoadState> g_history_state;
 

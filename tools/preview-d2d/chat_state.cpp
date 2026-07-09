@@ -87,6 +87,9 @@ bool g_announcements_stream_dirty = true;
 PickerScrollDrag g_picker_scroll_drag;
 ComposerDrag g_composer_drag;
 std::vector<float> g_composer_caret_xs;
+float g_composer_caret_dip_x = 0.0f;
+float g_composer_caret_dip_y = 0.0f;
+std::wstring g_ime_composition;
 
 std::unordered_map<std::wstring, HistoryLoadState> g_history_state;
 
