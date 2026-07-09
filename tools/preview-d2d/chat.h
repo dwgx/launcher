@@ -195,6 +195,12 @@ void paintAnnouncementModal(D2DApp& app, float W, float H);
 
 // 拖拽文件进 chat → 添加 image bubble + 上传后端
 void appendMedia(const std::wstring& path);
+// 图片/媒体路径 → 加入输入框附件暂存区(缩略图 chip),不立即发。返回是否加入。
+bool addComposerAttachment(const std::wstring& path);
+// 发送输入框内容:先逐个发暂存附件(image/gif/video),再发文本(若有),然后清空。
+void sendComposer(HWND hwnd);
+// Ctrl+V:剪贴板有图片/文件则加入附件暂存区并返回 true。wic 把位图编码成 PNG。
+bool tryPasteImageFromClipboard(HWND hwnd, IWICImagingFactory* wic);
 
 // 公共：把消息追加到当前频道，并且如果此频道用户在底部就自动跟随到底
 void appendLocalMessage(Msg msg);

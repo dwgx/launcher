@@ -402,6 +402,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat
                 && chat::g_focus_composer) {
+                // Ctrl+V(c==0x16):剪贴板若有图片/文件 → 当媒体发,不粘成路径文本
+                if ((wchar_t)wp == 0x16 && ctrl
+                    && chat::tryPasteImageFromClipboard(hwnd, g_app.wic())) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 chat::onChar(hwnd, (wchar_t)wp, ctrl);
                 return 0;
             }

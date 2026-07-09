@@ -32,6 +32,7 @@ std::vector<PendingMention> g_pending_mentions;
 bool         g_picker_open = false;
 Tween        g_picker_t;
 int          g_picker_tab = 0;
+std::vector<ComposerAttachment> g_composer_attachments;
 Tween g_top_seg_x, g_top_seg_w;
 Tween g_pack_tab_x, g_pack_tab_w;
 PackDrag g_pack_drag;

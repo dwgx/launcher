@@ -335,6 +335,7 @@ const char* tr(const char* key) {
         {"chat.not_logged_in",  "Not signed in",    u8"未登录",            u8"未サインイン"},
         {"chat.composer_placeholder","Type something...",
                                                     u8"写点什么...",       u8"何か書く..."},
+        {"chat.send_enter",         u8"Send",            u8"发送",              u8"送信"},
 
         {"picker.import_short", "Import",           u8"导入",              u8"取り込み"},
         {"picker.export_short", "Export",           u8"导出",              u8"エクスポート"},

@@ -126,6 +126,13 @@ extern float g_picker_origin_x, g_picker_origin_y;
 extern LayoutRect g_picker_rect;
 extern LayoutRect g_picker_content_rect;
 extern LayoutRect g_emoji_button_rect;
+
+// 输入框附件暂存区(粘贴/拖拽/路径识别的图片先入这里,变缩略图 chip;发送时随文本一起发)。
+struct ComposerAttachment {
+    std::wstring path;          // 本地文件路径(上传源)
+    const char*  kind = "image"; // image / gif / video
+};
+extern std::vector<ComposerAttachment> g_composer_attachments;
 extern Tween g_picker_content_t;
 extern int g_picker_content_tab;
 

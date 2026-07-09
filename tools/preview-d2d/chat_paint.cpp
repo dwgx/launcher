@@ -103,12 +103,15 @@ int cursorFromComposerPoint(float x) {
 static constexpr float kComposerLineH   = 20.0f;   // 每行文字带高
 static constexpr float kComposerBaseH   = 64.0f;   // 1 行时的整条高度(含上下 padding)
 static constexpr int   kComposerMaxLines = 6;      // 封顶行数
+static constexpr float kAttachTrayH = 64.0f;       // 附件缩略图带高度
+static constexpr float kAttachThumb = 52.0f;       // 缩略图尺寸
 float composerHeight() {
     int lines = g_composer.logicalLineCount();
     if (lines < 1) lines = 1;
     if (lines > kComposerMaxLines) lines = kComposerMaxLines;
     float extra = (float)(lines - 1) * kComposerLineH;
-    return kComposerBaseH + extra;
+    float att = g_composer_attachments.empty() ? 0.0f : kAttachTrayH;   // 附件带高度
+    return kComposerBaseH + extra + att;
 }
 
 struct WrappedText;  // 定义见 chat_internal.h
@@ -1092,6 +1095,45 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         hit(cancel, [](){ g_pending_reply = PendingReply{}; }, true);
     }
 
+    // ===== 附件暂存带:粘贴/拖拽/路径识别的图片缩略图 chip(可 × 删),在文本区上方。=====
+    float att_h = g_composer_attachments.empty() ? 0.0f : kAttachTrayH;
+    if (att_h > 0.0f) {
+        float tx = ax + 14.0f, ty = ay + reply_h + 6.0f;
+        for (size_t i = 0; i < g_composer_attachments.size(); ++i) {
+            float cxp = tx + (float)i * (kAttachThumb + 8.0f);
+            LayoutRect chip{ cxp, ty, kAttachThumb, kAttachThumb };
+            // 缩略图
+            prim::fillRR(ctx, cxp, ty, kAttachThumb, kAttachThumb, 8.0f, br.solid(pal.card));
+            ID2D1Bitmap* bmp = app.images().fromFile(g_composer_attachments[i].path,
+                                                     (uint32_t)(kAttachThumb * 2));
+            if (bmp) {
+                ctx->PushAxisAlignedClip(D2D1::RectF(cxp, ty, cxp + kAttachThumb, ty + kAttachThumb),
+                                         D2D1_ANTIALIAS_MODE_ALIASED);
+                // 居中裁切铺满
+                auto ps = bmp->GetSize();
+                float scale = (std::max)(kAttachThumb / ps.width, kAttachThumb / ps.height);
+                float dw = ps.width * scale, dh = ps.height * scale;
+                ctx->DrawBitmap(bmp, D2D1::RectF(cxp + (kAttachThumb - dw) * 0.5f,
+                                                 ty + (kAttachThumb - dh) * 0.5f,
+                                                 cxp + (kAttachThumb + dw) * 0.5f,
+                                                 ty + (kAttachThumb + dh) * 0.5f),
+                                1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                ctx->PopAxisAlignedClip();
+            }
+            prim::strokeRR(ctx, cxp, ty, kAttachThumb, kAttachThumb, 8.0f,
+                           br.solidA(pal.divider, 1.0f), 1.0f);
+            // × 移除(右上角)
+            LayoutRect xb{ cxp + kAttachThumb - 16, ty - 2, 18, 18 };
+            prim::fillCircle(ctx, xb.x + 9, xb.y + 9, 9, br.solid(0x000000));
+            icons::drawIcon(app, icons::Name::X, xb.x + 4, xb.y + 4, 10, 0xFFFFFFFF);
+            size_t idx = i;
+            hit(xb, [idx](){
+                if (idx < g_composer_attachments.size())
+                    g_composer_attachments.erase(g_composer_attachments.begin() + idx);
+            }, true);
+        }
+    }
+
     const float ico_sz = 30.0f;
     float ix = ax + 14.0f;
     // emoji 按钮:单行时居中;多行时贴底(与增高的文本区/发送键同底对齐)。
@@ -1099,7 +1141,7 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     if (_nlines < 1) _nlines = 1;
     if (_nlines > kComposerMaxLines) _nlines = kComposerMaxLines;
     float _fh_pre = ico_sz + (float)(_nlines - 1) * kComposerLineH;
-    float _fy_pre = ay + reply_h + ((ah - reply_h) - _fh_pre) * 0.5f;
+    float _fy_pre = ay + reply_h + att_h + ((ah - reply_h - att_h) - _fh_pre) * 0.5f;
     float iy = _fy_pre + _fh_pre - ico_sz;   // 贴文本区底
     LayoutRect emoji_btn{ ix, iy, ico_sz, ico_sz };
     bool ehov = emoji_btn.contains(g_mouse);
@@ -1118,14 +1160,14 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
 
     // textarea(多行:硬换行 \n 分行,输入框随行数增高)
     float fx = ix + ico_sz + 10.0f;
-    float send_w = 38.0f;
+    float send_w = 76.0f;   // 为"⏎ 发送"胶囊按钮预留右侧空间
     float fw = aw - (fx - ax) - 14.0f - send_w - 10.0f;
     // 按逻辑行数算文本区高度;单行时与原 ico_sz 一致(圆角胶囊),多行时变圆角矩形。
     int   n_lines = g_composer.logicalLineCount();
     if (n_lines < 1) n_lines = 1;
     if (n_lines > kComposerMaxLines) n_lines = kComposerMaxLines;
     float fh = ico_sz + (float)(n_lines - 1) * kComposerLineH;
-    float fy = ay + reply_h + ((ah - reply_h) - fh) * 0.5f;
+    float fy = ay + reply_h + att_h + ((ah - reply_h - att_h) - fh) * 0.5f;
     float radius = (n_lines <= 1) ? fh * 0.5f : 14.0f;   // 单行胶囊,多行圆角矩形
     g_composer.bounds = { fx, fy, fw, fh };
 
@@ -1249,26 +1291,28 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
         g_focus_composer = true;
     }, true);
 
-    // send btn(贴文本区底部对齐,多行增高时按钮不动)
-    float sx = ax + aw - 14 - send_w;
-    float sy = fy + fh - send_w - 0.0f;
+    // send 按钮:改成体现"回车发送"的胶囊(⏎ + 文案),不再用纸飞机。贴文本区底对齐。
+    float btn_h = 30.0f;
+    auto* send_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f),
+                                        DWRITE_FONT_WEIGHT_BOLD);
+    std::wstring send_lbl = trW("chat.send_enter");   // "⏎ 发送"
+    float lbl_w = std::ceil(measureW(app, send_lbl, send_fmt));
+    float btn_w = lbl_w + 24.0f;
+    float sx = ax + aw - 14 - btn_w;
+    float sy = fy + fh - btn_h;
     if (sy < fy) sy = fy;
-    bool can_send = writable && !g_composer.text.empty();
-    LayoutRect send_btn{ sx, sy, send_w, send_w };
+    bool can_send = writable && (!g_composer.text.empty() || !g_composer_attachments.empty());
+    LayoutRect send_btn{ sx, sy, btn_w, btn_h };
     bool sh_ = send_btn.contains(g_mouse);
     uint32_t sbg = !can_send ? fadeArgb(pal.primary, 0.55f)
                             : (sh_ ? pal.primary_hover : pal.primary);
-    prim::fillCircle(ctx, sx + send_w * 0.5f, sy + send_w * 0.5f, send_w * 0.5f,
-                     br.solid(sbg));
-    icons::drawIcon(app, icons::Name::ArrowUp, sx + 10, sy + 10, 18, 0xFFFFFFFF, 2.1f);
+    prim::fillRR(ctx, sx, sy, btn_w, btn_h, btn_h * 0.5f, br.solid(sbg));
+    prim::drawTextNoWrap(ctx, send_lbl, send_fmt, sx, sy + 7, btn_w, 16,
+                         br.solidA(0xFFFFFF, 1.0f), DWRITE_TEXT_ALIGNMENT_CENTER);
     if (can_send) {
         hit(send_btn, []() {
-            if (sendTextMessage(GetActiveWindow(), g_composer.text)) {
-                g_composer.text.clear();
-                g_composer.cursor = 0;
-                g_composer.clearSel();
-                g_focus_composer = true;
-            }
+            sendComposer(GetActiveWindow());
+            g_focus_composer = true;
         }, true);
     } else {
         hit(send_btn, []() {

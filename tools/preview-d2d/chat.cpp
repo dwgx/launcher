@@ -27,8 +27,14 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <wincodec.h>
+#include <wrl/client.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 namespace launcher::d2d::chat {
 
@@ -342,6 +348,151 @@ void tick(float dt) {
     for (auto& kv : g_group_anim) kv.second.tick(dt);
 }
 
+// 把剪贴板 DIB(BITMAPINFO + 像素)用 WIC 编码成临时 PNG,返回文件路径(失败空)。
+// 走 HBITMAP → WIC CreateBitmapFromHBITMAP 路线,兼容各种位深/方向的 DIB。
+static std::wstring encodeDibToPngTemp(IWICImagingFactory* wic, void* dib, SIZE_T /*sz*/) {
+    using Microsoft::WRL::ComPtr;
+    BITMAPINFO* bi = (BITMAPINFO*)dib;
+    int w = bi->bmiHeader.biWidth;
+    int h = std::abs(bi->bmiHeader.biHeight);
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return L"";
+    // DIB 像素数据紧跟在头(+调色板/掩码)之后。用 CreateDIBitmap 建 HBITMAP。
+    HDC hdc = GetDC(nullptr);
+    const BYTE* bits = (const BYTE*)dib + bi->bmiHeader.biSize;
+    // 有掩码(BI_BITFIELDS)时像素前还有 3 个 DWORD;调色板同理。用 GetDIBits 更稳:
+    HBITMAP hbmp = CreateDIBitmap(hdc, &bi->bmiHeader, CBM_INIT, bits, bi, DIB_RGB_COLORS);
+    ReleaseDC(nullptr, hdc);
+    if (!hbmp) return L"";
+
+    ComPtr<IWICBitmap> wbmp;
+    HRESULT hr = wic->CreateBitmapFromHBITMAP(hbmp, nullptr, WICBitmapUseAlpha, &wbmp);
+    DeleteObject(hbmp);
+    if (FAILED(hr) || !wbmp) return L"";
+
+    // 输出路径:%LOCALAPPDATA%\Launcher\paste\<time>.png
+    std::wstring dir = fetch::mediaCacheDir(L"paste");
+    wchar_t name[64];
+    swprintf(name, 64, L"paste_%llu.png", (unsigned long long)GetTickCount64());
+    std::wstring outPath = dir + name;
+
+    ComPtr<IWICStream> stream;
+    if (FAILED(wic->CreateStream(&stream)) ||
+        FAILED(stream->InitializeFromFilename(outPath.c_str(), GENERIC_WRITE)))
+        return L"";
+    ComPtr<IWICBitmapEncoder> enc;
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc)) ||
+        FAILED(enc->Initialize(stream.Get(), WICBitmapEncoderNoCache)))
+        return L"";
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (FAILED(enc->CreateNewFrame(&frame, nullptr)) ||
+        FAILED(frame->Initialize(nullptr)))
+        return L"";
+    if (FAILED(frame->WriteSource(wbmp.Get(), nullptr))) return L"";
+    if (FAILED(frame->Commit()) || FAILED(enc->Commit())) return L"";
+    return outPath;
+}
+
+// Ctrl+V:剪贴板若有图片(CF_DIB)或复制的文件(CF_HDROP)→ 发媒体,返回 true。
+// CF_HDROP:逐个文件走 appendMedia(和拖拽一致)。
+// CF_DIB:用 WIC 把位图编码成临时 PNG(上传管线不支持 bmp),再 appendMedia。
+static bool tryPathTextToAttachment(const std::wstring& text);   // 前置声明
+bool tryPasteImageFromClipboard(HWND hwnd, IWICImagingFactory* wic) {
+    if (!requireActiveChannelWrite()) return false;
+    // 1) 复制的文件(资源管理器 Ctrl+C 文件)
+    if (IsClipboardFormatAvailable(CF_HDROP)) {
+        if (!OpenClipboard(hwnd)) return false;
+        bool handled = false;
+        HANDLE h = GetClipboardData(CF_HDROP);
+        if (h) {
+            HDROP drop = (HDROP)h;
+            UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < n; ++i) {
+                wchar_t path[MAX_PATH]{};
+                if (DragQueryFileW(drop, i, path, MAX_PATH)) { if (addComposerAttachment(path)) handled = true; }
+            }
+        }
+        CloseClipboard();
+        if (handled) return true;
+    }
+    // 2) 位图(截图/图片编辑器 Ctrl+C)→ 编码 PNG 到临时文件
+    if (wic && (IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB))) {
+        if (!OpenClipboard(hwnd)) return false;
+        bool ok = false;
+        UINT fmt = IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5 : CF_DIB;
+        HANDLE h = GetClipboardData(fmt);
+        if (h) {
+            void* dib = GlobalLock(h);
+            SIZE_T sz = GlobalSize(h);
+            if (dib && sz > sizeof(BITMAPINFOHEADER)) {
+                std::wstring outPath = encodeDibToPngTemp(wic, dib, sz);
+                if (!outPath.empty()) { ok = addComposerAttachment(outPath); }
+            }
+            if (dib) GlobalUnlock(h);
+        }
+        CloseClipboard();
+        if (ok) return true;
+    }
+    // 3) 剪贴板文本恰好是本地图片路径 → 也变 chip(而非粘成路径文字)
+    if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        if (!OpenClipboard(hwnd)) return false;
+        bool ok = false;
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+        if (h) {
+            const wchar_t* p = (const wchar_t*)GlobalLock(h);
+            if (p) { ok = tryPathTextToAttachment(p); GlobalUnlock(h); }
+        }
+        CloseClipboard();
+        if (ok) return true;   // 是路径 → 已入暂存区,吞掉粘贴
+    }
+    return false;
+}
+
+// 若 text 是"单个本地图片/媒体文件路径"→ 加入附件暂存区返回 true;否则 false。
+// 粘贴文本时用:粘进来的若是图片路径,直接变 chip 而非路径文字。
+static bool tryPathTextToAttachment(const std::wstring& text) {
+    // trim 首尾空白 + 去掉可能的引号
+    std::wstring p = text;
+    size_t a = p.find_first_not_of(L" \t\r\n\"");
+    size_t b = p.find_last_not_of(L" \t\r\n\"");
+    if (a == std::wstring::npos) return false;
+    p = p.substr(a, b - a + 1);
+    if (p.find(L'\n') != std::wstring::npos) return false;   // 多行不当路径
+    auto dot = p.find_last_of(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = p.substr(dot);
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    // 只认上传管线支持的扩展(不含 bmp — 上传不支持)
+    bool ok = ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp"
+           || ext == L".gif" || ext == L".mp4" || ext == L".webm";
+    if (!ok) return false;
+    if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) return false;  // 文件须存在
+    // 变成附件 chip(而非直接发路径文本)
+    return addComposerAttachment(p);
+}
+
+// 按扩展名归类可上传媒体;不支持返回 nullptr。
+static const char* mediaKindForPath(const std::wstring& path) {
+    auto dot = path.find_last_of(L'.');
+    if (dot == std::wstring::npos) return nullptr;
+    std::wstring ext = path.substr(dot);
+    for (auto& c : ext) c = (wchar_t)towlower(c);
+    if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp") return "image";
+    if (ext == L".gif") return "gif";
+    if (ext == L".mp4" || ext == L".webm") return "video";
+    return nullptr;
+}
+
+// 把图片/媒体加入输入框附件暂存区(变缩略图 chip),不立即发送。返回是否加入。
+bool addComposerAttachment(const std::wstring& path) {
+    if (!requireActiveChannelWrite()) return false;
+    const char* kind = mediaKindForPath(path);
+    if (!kind) return false;
+    if (g_composer_attachments.size() >= 9) return false;   // 上限,避免刷屏
+    g_composer_attachments.push_back({ path, kind });
+    g_focus_composer = true;
+    return true;
+}
+
 void appendMedia(const std::wstring& path) {
     if (!requireActiveChannelWrite()) return;
     Msg m;
@@ -502,6 +653,23 @@ bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
     return false;
 }
 
+// 发送输入框:先逐个发暂存附件(各自 image/gif/video 消息),再发文本(若有),清空。
+void sendComposer(HWND hwnd) {
+    if (!canWriteActiveChannel()) return;
+    bool sent_any = false;
+    for (auto& att : g_composer_attachments) {
+        appendMedia(att.path);   // 走现有 optimistic + 上传管线,各自成一条图片消息
+        sent_any = true;
+    }
+    g_composer_attachments.clear();
+    if (!g_composer.text.empty()) {
+        if (sendTextMessage(hwnd, g_composer.text)) { g_composer.reset(); sent_any = true; }
+    } else if (sent_any) {
+        g_composer.reset();
+    }
+    (void)sent_any;
+}
+
 void onChar(HWND hwnd, wchar_t c, bool ctrl) {
     if (!g_focus_composer) return;
     if (!canWriteActiveChannel()) {
@@ -509,12 +677,16 @@ void onChar(HWND hwnd, wchar_t c, bool ctrl) {
         return;
     }
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    // Backspace 且光标在文本最前 + 有附件 → 删最后一个附件(chip 作为整体删)
+    if (c == 0x08 && !ctrl && g_composer.cursor == 0 && !g_composer.hasSelection()
+        && !g_composer_attachments.empty()) {
+        g_composer_attachments.pop_back();
+        return;
+    }
     int r = g_composer.onChar(c, ctrl, shift, hwnd);
-    if (r == 2) {   // Enter(无 Shift)-> 发送
-        if (!g_composer.text.empty()) {
-            if (sendTextMessage(hwnd, g_composer.text)) {
-                g_composer.reset();
-            }
+    if (r == 2) {   // Enter(无 Shift)-> 发送(文本 + 暂存附件一起)
+        if (!g_composer.text.empty() || !g_composer_attachments.empty()) {
+            sendComposer(hwnd);
         }
     }
 }
