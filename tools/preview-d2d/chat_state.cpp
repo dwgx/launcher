@@ -33,6 +33,8 @@ bool         g_picker_open = false;
 Tween        g_picker_t;
 int          g_picker_tab = 0;
 std::vector<ComposerAttachment> g_composer_attachments;
+InputBox     g_picker_search;          // picker 顶部搜索框(打开即聚焦)
+bool         g_picker_search_focus = false;
 int          g_picker_sel_idx = -1;    // 键盘导航选中的 emoji 格(在 filtered 里的下标)
 // 动画:键盘选中格的滑动指示器(在 emoji grid 内平滑移动到选中格)。
 Tween        g_picker_sel_x, g_picker_sel_y;
@@ -117,12 +119,17 @@ void setPickerOpen(bool open) {
         g_picker_t.start(g_picker_t.value(), 1.0f, 0.18f, 0, curve::easeOutCubic);
         // 首开也要内容淡入(否则 content_t.started=false → paint 用 1.0 瞬显,首次无动画)
         g_picker_content_t.start(0.0f, 1.0f, 0.16f, 0, curve::easeOutCubic);
+        g_picker_search_focus = true;    // 打开即聚焦搜索框,可直接打字过滤
         g_picker_sel_idx = -1;
     } else {
         g_picker_t.start(g_picker_t.value(), 0.0f, 0.12f, 0, curve::easeOutCubic);
         g_picker_scroll_drag = PickerScrollDrag{};
         g_pack_drag = PackDrag{};
         g_react_target.active = false;   // 关闭 picker 即退出 react 选择模式
+        g_picker_search.text.clear();    // 关闭清空搜索,下次打开是全量
+        g_picker_search.cursor = 0;
+        g_picker_search.clearSel();
+        g_picker_search_focus = false;
         g_picker_sel_idx = -1;
     }
 }

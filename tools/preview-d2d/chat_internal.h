@@ -126,6 +126,8 @@ extern float g_picker_origin_x, g_picker_origin_y;
 extern LayoutRect g_picker_rect;
 extern LayoutRect g_picker_content_rect;
 extern LayoutRect g_emoji_button_rect;
+extern InputBox g_picker_search;
+extern bool g_picker_search_focus;
 extern int  g_picker_sel_idx;
 
 // 输入框附件暂存区(粘贴/拖拽/路径识别的图片先入这里,变缩略图 chip;发送时随文本一起发)。
@@ -139,7 +141,10 @@ extern int   g_picker_sel_anim_idx;
 extern float g_picker_cat_pill_x;
 extern bool  g_picker_cat_pill_init;
 
+// emoji 数据 + 搜索(定义在 chat_paint.cpp;chat.cpp 键盘导航共用)
 extern const wchar_t* kEmoji[];
+extern const char* kEmojiKw[];
+std::vector<int> filteredEmojiIndices(const std::wstring& query_w);
 int  emojiCount();                            // kEmoji 数量(定义在 chat_paint.cpp)
 void sendEmojiGlyph(const std::wstring& s);   // 定义在 chat.cpp
 extern Tween g_picker_content_t;

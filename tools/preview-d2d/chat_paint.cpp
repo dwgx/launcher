@@ -1645,6 +1645,49 @@ const wchar_t* kEmoji[] = {
     L"🌹",L"🌺",L"🌻",L"🌷",L"🌴",L"🍀",
 };
 
+// 与 kEmoji 逐项对齐的搜索关键词(英文,空格分隔;分组基础词 + 高频项精确词)。
+// picker 搜索框打字时按子串匹配。行结构与 kEmoji 一一对应,便于核对。
+extern const char* kEmojiKw[];   // 外部链接
+const char* kEmojiKw[] = {
+    // 笑脸
+    "grin smile happy","smiley happy joy","laugh happy","grin beam","laugh haha","sweat laugh nervous","rofl rolling laugh lol","joy laugh cry lol tears","slight smile","upside down silly",
+    "wink","blush smile happy","angel innocent halo","love hearts adore","heart eyes love","star struck wow","kiss blow love","kiss","kiss closed","kiss smile",
+    "yum tasty tongue","tongue playful","wink tongue crazy","zany crazy silly","tongue squint","money mouth rich","hug hugging","giggle oops hand","shush quiet silence","thinking hmm think",
+    "zipper mouth quiet","raised eyebrow skeptical","neutral meh","expressionless blank","no mouth silent","smirk sly","unamused annoyed","eye roll rolling eyes","grimace awkward","lying liar nose",
+    "relieved calm","pensive sad","sleepy tired","drool","sleep zzz","mask sick","sick fever thermometer","hurt bandage injured","nausea sick gross","vomit puke sick",
+    // 情绪
+    "party celebrate hat","cool sunglasses","nerd geek glasses","monocle inspect","confused","worried","frown sad","open mouth wow","hushed surprised","astonished shocked",
+    "flushed embarrassed","pleading puppy eyes cute","frowning","anguished","fearful scared","anxious sweat","sad disappointed","cry tear sad","sob crying loud","scream shock fear",
+    "confounded","persevere struggle","disappointed sad","sweat down","weary tired","tired exhausted","yawn bored","huff triumph steam","rage angry mad","angry mad",
+    "cursing swearing angry","devil evil grin","imp angry devil","skull dead","poop","clown","ogre monster","goblin","ghost boo","alien",
+    "space invader alien","robot bot",
+    // 手势
+    "thumbs up like yes ok good","thumbs down dislike no bad","fist punch","raised fist","fist left","fist right","clap applause","raise hands celebrate","open hands","palms up",
+    "handshake deal","pray thanks please","victory peace","fingers crossed luck","love you hand","rock horns","call me hand","ok hand perfect","point left","point right",
+    "point up","point down","index up","raised hand stop","back of hand","hand fingers","vulcan spock","wave hi hello bye","muscle strong flex","mechanical arm",
+    // 心
+    "red heart love","orange heart","yellow heart","green heart","blue heart","purple heart","black heart","white heart","brown heart","broken heart sad",
+    "heart exclamation","two hearts love","revolving hearts","beating heart","growing heart","sparkling heart","cupid heart arrow","gift heart","heart decoration",
+    // 动作 / 标记
+    "hundred 100 perfect","anger angry symbol","boom explosion collision","dizzy stars","sweat drops water","dash wind fast","bomb","speech bubble message","thought bubble","zzz sleep",
+    "fire lit hot flame","glowing star","star","sparkles shiny stars","zap lightning bolt","rainbow","sun sunny","moon night","cloud","snowflake cold snow",
+    // 物品 / 食物
+    "party popper tada celebrate","confetti ball celebrate","gift present","birthday cake","cake slice dessert","pizza","burger hamburger","fries","hotdog","popcorn",
+    "sushi","bento lunch","ramen noodles","rice ball","donut","cookie","chocolate","candy sweet","lollipop","pudding custard",
+    "cup straw drink soda","beers cheers","beer","wine","cocktail drink","coffee tea hot","tea green","milk glass",
+    // 动物
+    "dog puppy","cat kitten","mouse","hamster","rabbit bunny","fox","bear","panda","koala","tiger",
+    "lion","cow","pig","frog","monkey face","see no evil monkey","hear no evil monkey","speak no evil monkey","monkey","chicken",
+    "penguin","baby chick","duck","eagle","owl","wolf","boar",
+    // 游戏 / 运动
+    "game controller video game","joystick arcade","dart target bullseye","dice game","flower cards","chess pawn","bowling","pool 8 ball billiards","soccer football","basketball",
+    "american football","baseball","tennis","volleyball","rugby","rocket launch","gem diamond","music note","musical notes","cherry blossom flower",
+    "rose flower","hibiscus flower","sunflower","tulip flower","palm tree","clover luck",
+};
+static_assert(sizeof(kEmojiKw) / sizeof(kEmojiKw[0])
+              == sizeof(kEmoji) / sizeof(kEmoji[0]),
+              "kEmojiKw must stay row-aligned with kEmoji");
+
 // emoji 分区:每组的起始下标 + 分类 chip 用的代表 emoji。点 chip 滚到该组。
 struct EmojiGroup { int start; const wchar_t* icon; };
 const EmojiGroup kEmojiGroups[] = {
@@ -1660,6 +1703,46 @@ const EmojiGroup kEmojiGroups[] = {
 constexpr int kEmojiGroupCount = (int)(sizeof(kEmojiGroups) / sizeof(kEmojiGroups[0]));
 
 int emojiCount() { return (int)(sizeof(kEmoji) / sizeof(kEmoji[0])); }
+
+// 按搜索串过滤 emoji,返回命中的 kEmoji 下标列表(空串=全部)。
+// 匹配规则:query 小写后按空格拆词,每个词都要能在该 emoji 的关键词串里子串命中(AND)。
+std::vector<int> filteredEmojiIndices(const std::wstring& query_w) {
+    int total = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
+    std::vector<int> out;
+    // 原始查询是否"实质为空"(去掉首尾空白后无字符)。用于区分"没输入"与"只输了非 ascii"。
+    bool raw_blank = query_w.find_first_not_of(L" \t\r\n") == std::wstring::npos;
+    // wstring query -> 小写 ascii(emoji 关键词是英文;非 ascii 字符被丢弃)
+    std::string q;
+    for (wchar_t c : query_w) {
+        if (c < 128) q.push_back((char)towlower(c));
+    }
+    // 去首尾空格
+    size_t a = q.find_first_not_of(' ');
+    if (a == std::string::npos) { q.clear(); }
+    else { q = q.substr(a, q.find_last_not_of(' ') - a + 1); }
+    if (q.empty()) {
+        // 真的没输入 → 全量;输了内容但全是非 ascii(如纯中文)→ 无命中(关键词是英文)。
+        if (!raw_blank) return out;   // 空(非 ascii 查询无法匹配英文关键词)
+        out.reserve(total);
+        for (int i = 0; i < total; ++i) out.push_back(i);
+        return out;
+    }
+    // 拆词
+    std::vector<std::string> terms;
+    { size_t s = 0; while (s < q.size()) {
+        size_t e = q.find(' ', s);
+        if (e == std::string::npos) e = q.size();
+        if (e > s) terms.push_back(q.substr(s, e - s));
+        s = e + 1;
+    } }
+    for (int i = 0; i < total; ++i) {
+        std::string kw = kEmojiKw[i];   // 已是小写英文
+        bool all = true;
+        for (auto& t : terms) { if (kw.find(t) == std::string::npos) { all = false; break; } }
+        if (all) out.push_back(i);
+    }
+    return out;
+}
 
 void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     if (!g_picker_open && g_picker_t.value() < 0.001f) return;
@@ -1736,6 +1819,55 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     hit(tab_pk, [](){
         setPickerTabSmooth(g_picker_tab == 0 ? 1 : g_picker_tab);
     }, true);
+
+    // ===== emoji 搜索框(仅 emoji tab,占顶部右侧空白;pack tab 让位给管理按钮)=====
+    // 打开 picker 即聚焦,可直接打字过滤。放 tab pill 右侧,不占用 grid 竖向空间。
+    if (g_picker_tab == 0) {
+        float sb_x = tab_pk.x + tab_pk.w + 10;
+        float sb_w = px + pw - 14 - sb_x;
+        float sb_h = 26.0f, sb_y = seg_y;
+        LayoutRect sb{ sb_x, sb_y, sb_w, sb_h };
+        bool sb_focus = g_picker_search_focus;
+        prim::fillRR(ctx, sb_x, sb_y, sb_w, sb_h, sb_h * 0.5f,
+                     br.solidA(pal.surface, t * (sb_focus ? 1.0f : 0.7f)));
+        if (sb_focus)
+            prim::strokeRR(ctx, sb_x, sb_y, sb_w, sb_h, sb_h * 0.5f,
+                           br.solidA(pal.primary, t * 0.6f), 1.2f);
+        icons::drawIcon(app, icons::Name::Search, sb_x + 8, sb_y + 6, 14,
+                        fadeArgb(pal.text_muted, t));
+        float txt_x = sb_x + 28, txt_w = sb_w - 28 - 22;
+        auto* sb_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.0f));
+        if (g_picker_search.text.empty()) {
+            prim::drawTextNoWrap(ctx, trW("picker.search"), sb_fmt, txt_x, sb_y + 6, txt_w, 16,
+                                 br.solidA(pal.text_muted, t * 0.8f));
+        } else {
+            prim::drawTextNoWrap(ctx, g_picker_search.text, sb_fmt, txt_x, sb_y + 6, txt_w, 16,
+                                 br.solidA(pal.text, t));
+            // 闪烁光标(聚焦时)
+            if (sb_focus) {
+                int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
+                if (phase < 500) {
+                    float cxx = txt_x + (std::min)(txt_w,
+                        std::ceil(measureW(app, g_picker_search.text, sb_fmt)));
+                    prim::drawLine(ctx, cxx + 1, sb_y + 6, cxx + 1, sb_y + 20,
+                                   br.solidA(pal.primary, t), 1.4f);
+                }
+            }
+            // 清空 × 按钮
+            LayoutRect xb{ sb_x + sb_w - 22, sb_y + 4, 18, 18 };
+            bool xhov = xb.contains(g_mouse);
+            icons::drawIcon(app, icons::Name::X, xb.x + 4, xb.y + 4, 10,
+                            fadeArgb(xhov ? pal.text : pal.text_muted, t));
+            hit(xb, [](){
+                g_picker_search.text.clear(); g_picker_search.cursor = 0;
+                g_picker_search.clearSel();
+                g_picker_search_focus = true; g_picker_sel_idx = -1;
+                g_emoji_scroll_y = 0.0f;
+            }, true);
+        }
+        // 点搜索框 → 聚焦(空框时整条命中;非空时 × 已单独命中,这里覆盖其余区域)
+        hit(sb, [](){ g_picker_search_focus = true; g_picker_sel_idx = -1; }, true);
+    }
 
     // 决定当前 pack 状态（用于按钮 enable / 操作目标）
     auto& packs = sticker::g_packs;
@@ -1826,12 +1958,14 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     float ct = t * content_t * open_content_t;
     float content_y = (1.0f - content_t) * 8.0f;
 
-    // ===== 分类 chip 行(仅 emoji tab)=====:8 个分区图标,点击滚到该组。grid 下移一行。
-    const float cat_row_h = (g_picker_tab == 0) ? 34.0f : 0.0f;
+    // ===== 分类 chip 行(仅 emoji tab 且无搜索)=====:8 个分区图标,点击滚到该组。grid 下移一行。
+    // 搜索激活时结果是过滤子集,分类跳转无意义 → 隐藏分类行,把竖向空间还给结果 grid。
+    bool search_active = (g_picker_tab == 0) && !g_picker_search.text.empty();
+    const float cat_row_h = (g_picker_tab == 0 && !search_active) ? 34.0f : 0.0f;
     // emoji grid 列数:按卡片内宽填满(cell 37)。pw=480 → inner 452 → 12 列,消除右侧空白。
     const float kEmojiCell = 37.0f;
     int cols = (std::max)(8, (int)((pw - 28.0f) / kEmojiCell));   // 填满卡片宽度
-    if (g_picker_tab == 0) {
+    if (g_picker_tab == 0 && !search_active) {
         float chip = 30.0f, cgap = 4.0f;
         float cy0 = py + 46 + content_y;
         float cx0 = px + 14;
@@ -1874,12 +2008,10 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     }
 
     if (g_picker_tab == 0) {
-        // ===== emoji grid + 垂直滚动(分区,不过滤;分类 chip 跳转)=====
-        int total_n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
-        std::vector<int> filtered;   // 分区模式:全量顺序
-        filtered.reserve(total_n);
-        for (int i = 0; i < total_n; ++i) filtered.push_back(i);
-        int emoji_all = total_n;
+        // ===== emoji grid + 垂直滚动(搜索过滤;空串=全量 → 分类 chip 跳转)=====
+        int emoji_all = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
+        std::vector<int> filtered = filteredEmojiIndices(g_picker_search.text);
+        int total_n = (int)filtered.size();   // 当前(过滤后)结果数
         if ((int)g_emoji_hover_t.size() != emoji_all) {
             g_emoji_hover_t.assign(emoji_all, 0.0f);
         }
@@ -1980,6 +2112,14 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             hit(cell_r, [e](){ sendEmojiGlyph(e); }, true);
         }
         ctx->PopAxisAlignedClip();
+        // 搜索无结果的空态提示
+        if (total_n == 0 && search_active) {
+            auto* empty_fmt = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
+            prim::drawText_(ctx, trW("picker.search"), empty_fmt,
+                            grid_x, grid_y + view_h * 0.5f - 10, grid_w, 20,
+                            br.solidA(pal.text_muted, ct * 0.8f),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
         // 滚动条
         if (max_scroll > 0) {
             float bar_x = grid_x + cols * cell + 2;

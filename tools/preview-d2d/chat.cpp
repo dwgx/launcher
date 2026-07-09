@@ -668,7 +668,21 @@ void sendEmojiGlyph(const std::wstring& s) {
     }
 }
 
+// picker 顶部搜索框打字 → 过滤 emoji。仅 emoji tab + 搜索框聚焦时消费(防止漏进 composer)。
+// 返回 true=已消费(printable/退格/Enter/Tab 都吞掉,避免键漏到下方 composer)。
+bool onPickerChar(HWND hwnd, wchar_t c, bool ctrl) {
+    if (!g_picker_open || g_picker_tab != 0) return false;
+    if (!g_picker_search_focus) return false;
+    // 交给 InputBox:printable 插入、0x08 退格、Ctrl+A/C/V/X。Enter/Tab 由 onPickerKey 处理。
+    g_picker_search.onChar(c, ctrl, hwnd);
+    // 过滤条件变了 → 选中回到首格,滚动回顶(paint 会按新结果重新钳)。
+    g_picker_sel_idx = -1;
+    g_emoji_scroll_y = 0.0f;
+    return true;   // 吞掉:emoji tab 打字只喂搜索框,不漏给 composer
+}
+
 // picker 打开时的按键 → 方向键导航 / Enter 发送 / Tab 切 tab。返回 true=已消费。
+// 导航基于当前"过滤后"的结果集(g_picker_search 决定),sel_idx 是结果集内的下标。
 bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (!g_picker_open) return false;
     const int cols = 8;
@@ -678,7 +692,8 @@ bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         return true;
     }
     if (g_picker_tab != 0) return false;   // 导航目前只覆盖 emoji tab
-    int total = emojiCount();
+    std::vector<int> filtered = filteredEmojiIndices(g_picker_search.text);
+    int total = (int)filtered.size();
     if (vk == VK_DOWN || vk == VK_UP || vk == VK_LEFT || vk == VK_RIGHT) {
         if (total == 0) return true;
         if (g_picker_sel_idx < 0) { g_picker_sel_idx = 0; return true; }
@@ -697,8 +712,15 @@ bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         return true;
     }
     if (vk == VK_RETURN) {
+        if (total == 0) return true;
         int sel = g_picker_sel_idx >= 0 ? g_picker_sel_idx : 0;
-        if (sel >= 0 && sel < total) sendEmojiGlyph(kEmoji[sel]);
+        if (sel >= 0 && sel < total) sendEmojiGlyph(kEmoji[filtered[sel]]);
+        return true;
+    }
+    // 搜索框聚焦时吞掉 Del/Home/End,避免漏到下方 composer 误编辑其文本。
+    if (g_picker_search_focus && (vk == VK_DELETE || vk == VK_HOME || vk == VK_END)) {
+        g_picker_search.onKey(vk, shift, ctrl);
+        g_picker_sel_idx = -1;
         return true;
     }
     (void)hwnd; (void)shift; (void)ctrl;

@@ -104,6 +104,7 @@ const char* tr(const char* key) {
                                                     u8"社区交易市场（出售 .cfg / 灵敏度配置）",
                                                                           u8"コミュニティトレード"},
         {"picker.emoji",        "Emoji",            u8"表情",              u8"絵文字"},
+        {"picker.search",       "Search emoji",     u8"搜索表情",          u8"絵文字を検索"},
         {"picker.packs",        "Packs",            u8"表情包",            u8"スタンプ"},
         {"picker.new",          "+ New",            u8"+ 新建",            u8"+ 新規"},
         {"picker.import",       "↥ Import",         u8"↥ 导入",            u8"↥ 取り込み"},
