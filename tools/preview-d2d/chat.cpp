@@ -345,6 +345,7 @@ void tick(float dt) {
     g_popup_t.tick(dt);
     g_top_seg_x.tick(dt); g_top_seg_w.tick(dt);
     g_pack_tab_x.tick(dt); g_pack_tab_w.tick(dt);
+    g_picker_sel_x.tick(dt); g_picker_sel_y.tick(dt);
     for (auto& kv : g_group_anim) kv.second.tick(dt);
 }
 
@@ -650,6 +651,57 @@ bool onMouseLUp(HWND /*hwnd*/, POINT /*dip*/) {
     g_composer_drag.active = false;
     g_scroll_drag.active = false;
     g_picker_scroll_drag.active = false;
+    return false;
+}
+
+// 发送/插入一个 emoji glyph(键盘 Enter 与鼠标点击共用)。
+void sendEmojiGlyph(const std::wstring& s) {
+    if (g_react_target.active) {
+        reactToMessage(GetActiveWindow(), g_react_target.slug,
+                       g_react_target.server_id, s, /*remove=*/false);
+        g_react_target.active = false;
+        setPickerOpen(false);
+    } else {
+        g_composer.replaceSelection(s);
+        g_focus_composer = true;
+        // 不自动关 picker — 用户可能连续选
+    }
+}
+
+// picker 打开时的按键 → 方向键导航 / Enter 发送 / Tab 切 tab。返回 true=已消费。
+bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
+    if (!g_picker_open) return false;
+    const int cols = 8;
+    if (vk == VK_TAB) {
+        setPickerTabSmooth(g_picker_tab == 0 ? 1 : 0);
+        g_picker_sel_idx = -1;
+        return true;
+    }
+    if (g_picker_tab != 0) return false;   // 导航目前只覆盖 emoji tab
+    int total = emojiCount();
+    if (vk == VK_DOWN || vk == VK_UP || vk == VK_LEFT || vk == VK_RIGHT) {
+        if (total == 0) return true;
+        if (g_picker_sel_idx < 0) { g_picker_sel_idx = 0; return true; }
+        int idx = g_picker_sel_idx;
+        if (vk == VK_RIGHT) idx = (std::min)(idx + 1, total - 1);
+        else if (vk == VK_LEFT) idx = (std::max)(idx - 1, 0);
+        else if (vk == VK_DOWN) idx = (std::min)(idx + cols, total - 1);
+        else if (vk == VK_UP)   idx = (std::max)(idx - cols, 0);
+        g_picker_sel_idx = idx;
+        // 滚动跟随:让选中行可见
+        float cell = 37.0f;
+        float sel_top = (float)(idx / cols) * cell;
+        if (sel_top < g_emoji_scroll_y) g_emoji_scroll_y = sel_top;
+        else if (sel_top + cell > g_emoji_scroll_y + g_emoji_grid_h_last)
+            g_emoji_scroll_y = sel_top + cell - g_emoji_grid_h_last;
+        return true;
+    }
+    if (vk == VK_RETURN) {
+        int sel = g_picker_sel_idx >= 0 ? g_picker_sel_idx : 0;
+        if (sel >= 0 && sel < total) sendEmojiGlyph(kEmoji[sel]);
+        return true;
+    }
+    (void)hwnd; (void)shift; (void)ctrl;
     return false;
 }
 

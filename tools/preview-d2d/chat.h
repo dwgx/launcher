@@ -169,6 +169,8 @@ bool onMouseRDown(HWND hwnd, POINT dip);
 // 点是否落在消息流区域(NCHITTEST 用:流区应为 HTCLIENT,否则纯文本消息行
 // 会被判成 HTCAPTION 拖窗 → 右键收不到 WM_RBUTTONDOWN → 菜单弹不出)。
 bool pointInStream(POINT dip);
+// picker 打开时的键盘输入:方向键导航 / Enter 发送 / Tab 切 tab。
+bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl);
 // composer 光标 DIP 坐标(IME 候选窗定位用;paint 每帧更新)。
 extern float g_composer_caret_dip_x;
 extern float g_composer_caret_dip_y;

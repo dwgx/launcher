@@ -126,6 +126,7 @@ extern float g_picker_origin_x, g_picker_origin_y;
 extern LayoutRect g_picker_rect;
 extern LayoutRect g_picker_content_rect;
 extern LayoutRect g_emoji_button_rect;
+extern int  g_picker_sel_idx;
 
 // 输入框附件暂存区(粘贴/拖拽/路径识别的图片先入这里,变缩略图 chip;发送时随文本一起发)。
 struct ComposerAttachment {
@@ -133,6 +134,14 @@ struct ComposerAttachment {
     const char*  kind = "image"; // image / gif / video
 };
 extern std::vector<ComposerAttachment> g_composer_attachments;
+extern Tween g_picker_sel_x, g_picker_sel_y;
+extern int   g_picker_sel_anim_idx;
+extern float g_picker_cat_pill_x;
+extern bool  g_picker_cat_pill_init;
+
+extern const wchar_t* kEmoji[];
+int  emojiCount();                            // kEmoji 数量(定义在 chat_paint.cpp)
+void sendEmojiGlyph(const std::wstring& s);   // 定义在 chat.cpp
 extern Tween g_picker_content_t;
 extern int g_picker_content_tab;
 

@@ -1607,6 +1607,7 @@ void paintChatPane(D2DApp& app, float ax, float ay, float aw, float ah) {
 
 // ============== Picker ==============
 // 200+ 常用 emoji — 不分类，按 group 排（Segoe UI Emoji 都能渲染）。picker 区域加滚动。
+extern const wchar_t* kEmoji[];   // 外部链接(chat.cpp 键盘导航共用)
 const wchar_t* kEmoji[] = {
     // 笑脸
     L"😀",L"😃",L"😄",L"😁",L"😆",L"😅",L"🤣",L"😂",L"🙂",L"🙃",
@@ -1644,6 +1645,22 @@ const wchar_t* kEmoji[] = {
     L"🌹",L"🌺",L"🌻",L"🌷",L"🌴",L"🍀",
 };
 
+// emoji 分区:每组的起始下标 + 分类 chip 用的代表 emoji。点 chip 滚到该组。
+struct EmojiGroup { int start; const wchar_t* icon; };
+const EmojiGroup kEmojiGroups[] = {
+    {   0, L"😀" },   // 笑脸
+    {  50, L"🥳" },   // 情绪
+    {  92, L"👍" },   // 手势
+    { 122, L"❤" },    // 心
+    { 141, L"🔥" },   // 动作 / 标记
+    { 161, L"🍕" },   // 物品 / 食物
+    { 189, L"🐶" },   // 动物
+    { 216, L"🎮" },   // 游戏 / 运动
+};
+constexpr int kEmojiGroupCount = (int)(sizeof(kEmojiGroups) / sizeof(kEmojiGroups[0]));
+
+int emojiCount() { return (int)(sizeof(kEmoji) / sizeof(kEmoji[0])); }
+
 void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     if (!g_picker_open && g_picker_t.value() < 0.001f) return;
     float t = g_picker_t.value();
@@ -1657,8 +1674,13 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     //(导入文件/导入/导出/新建,约 247 宽)在窄面板下重叠;480 宽下按钮组左缘
     // 约 px+219,离标签 px+160 有 ~59px 余量。
     float pw = 480, ph = 340;
+    float win_w = app.widthDip(), win_h = app.heightDip();
+    // 贴表情按钮上方(原位)。仅做不超窗钳制,不再居中。
     float px = anchor_x;
     float py = anchor_y - ph - 8 + (1.0f - t) * 14.0f;
+    if (px + pw > win_w - 8.0f) px = win_w - 8.0f - pw;
+    if (px < 8.0f) px = 8.0f;
+    if (py < 8.0f) py = 8.0f;
     g_picker_origin_x = px; g_picker_origin_y = py;
     g_picker_rect = { px, py, pw, ph };
     markOverlayRect(px, py, pw, ph);   // 统一 overlay 几何
@@ -1747,6 +1769,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         hit(r, std::move(on_click), true);
     };
     // 按钮宽度按文案实测（日文「エクスポート」比中「导出」宽得多），最小 48。
+    // 几何在函数作用域(顶部固定命中层要复用);pack 管理按钮只在表情包 tab 显示。
     std::wstring imp_lbl = trW("picker.import_short");
     std::wstring exp_lbl = trW("picker.export_short");
     std::wstring new_lbl = trW("picker.new_short");
@@ -1762,6 +1785,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     float bx_exp = bx_new - bgap - bw_exp;
     float bx_imp = bx_exp - bgap - bw_imp;
     float bx_files = bx_imp - bgap - bw_files;
+    if (g_picker_tab > 0) {   // 仅表情包 tab 画 pack 管理按钮
     // [⁝⁝ 导入文件]（多选文件，紧邻文件夹导入左侧）
     draw_btn(bx_files, right_btn_y, bw_files, 26, files_lbl, pal.text, false, [cur_pid](){
         if (cur_pid.empty()) {
@@ -1795,21 +1819,76 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         setPickerOpen(false);
         PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
     });
+    }  // if (g_picker_tab > 0) — pack 按钮仅表情包 tab
 
     float content_t = g_picker_content_t.started ? g_picker_content_t.value() : 1.0f;
     float open_content_t = clampf((t - 0.22f) / 0.78f, 0.0f, 1.0f);
     float ct = t * content_t * open_content_t;
     float content_y = (1.0f - content_t) * 8.0f;
 
+    // ===== 分类 chip 行(仅 emoji tab)=====:8 个分区图标,点击滚到该组。grid 下移一行。
+    const float cat_row_h = (g_picker_tab == 0) ? 34.0f : 0.0f;
+    // emoji grid 列数:按卡片内宽填满(cell 37)。pw=480 → inner 452 → 12 列,消除右侧空白。
+    const float kEmojiCell = 37.0f;
+    int cols = (std::max)(8, (int)((pw - 28.0f) / kEmojiCell));   // 填满卡片宽度
     if (g_picker_tab == 0) {
-        // ===== 8 列 emoji grid + 垂直滚动 =====
-        int cols = 8;
-        int total_n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
-        if ((int)g_emoji_hover_t.size() != total_n) {
-            g_emoji_hover_t.assign(total_n, 0.0f);
+        float chip = 30.0f, cgap = 4.0f;
+        float cy0 = py + 46 + content_y;
+        float cx0 = px + 14;
+        auto* cat_fmt = app.texts().format(L"Segoe UI Emoji", ptToDip(13.0f));
+        // 当前滚动落在哪个组 → 活动 chip;滑块 x 平滑跟随(滚动时联动左右滑)。
+        int cur_first = (int)(g_emoji_scroll_y / 37.0f) * cols;
+        int active_g = 0;
+        for (int g = 0; g < kEmojiGroupCount; ++g)
+            if (kEmojiGroups[g].start <= cur_first) active_g = g;
+        float pill_tgt = cx0 + active_g * (chip + cgap);
+        if (!g_picker_cat_pill_init || !g_anim.pickerAnim()) {
+            g_picker_cat_pill_x = pill_tgt; g_picker_cat_pill_init = true;
+        } else {
+            g_picker_cat_pill_x += (pill_tgt - g_picker_cat_pill_x) * 0.22f;  // 平滑追踪
         }
-        float cell = 37.0f;
-        float grid_x = px + 14, grid_y = py + 50 + content_y;
+        // 活动滑块(滑动)
+        prim::fillRR(ctx, g_picker_cat_pill_x, cy0, chip, chip, 7.0f,
+                     br.solidA(pal.primary, ct * 0.18f));
+        for (int g = 0; g < kEmojiGroupCount; ++g) {
+            float chx = cx0 + g * (chip + cgap);
+            LayoutRect cr{ chx, cy0, chip, chip };
+            bool chov = cr.contains(g_mouse);
+            if (chov && g != active_g)
+                prim::fillRR(ctx, chx, cy0, chip, chip, 7.0f,
+                             br.solidA(pal.primary, ct * 0.08f));
+            ID2D1Bitmap* cbmp = app.emojis().get(kEmojiGroups[g].icon, chip - 8, ptToDip(13.0f));
+            if (cbmp)
+                ctx->DrawBitmap(cbmp, D2D1::RectF(chx + 4, cy0 + 4, chx + chip - 4, cy0 + chip - 4),
+                                ct, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            else
+                prim::drawText_(ctx, kEmojiGroups[g].icon, cat_fmt, chx, cy0 + 4, chip, chip - 4,
+                                br.solidA(pal.text, ct), DWRITE_TEXT_ALIGNMENT_CENTER);
+            int gstart = kEmojiGroups[g].start;
+            hit(cr, [gstart](){
+                // 滚到该组首行
+                g_emoji_scroll_y = (float)(gstart / 8) * 37.0f;
+                g_picker_sel_idx = -1;
+            }, true);
+        }
+    }
+
+    if (g_picker_tab == 0) {
+        // ===== emoji grid + 垂直滚动(分区,不过滤;分类 chip 跳转)=====
+        int total_n = (int)(sizeof(kEmoji) / sizeof(kEmoji[0]));
+        std::vector<int> filtered;   // 分区模式:全量顺序
+        filtered.reserve(total_n);
+        for (int i = 0; i < total_n; ++i) filtered.push_back(i);
+        int emoji_all = total_n;
+        if ((int)g_emoji_hover_t.size() != emoji_all) {
+            g_emoji_hover_t.assign(emoji_all, 0.0f);
+        }
+        // 键盘选中下标钳到当前结果范围
+        if (g_picker_sel_idx >= total_n) g_picker_sel_idx = total_n - 1;
+        float cell = kEmojiCell;
+        // grid 居中:cols*cell 居中于卡片内宽,左右留等宽边距
+        float grid_w = cols * cell;
+        float grid_x = px + (pw - grid_w) * 0.5f, grid_y = py + 50 + cat_row_h + content_y;
         // viewport：emoji 区高度 = picker 底部 - grid_y - 12 边距
         float view_h = (py + ph - 12) - grid_y;
         int rows_total = (total_n + cols - 1) / cols;
@@ -1832,6 +1911,30 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         ctx->PushAxisAlignedClip(D2D1::RectF(grid_x, grid_y, grid_x + cols * cell, grid_y + view_h),
                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         auto* em_fmt = app.texts().format(L"Segoe UI Emoji", ptToDip(16.0f));
+
+        // 键盘选中滑动指示器:选中格变化时平滑滑到新格(而非瞬跳)。
+        if (g_picker_sel_idx >= 0 && g_picker_sel_idx < total_n) {
+            float tgt_x = grid_x + (g_picker_sel_idx % cols) * cell;
+            float tgt_y = grid_y + (g_picker_sel_idx / cols) * cell - g_emoji_scroll_y;
+            if (g_picker_sel_anim_idx != g_picker_sel_idx) {
+                float fx0 = g_picker_sel_anim_idx < 0 ? tgt_x : g_picker_sel_x.value();
+                float fy0 = g_picker_sel_anim_idx < 0 ? tgt_y : g_picker_sel_y.value();
+                float sd = AnimSettings::dur(g_anim.pickerAnim(), 0.16f);
+                g_picker_sel_x.start(fx0, tgt_x, sd, 0, curve::easeOutCubic);
+                g_picker_sel_y.start(fy0, tgt_y, sd, 0, curve::easeOutCubic);
+                g_picker_sel_anim_idx = g_picker_sel_idx;
+            } else {
+                // y 随滚动实时跟(滚动时目标 y 变),x 保持 tween 结果
+                g_picker_sel_y.to = tgt_y;
+            }
+            float ix = g_picker_sel_x.value(), iy = g_picker_sel_y.value();
+            prim::fillRR(ctx, ix + 2, iy + 2, cell - 4, cell - 4, 8.0f,
+                         br.solidA(pal.primary, ct * 0.16f));
+            prim::strokeRR(ctx, ix + 2, iy + 2, cell - 4, cell - 4, 8.0f,
+                           br.solidA(pal.primary, ct * 0.45f), 1.4f);
+        } else {
+            g_picker_sel_anim_idx = -1;
+        }
         int first_row = (std::max)(0, (int)(g_emoji_scroll_y / cell) - 1);
         int last_row = (std::min)(rows_total - 1, (int)((g_emoji_scroll_y + view_h) / cell) + 1);
         for (int i = first_row * cols; i < total_n && i < (last_row + 1) * cols; ++i) {
@@ -1841,9 +1944,10 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             // 完全不可见的跳过
             if (ey + cell < grid_y) continue;
             if (ey > grid_y + view_h) break;
+            int ei = filtered[i];   // 真实 kEmoji 下标
             LayoutRect cell_r{ ex, ey, cell, cell };
-            bool hov = cell_r.contains(g_mouse);
-            float& ht = g_emoji_hover_t[i];
+            bool hov = cell_r.contains(g_mouse);  // 键盘选中用滑动指示器,不走 hover 放大
+            float& ht = g_emoji_hover_t[ei];
             ht += ((hov ? 1.0f : 0.0f) - ht) * 0.24f;
             if (ht > 0.01f) {
                 float inset = 3.0f - ht;
@@ -1858,7 +1962,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             float grow = ht * 2.0f;
             // emoji 字形栅格化进缓存位图后 DrawBitmap 复用（彩色字形每帧重栅格化是卡顿根因）。
             // 缓存位图是 cell×cell、字形居中；hover 时目标矩形对称放大 + 上移，无需重栅格化。
-            const wchar_t* e = kEmoji[i];
+            const wchar_t* e = kEmoji[ei];
             float gx = ex - grow * 0.5f;
             float gy = ey - grow * 0.5f - lift;
             float gw = cell + grow;
@@ -1873,20 +1977,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                 br.solidA(pal.text, ct),
                                 DWRITE_TEXT_ALIGNMENT_CENTER);
             }
-            hit(cell_r, [e](){
-                std::wstring s = e;
-                if (g_react_target.active) {
-                    // React 模式：把选中的 emoji 发到目标消息（remove=false 表示加反应）。
-                    reactToMessage(GetActiveWindow(), g_react_target.slug,
-                                   g_react_target.server_id, s, /*remove=*/false);
-                    g_react_target.active = false;
-                    setPickerOpen(false);
-                } else {
-                    g_composer.replaceSelection(s);
-                    g_focus_composer = true;
-                    // 不自动关 picker — 用户可能要连续选
-                }
-            }, true);
+            hit(cell_r, [e](){ sendEmojiGlyph(e); }, true);
         }
         ctx->PopAxisAlignedClip();
         // 滚动条
@@ -2252,6 +2343,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     hit(tab_pk, [](){
         setPickerTabSmooth(g_picker_tab == 0 ? 1 : g_picker_tab);
     }, true);
+    if (g_picker_tab > 0) {   // pack 按钮顶层命中层,仅表情包 tab
     hit({ bx_files, right_btn_y, bw_files, 26 }, [cur_pid](){
         if (cur_pid.empty()) {
             PostMessageW(GetActiveWindow(), WM_APP + 41, 0, 0);
@@ -2281,6 +2373,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
         setPickerOpen(false);
         PostMessageW(GetActiveWindow(), WM_APP + 21, 0, 0);
     }, true);
+    }  // if (g_picker_tab > 0)
 }
 
 void paintChatView(D2DApp& app, float ax, float ay, float aw, float ah) {

@@ -378,6 +378,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 auth::onKey(hwnd, (int)wp, shift, ctrl);
                 return 0;
             }
+            // picker 打开:方向键导航 / Enter 发送 / Tab 切 tab(优先于 composer)
+            if (stages::g_stage == stages::Stage::Main
+                && stages::g_view == stages::View::Chat
+                && chat::g_picker_open
+                && chat::onPickerKey(hwnd, (int)wp, shift, ctrl)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (stages::g_stage == stages::Stage::Main
                 && stages::g_view == stages::View::Chat
                 && chat::g_focus_composer) {

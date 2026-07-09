@@ -33,6 +33,13 @@ bool         g_picker_open = false;
 Tween        g_picker_t;
 int          g_picker_tab = 0;
 std::vector<ComposerAttachment> g_composer_attachments;
+int          g_picker_sel_idx = -1;    // 键盘导航选中的 emoji 格(在 filtered 里的下标)
+// 动画:键盘选中格的滑动指示器(在 emoji grid 内平滑移动到选中格)。
+Tween        g_picker_sel_x, g_picker_sel_y;
+int          g_picker_sel_anim_idx = -1;   // 指示器当前动画目标(变了才重启 tween)
+// 动画:分类 chip 活动下划线滑块 x(随滚动位置连续移动)。
+float        g_picker_cat_pill_x = 0.0f;
+bool         g_picker_cat_pill_init = false;
 Tween g_top_seg_x, g_top_seg_w;
 Tween g_pack_tab_x, g_pack_tab_w;
 PackDrag g_pack_drag;
@@ -108,11 +115,15 @@ void setPickerOpen(bool open) {
     g_picker_open = open;
     if (open) {
         g_picker_t.start(g_picker_t.value(), 1.0f, 0.18f, 0, curve::easeOutCubic);
+        // 首开也要内容淡入(否则 content_t.started=false → paint 用 1.0 瞬显,首次无动画)
+        g_picker_content_t.start(0.0f, 1.0f, 0.16f, 0, curve::easeOutCubic);
+        g_picker_sel_idx = -1;
     } else {
         g_picker_t.start(g_picker_t.value(), 0.0f, 0.12f, 0, curve::easeOutCubic);
         g_picker_scroll_drag = PickerScrollDrag{};
         g_pack_drag = PackDrag{};
         g_react_target.active = false;   // 关闭 picker 即退出 react 选择模式
+        g_picker_sel_idx = -1;
     }
 }
 
