@@ -30,15 +30,9 @@ public:
     }
     ~PathBuilder() { close(); }
 
-    bool valid() const { return sink_ != nullptr; }
     ID2D1PathGeometry* geometry() {
         close();
         return geo_.Get();
-    }
-
-    // 显式开始一个 figure（不带 line）
-    void moveTo(float x, float y) {
-        ensureFigureOpen({x, y});
     }
 
     // GDI+ AddLine(p1, p2): 如果是空 path 则 begin 在 p1；否则 line to p1 (if 不连续) + line to p2。
@@ -97,13 +91,6 @@ public:
             figure_open_ = false;
         }
     }
-    void endFigure() {
-        if (figure_open_) {
-            sink_->EndFigure(D2D1_FIGURE_END_OPEN);
-            figure_open_ = false;
-        }
-    }
-
     // GDI+ Path Reset — 关掉当前 figure 但保留 geo_。
     // 业务通常 GraphicsPath 用完一次就丢，所以我们的 PathBuilder 也是 single-use。
     // 调 reset 后等同新 PathBuilder（其实就是 close 并重建）。

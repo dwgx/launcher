@@ -48,10 +48,6 @@ float hover(uint64_t k, bool active, float rate = 0.13f);
 // 通用:朝任意浮点目标逼近(如滑动指示器位置)。首次见到该 key 直接取 target。
 float toward(uint64_t k, float target, float rate = 0.13f);
 
-// 入场动画:首次见到该 key 时从 0 开始升到 1(与 hover 相反 —— hover 首次吸附)。
-// 用于"新元素出现要淡入/滑入"(消息气泡、反应 chip 等)。返回 0..1。
-float rise(uint64_t k, float rate = 0.16f);
-
 // 每帧推进所有活跃 key + 清理这一帧没被访问过的(超时)条目。
 void tickAll(float dt);
 

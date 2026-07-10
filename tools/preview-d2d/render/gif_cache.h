@@ -54,10 +54,6 @@ public:
         intrinsic_.clear();
         ctx_ = nullptr; wic_ = nullptr;
     }
-    void invalidate() {
-        lru_.clear([](const DecodeKey&, Entry&){});
-        intrinsic_.clear();
-    }
     void evict(const std::wstring& path) {
         lru_.eraseIf([&](const DecodeKey& k){ return k.path == path; },
                      [](const DecodeKey&, Entry&){});

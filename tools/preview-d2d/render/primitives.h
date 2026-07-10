@@ -55,13 +55,6 @@ inline void fillRect(ID2D1DeviceContext* ctx, float x, float y, float w, float h
     ctx->FillRectangle(xywh(x, y, w, h), b);
 }
 
-inline void strokeRect(ID2D1DeviceContext* ctx, float x, float y, float w, float h,
-                       ID2D1Brush* b, float thick = 1.0f,
-                       ID2D1StrokeStyle* style = nullptr) {
-    if (!b) return;
-    ctx->DrawRectangle(xywh(x, y, w, h), b, thick, style);
-}
-
 inline void fillCircle(ID2D1DeviceContext* ctx, float cx, float cy, float r,
                        ID2D1Brush* b) {
     if (!b) return;

@@ -9,7 +9,6 @@ struct Slot {
     float cur;        // 当前值
     float target;     // 目标值
     float rate;       // 每帧逼近比例
-    bool  is_hover;   // hover 语义(target 0/1)
     uint32_t touched; // 最近访问的帧序号(用于清理)
 };
 std::unordered_map<uint64_t, Slot> g_slots;
@@ -21,12 +20,11 @@ float hover(uint64_t k, bool active, float rate) {
     auto it = g_slots.find(k);
     if (it == g_slots.end()) {
         // 首次:直接取目标(避免刚出现就从 0 爬)
-        g_slots[k] = { tgt, tgt, rate, true, g_frame };
+        g_slots[k] = { tgt, tgt, rate, g_frame };
         return tgt;
     }
     it->second.target = tgt;
     it->second.rate = rate;
-    it->second.is_hover = true;
     it->second.touched = g_frame;
     // 动画关:吸附
     if (!g_anim.master) { it->second.cur = tgt; return tgt; }
@@ -36,28 +34,13 @@ float hover(uint64_t k, bool active, float rate) {
 float toward(uint64_t k, float target, float rate) {
     auto it = g_slots.find(k);
     if (it == g_slots.end()) {
-        g_slots[k] = { target, target, rate, false, g_frame };
+        g_slots[k] = { target, target, rate, g_frame };
         return target;
     }
     it->second.target = target;
     it->second.rate = rate;
-    it->second.is_hover = false;
     it->second.touched = g_frame;
     if (!g_anim.master) { it->second.cur = target; return target; }
-    return it->second.cur;
-}
-
-float rise(uint64_t k, float rate) {
-    auto it = g_slots.find(k);
-    if (it == g_slots.end()) {
-        // 首次:从 0 开始(不吸附),目标 1 → 会动画升起
-        g_slots[k] = { 0.0f, 1.0f, rate, false, g_frame };
-        return g_anim.master ? 0.0f : 1.0f;
-    }
-    it->second.target = 1.0f;
-    it->second.rate = rate;
-    it->second.touched = g_frame;
-    if (!g_anim.master) { it->second.cur = 1.0f; return 1.0f; }
     return it->second.cur;
 }
 

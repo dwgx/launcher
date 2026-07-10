@@ -15,16 +15,12 @@ struct AnimSettings {
     bool viewSwitch() const { return master; }
     bool channelAnim() const { return master; }
     bool pickerAnim() const { return master; }
-    bool composerAnim() const { return master; }
     bool hoverAnim() const { return master; }
-    bool messageAnim() const { return master; }
 
     float clampedSpeed() const { return (std::max)(0.25f, (std::min)(3.0f, speed)); }
 
     // 门控时长:关→瞬发;开→基准时长 / 速度(速度越大越短)。
     static float dur(bool on, float d);
-    // 逼近率(指数平滑):关→1(瞬到);开→基准率 * 速度(速度越大越快),封顶 0.9。
-    static float rate(bool on, float r);
 };
 
 extern AnimSettings g_anim;

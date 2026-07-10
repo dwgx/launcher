@@ -34,8 +34,6 @@ public:
         ctx_ = nullptr;
         dwrite_ = nullptr;
     }
-    // device 重建后调（与 ImageCache 一致，暂未接 device-lost，先留接口）
-    void invalidate() { bitmaps_.clear(); }
 
     // 取（必要时栅格化）emoji 字形位图。
     //   cell_dip      = 方形格子边长（DIP），位图按此尺寸渲染
