@@ -117,12 +117,6 @@ std::vector<StickerItem> parseAndDownloadStickerItems(const std::string& body) {
 }
 }
 
-std::wstring cacheDir() {
-    std::wstring dir = fetch::mediaCacheDir(L"stickers");
-    if (!dir.empty() && dir.back() != L'\\') dir += L"\\";
-    return dir;
-}
-
 void fetchMyPacks(HWND notify) {
     if (g_session_token.empty()) return;
     struct A { HWND h; };
@@ -466,19 +460,6 @@ void deletePack(HWND notify, const std::string& pack_id) {
             }
         }
         PostMessageW(a->h, WM_APP + 27, r.ok() ? 1 : 0, 0);
-        return 0;
-    }, a, 0, nullptr);
-}
-
-void installPack(HWND notify, const std::string& short_name) {
-    struct A { std::string sn; HWND h; };
-    auto* a = new A{ short_name, notify };
-    CreateThread(nullptr, 0, [](LPVOID lp) -> DWORD {
-        std::unique_ptr<A> a((A*)lp);
-        std::string body = "{\"session_token\":\"" + g_session_token
-                         + "\",\"short_name\":\"" + a->sn + "\"}";
-        auto r = net::postJson(L"/api/sticker/pack/install", body);
-        PostMessageW(a->h, WM_APP + 28, r.ok() ? 1 : 0, 0);
         return 0;
     }, a, 0, nullptr);
 }

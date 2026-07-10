@@ -142,7 +142,7 @@ void purchaseListing(HWND notify, const std::string& listing_id);
 void reviewListing(HWND notify, const std::string& listing_id, int rating,
                    const std::wstring& body_text);
 
-enum class ProfileUpdateKind { Unknown = 0, StatusText = 1, Bio = 2, Nickname = 3 };
+enum class ProfileUpdateKind { Unknown = 0, StatusText = 1, Bio = 2 };
 
 // POST /api/profile/update — 更新 nickname / status_text / bio 任一字段
 // fields = JSON object 片段，e.g. "\"bio\":\"...\""

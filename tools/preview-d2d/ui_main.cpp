@@ -42,7 +42,7 @@ bool   g_account_dropdown = false;
 bool   g_status_fold_open = false;
 Tween  g_dropdown_t;
 Tween  g_status_fold_t;
-Tween  g_seg_lang_x, g_seg_lang_w, g_seg_theme_x, g_seg_theme_w;
+Tween  g_seg_lang_x, g_seg_theme_x;
 
 // ---- 主视图滚动（Home/Market/Settings/Profile）------------------------------
 // 每个可滚 view 一份 top-anchored 滚动状态（offset 0 = 顶部，与 chat 的 from-bottom
@@ -270,9 +270,7 @@ void paintSidebar(D2DApp& app, float H) {
                          br.solidA(pal.primary, 0.08f * h));
         }
         // 图标/文字色:muted → (hover)text → (active)primary,随进度插值
-        uint32_t base = hover ? pal.text : pal.text_muted;
         uint32_t tc = active ? pal.primary : lerpArgb(pal.text_muted, pal.text, h);
-        (void)base;
 
         icons::drawIcon(app, m.icon, item.x + 12.0f, item.y + 9.0f, 20.0f, tc);
         std::wstring lbl = trW(m.label_key);
@@ -1278,110 +1276,6 @@ void paintProfileView(D2DApp& app, float ax, float ay, float aw, float ah) {
 
 // Chat view 走 chat::paintChatView
 
-// ---- 可滚动 view 包裹层 -----------------------------------------------------
-// 复刻 recon 方案：D2D 平移只移像素，不移 CPU 侧 LayoutRect，故必须在 body 画完后把
-// 本帧 body 注册的 hit rect 从 content-space 改写到 screen-space，clicks 才落对。
-// 步骤见函数内注释。fn 是四个 paintXxxView 之一（它在自然绝对 y 画 + 末尾上报 content_h）。
-using ViewPaintFn = void(*)(D2DApp&, float, float, float, float);
-
-void paintScrollableView(D2DApp& app, ViewPaintFn fn, stages::View view,
-                         float ax, float ay, float aw, float ah) {
-    auto* ctx = app.ctx();
-    auto& br = app.brushes();
-    const Palette& pal = palette();
-
-    ViewScroll& vs = g_view_scroll[(int)view];
-    vs.viewport_h = ah;
-    float content_h = vs.content_h;   // 上一帧量到的（首帧=0 → max_off=0）
-    float max_off = (std::max)(0.0f, content_h - ah);
-
-    // 1) clamp target + lerp offset（复刻 chat 0.22 手感）。拖动中直接同步。
-    if (g_view_scroll_drag.active && g_view_scroll_drag.view == (int)view && g_mouse_pressed) {
-        float dy = (float)g_mouse.y - g_view_scroll_drag.anchor_mouse_y;
-        float track_h = (std::max)(1.0f, g_view_scroll_drag.track_h);
-        float content_per_track = g_view_scroll_drag.max_off / track_h;
-        float new_off = g_view_scroll_drag.anchor_offset + dy * content_per_track;
-        if (new_off > max_off) new_off = max_off;
-        if (new_off < 0.0f) new_off = 0.0f;
-        vs.target = new_off;
-        vs.offset = new_off;
-    } else {
-        if (vs.target > max_off) vs.target = max_off;
-        if (vs.target < 0.0f) vs.target = 0.0f;
-        float diff = vs.target - vs.offset;
-        if (std::abs(diff) < 0.5f) vs.offset = vs.target;
-        else                       vs.offset += diff * 0.22f;
-    }
-    if (vs.offset > max_off) vs.offset = max_off;
-    if (vs.offset < 0.0f) vs.offset = 0.0f;
-
-    // 2) 不需要滚动：原样画（无 transform / 无滚动条），保证已适配窗口像素不变 → 0 flag。
-    if (max_off <= 0.0f) {
-        vs.offset = 0.0f;
-        vs.target = 0.0f;
-        fn(app, ax, ay, aw, ah);
-        return;
-    }
-
-    float offset = vs.offset;
-
-    // 3) 裁剪到 view 区域（别让滚动内容漏到 topbar/sidebar）+ 平移 -offset。
-    ctx->PushAxisAlignedClip(D2D1::RectF(ax, ay, ax + aw, ay + ah),
-                             D2D1_ANTIALIAS_MODE_ALIASED);
-    D2D1_MATRIX_3X2_F saved;
-    ctx->GetTransform(&saved);
-    ctx->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -offset) * saved);
-
-    // 鼠标同步进 content-space：inline hover 用 rect.contains(g_mouse)，内容整体上移了
-    // offset，等价于把鼠标下移 offset 再比 content-space rect → hover 正确。
-    POINT saved_mouse = g_mouse;
-    g_mouse.y += (LONG)std::lround(offset);
-
-    size_t n0 = g_hits.size();
-    fn(app, ax, ay, aw, ah);   // body 在自然 content y 画 + 注册 hit + 上报 content_h
-
-    // 5) 把 body 这帧注册的 hit rect 从 content-space 改写到 screen-space。
-    // 元素 content_y 实际画在 screen y = content_y - offset，故 rect.y -= offset 对齐。
-    for (size_t i = n0; i < g_hits.size(); ++i) g_hits[i].rect.y -= offset;
-
-    g_mouse = saved_mouse;
-    ctx->SetTransform(saved);
-    ctx->PopAxisAlignedClip();
-
-    // 6) 右侧细滚动条（screen-space，在 transform 之外，故 rect 已是屏幕坐标，
-    // 不参与上面的 [n0,end) 改写）。镜像 chat_paint.cpp:1393-1423 但 top-anchored。
-    {
-        float bar_x = ax + aw - 8.0f;
-        float bar_w = 6.0f;
-        float track_y = ay + 4.0f;
-        float track_h = ah - 8.0f;
-        float thumb_h = (ah / content_h) * track_h;
-        if (thumb_h < 28.0f) thumb_h = 28.0f;
-        float t_pos = (max_off > 0.0f) ? (offset / max_off) : 0.0f;
-        float movable = track_h - thumb_h;
-        float thumb_y = track_y + movable * t_pos;
-        prim::fillRR(ctx, bar_x, track_y, bar_w, track_h, 3.0f,
-                     br.solidA(pal.text, 0.05f));
-        LayoutRect thumb_rect{ bar_x - 2.0f, thumb_y, bar_w + 4.0f, thumb_h };
-        bool bar_hov = thumb_rect.contains(g_mouse)
-                    || (g_view_scroll_drag.active && g_view_scroll_drag.view == (int)view);
-        prim::fillRR(ctx, bar_x, thumb_y, bar_w, thumb_h, 3.0f,
-                     br.solidA(pal.text, bar_hov ? 0.50f : 0.30f));
-        float anchor_y = (float)g_mouse.y;
-        float anchor_off = offset;
-        float movable_capt = movable;
-        float max_off_capt = max_off;
-        int view_capt = (int)view;
-        hit(thumb_rect, [anchor_y, anchor_off, movable_capt, max_off_capt, view_capt](){
-            g_view_scroll_drag.active = true;
-            g_view_scroll_drag.view = view_capt;
-            g_view_scroll_drag.anchor_mouse_y = anchor_y;
-            g_view_scroll_drag.anchor_offset = anchor_off;
-            g_view_scroll_drag.track_h = movable_capt;
-            g_view_scroll_drag.max_off = max_off_capt;
-        }, true);
-    }
-}
 
 }  // anon
 
@@ -1394,18 +1288,6 @@ void switchView(stages::View v) {
 }
 
 // 主视图滚轮 — 复刻 chat.cpp:77-81，但 top-anchored（offset 0 = 顶）。
-// 一次 notch(delta=±120) → 90px；向下滚(delta<0)增大 offset（内容上移）。
-// content_h / viewport_h 用上一帧量到的值 clamp（首帧还没量到 → max_off=0 不动，无害）。
-void onViewWheel(int delta) {
-    auto& vs = g_view_scroll[(int)stages::g_view];
-    float max_off = (std::max)(0.0f, vs.content_h - vs.viewport_h);
-    if (max_off <= 0.0f) return;
-    // 向下滚 delta<0 → 内容上移 → offset 增大，故减 delta。
-    vs.target -= (float)delta * 0.75f;
-    if (vs.target > max_off) vs.target = max_off;
-    if (vs.target < 0.0f) vs.target = 0.0f;
-}
-
 void onViewMouseUp() {
     g_view_scroll_drag.active = false;
 }
@@ -1414,9 +1296,7 @@ void tickMain(float dt) {
     g_dropdown_t.tick(dt);
     g_status_fold_t.tick(dt);
     g_seg_lang_x.tick(dt);
-    g_seg_lang_w.tick(dt);
     g_seg_theme_x.tick(dt);
-    g_seg_theme_w.tick(dt);
     chat::tick(dt);
     modal::tickAll(dt);
     anim::tickAll(dt);   // 通用 keyed 动画基元推进 + 清理
@@ -1424,7 +1304,6 @@ void tickMain(float dt) {
 
 void paintMain(D2DApp& app, float W, float H) {
     hitClear();
-    clearOverlayRects();   // 统一 overlay 几何:每帧清零,各 overlay paint 时 markOverlayRect
     g_overlays.clear();    // 浮层栈每帧重建(paint 顺序 = z-order),各 overlay paint 时 add
     const Palette& pal = palette();
     app.ctx()->Clear(argbToColorF(pal.bg));

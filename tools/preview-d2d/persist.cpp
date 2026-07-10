@@ -133,20 +133,6 @@ void saveCreds(const std::wstring& u, const std::wstring& p) {
         LocalFree(out.pbData);
     }
 }
-bool loadCreds(std::wstring& u, std::wstring& p) {
-    if (disabled()) return false;
-    ensure(); if (!g_hk) return false;
-    if (!readString(g_hk, L"_u", u) || u.empty()) return false;
-    BYTE buf[4096]; DWORD cb = sizeof(buf), type = 0;
-    if (RegQueryValueExW(g_hk, L"_p", nullptr, &type, buf, &cb) != ERROR_SUCCESS) return false;
-    if (type != REG_BINARY || cb == 0) return false;
-    DATA_BLOB in{}, out{};
-    in.pbData = buf; in.cbData = cb;
-    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &out)) return false;
-    p.assign((wchar_t*)out.pbData, out.cbData / sizeof(wchar_t));
-    LocalFree(out.pbData);
-    return true;
-}
 void clearCreds() {
     if (disabled()) return;
     ensure(); if (!g_hk) return;

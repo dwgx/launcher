@@ -60,13 +60,9 @@ public:
     // 资源访问 — 视图代码持有 D2DApp& 后通过这些 accessor 拿 device / cache。
     ID2D1DeviceContext* ctx()     const { return d2d_ctx_.Get(); }
     ID2D1Factory1*      factory() const { return d2d_factory_.Get(); }
-    IDWriteFactory*     dwrite()  const { return dwrite_.Get(); }
     IWICImagingFactory* wic()     const { return wic_.Get(); }
     HWND                hwnd()    const { return hwnd_; }
 
-    // 物理 client 像素（swap chain 大小）— 鼠标命中和窗口几何用。
-    int width()  const { return width_; }
-    int height() const { return height_; }
     // DIP 大小（逻辑布局像素）— D2D RT 自动 dpi-scale 到物理。
     float widthDip()  const { return width_  * 96.0f / dpi_; }
     float heightDip() const { return height_ * 96.0f / dpi_; }
@@ -135,13 +131,6 @@ inline D2D1_COLOR_F argbToColorF(uint32_t argb) {
         ((argb >>  8) & 0xFFu) / 255.0f,
         ( argb        & 0xFFu) / 255.0f,
         ((argb >> 24) & 0xFFu) / 255.0f);
-}
-inline D2D1_COLOR_F rgbToColorF(uint32_t rgb, float alpha = 1.0f) {
-    return D2D1::ColorF(
-        ((rgb >> 16) & 0xFFu) / 255.0f,
-        ((rgb >>  8) & 0xFFu) / 255.0f,
-        ( rgb        & 0xFFu) / 255.0f,
-        alpha);
 }
 // pt → DIP (D2D 单位)；GDI+ UnitPoint 也是 96/72 换算
 inline float ptToDip(float pt) { return pt * 96.0f / 72.0f; }

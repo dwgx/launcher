@@ -205,18 +205,6 @@ bool driveTransitions(D2DApp& app, int sw, int sh) {
     return transitioned;
 }
 
-bool anyAnimating() {
-    auto a = [](const Tween& t) { return t.started && !t.done(); };
-    if (g_stage != Stage::Main) return true;   // 入场期一直要画
-    return a(g_card_scale) || a(g_card_opacity) || a(g_card_fade_out)
-        || a(g_window_w) || a(g_window_h)
-        || a(g_sidebar_x) || a(g_topbar_y) || a(g_main_opacity)
-        || a(g_view_fade)
-        || a(g_dot_size) || a(g_dot_alpha)
-        || a(g_auth_card_op) || a(g_auth_card_y)
-        || a(g_check_anim);
-}
-
 // ============================== Paint helpers ==============================
 
 // spinner 弧 — D2D PathGeometry + AddArc。GDI+ Graphics::DrawArc 等价。
@@ -351,7 +339,6 @@ void paint(D2DApp& app) {
             paintDot(app, W, H); break;
         case Stage::ExpandLoading:
         case Stage::Loading:
-        case Stage::Expanding:
         case Stage::ExpandAuth:
             paintLoading(app, W, H); break;
         case Stage::Auth:

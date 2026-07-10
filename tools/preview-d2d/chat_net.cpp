@@ -340,7 +340,6 @@ void sendChatMessage(HWND hwnd, const std::wstring& body, const char* kind,
     if (!ch) { fail(L"channel not ready"); return; }
     if (ch->id.empty()) { fail(L"channel not ready"); return; }
     if (!canWriteChannel(ch)) { fail(activeWriteBlockedMessage()); return; }
-    if (ch->id.empty()) return;     // 还没拿到 backend uuid
     auto& msgs = streamFor(slug);
     for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
         if (it->from == L"me" && it->server_id == 0

@@ -46,13 +46,6 @@ extern std::mutex g_user_tags_mtx;
 // 异步 IP 地理位置 — fetch::geoIP() 启动后查 ip-api.com，写到这里
 extern wchar_t g_geo_country[16];   // e.g. L"CN", L"US"，空表示未知
 
-// Loading 阶段实时滚动日志（autologin 模式）
-extern std::vector<std::wstring> g_login_log;
-inline void logLine(const wchar_t* s) {
-    g_login_log.emplace_back(s);
-    if (g_login_log.size() > 8) g_login_log.erase(g_login_log.begin());
-}
-
 inline const wchar_t* statusKey(UserStatus s) {
     switch (s) {
     case UserStatus::Online:  return L"online";

@@ -16,6 +16,4 @@ std::mutex g_user_tags_mtx;
 
 wchar_t g_geo_country[16] = {0};
 
-std::vector<std::wstring> g_login_log;
-
 }  // namespace launcher::d2d

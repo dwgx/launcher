@@ -11,7 +11,7 @@
 namespace launcher::d2d::stages {
 
 enum class Stage {
-    Dot, ExpandLoading, Loading, Expanding, ExpandAuth, Auth,
+    Dot, ExpandLoading, Loading, ExpandAuth, Auth,
     ShrinkSuccess, CheckSuccess, ExpandMain, Main
 };
 enum class AuthMode { Login, Register };
@@ -62,8 +62,6 @@ void tick(float dt);
 // 返回 true 表示触发了 stage 切换或几何变化（业务可据此调度 InvalidateRect 等）。
 bool driveTransitions(D2DApp& app, int sw, int sh);
 
-// 任意 tween / spinner 还在动 → 帧循环不能 idle。
-bool anyAnimating();
 
 // ---------- Paint dispatch ----------
 // 按当前 g_stage 选对应 paint*；W/H 是 client 物理像素（D2D 已 SetDpi，业务可直接用 DIP）。

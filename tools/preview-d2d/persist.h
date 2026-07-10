@@ -21,7 +21,6 @@ unsigned loadAnim(unsigned dflt);
 int  loadLang(int dflt);
 bool loadTheme(bool dflt);
 void saveCreds(const std::wstring& u, const std::wstring& p);
-bool loadCreds(std::wstring& u, std::wstring& p);
 void clearCreds();
 void saveSession(const std::string& tok, const std::string& uid);
 bool loadSession(std::string& tok, std::string& uid);

@@ -152,11 +152,4 @@ void show(bool visible) {
     if (g_ctrl) g_ctrl->put_IsVisible(visible ? TRUE : FALSE);
 }
 
-void destroy() {
-    if (g_ctrl) g_ctrl->Close();
-    g_view.Reset();
-    g_ctrl.Reset();
-    g_env.Reset();
-}
-
 }  // namespace launcher::d2d::webview

@@ -156,7 +156,6 @@ struct MultilineEdit {
         while (i < (int)text.size() && text[i] != L'\n') ++i;
         return i;
     }
-    int columnOf(int off) const { return off - lineStart(off); }
 
     // 上下移动:保持列(col)。到相邻逻辑行,列钳到该行长度。
     int offsetLineUp(int off) const {

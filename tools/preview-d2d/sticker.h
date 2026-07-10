@@ -57,9 +57,6 @@ inline bool isMyStickersPack(const Pack& p) {
 // 普通用户自建 pack 用其真实 name。
 std::wstring packDisplayName(const Pack& p);
 
-// 系统 emoji 是本地伪 pack（无 backend id）— 排序时跟 backend pack 一起拖。
-// 我们在 persist 里单独存 system pack 的 sort_order（默认 0 = 最左）。
-constexpr int kSystemEmojiOrder = 0;
 
 // 启动后异步拉
 void fetchMyPacks(HWND notify);
@@ -69,7 +66,6 @@ void fetchPackContents(HWND notify, const std::string& pack_id);
 // 操作（异步线程 + WM_APP 通知）
 void sharePack(HWND notify, const std::string& pack_id, bool is_public);
 void deletePack(HWND notify, const std::string& pack_id);
-void installPack(HWND notify, const std::string& short_name);
 
 // 拖拽排序后调 — 把 backend pack id 顺序提交到云端
 // (跳过系统 emoji 的本地伪 pack，那个 client 端 persist::saveSystemPackOrder 单独存)
@@ -135,7 +131,5 @@ std::string stickerPayloadJsonForPath(const std::wstring& path);
 // 这样"我的表情" tab 也能直接走 importFromFolder。
 void ensureMyStickersPack(HWND notify);
 
-// sticker 缓存目录 = %LOCALAPPDATA%/Launcher/stickers/
-std::wstring cacheDir();
 
 }  // namespace launcher::d2d::sticker
