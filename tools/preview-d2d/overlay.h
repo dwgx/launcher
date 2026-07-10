@@ -1,6 +1,5 @@
-// 统一浮层栈 —— 单一所有者,取代三套并存的命中测试机制
-// (g_hits/dispatchClick、g_modal_hit_floor/dispatchClickModalOnly[死]、
-//  markOverlayRect/pointInAnyOverlay),以及账号下拉/公告弹窗的全窗背景吞击。
+// 统一浮层栈 —— 单一所有者,取代早期并存的多套命中测试机制,
+// 以及账号下拉/公告弹窗的全窗背景吞击。
 //
 // 核心思想:paint 顺序已经正确编码了视觉 z-order(dropdown→modals→menus→toast,
 // 自底向上)。bug 从来不是 z-order 错,而是"派发不一致地使用它"。所以本栈**每帧
@@ -8,8 +7,8 @@
 // g_overlays.add(...) 记下矩形 + 策略。派发(左键/右键/滚轮/ESC/NCHITTEST)全部只
 // 查这一个栈,栈顶(最后 add 的)即最上层。
 //
-// 加一个浮层 = 在其 paint 处加一行 add(),不再需要同时改 8 处(open布尔/markOverlayRect/
-// close函数/closeOpenOverlay优先级链/anyOpen/onChar/onKey/onMouseRDown)。
+// 加一个浮层 = 在其 paint 处加一行 add(),不再需要同时改多处
+// (open布尔/close函数/closeOpenOverlay优先级链/anyOpen/onChar/onKey/onMouseRDown)。
 #pragma once
 
 #define WIN32_LEAN_AND_MEAN
@@ -80,18 +79,6 @@ public:
     bool empty()   const { return entries_.empty(); }
     size_t size()  const { return entries_.size(); }
 
-    // 栈顶(最上层)。空栈返回 OV_NONE。
-    int topId() const { return entries_.empty() ? OV_NONE : entries_.back().id; }
-    const OverlayEntry* top() const {
-        return entries_.empty() ? nullptr : &entries_.back();
-    }
-    bool contains(int id) const {
-        for (auto& e : entries_) if (e.id == id) return true;
-        return false;
-    }
-
-    // 任一浮层打开(取代 anyOpen 的浮层部分)。
-    bool any() const { return !entries_.empty(); }
 
     // 有阻塞式浮层(Modal/Popup)打开 —— 取代 hasBlockingModalOpen。
     bool anyBlocking() const {

@@ -407,7 +407,6 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_CHANGE_PW, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeChangePw(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -448,7 +447,6 @@ void paintChangePwModal(D2DApp& app, float W, float H) {
         prim::drawText_(ctx, g_change_pw.error_msg, sub,
                         cx + 40, fy, cw - 80, 18,
                         br.solidA(0xFF8A80, t));
-        fy += 32;
     }
 
     // 按钮
@@ -496,7 +494,6 @@ void paintConfirmModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_CONFIRM, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeConfirm(); },
                    /*dismiss_on_outside*/false, /*blocks_wheel*/true,
@@ -555,7 +552,6 @@ void paintCS2Modal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_CS2, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeCS2(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -717,7 +713,6 @@ void paintMarketDetailModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_MARKET_DETAIL, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeMarketDetail(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -868,7 +863,6 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_HISTORY, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeHistory(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -976,12 +970,6 @@ void paintHistoryModal(D2DApp& app, float W, float H) {
 
     drawGhostBtn(app, cx + cw - 24 - 100, cy + ch - 52, 100, 36,
                  trW("common.close"), t, [](){ closeHistory(); });
-
-    // History rows replace the placeholders after loading.
-    if (g_history.loaded && !g_history.rows.empty()) {
-        // Simple five-row pagination.
-        // 已经画了占位 5 行，这里覆盖：用 rows 显示
-    }
 }
 
 void onHistoryResult(const std::string& body) {
@@ -1094,7 +1082,6 @@ void paintAddTagModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_ADDTAG, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeAddTag(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1179,7 +1166,6 @@ void paintCreatePackModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_CREATEPACK, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeCreatePack(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1276,7 +1262,6 @@ void paintUserProfileModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_USER_PROFILE, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeUserProfile(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1491,7 +1476,6 @@ void paintEditStatusTextModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_EDIT_STATUS, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeEditStatusText(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1558,7 +1542,6 @@ void paintEditBioModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_EDIT_BIO, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeEditBio(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1635,7 +1618,6 @@ void paintEditNicknameModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_EDIT_NICKNAME, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeEditNickname(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1727,7 +1709,6 @@ void paintWebViewModal(D2DApp& app, float W, float H) {
 
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 5);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_WEBVIEW, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeWebViewModal(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1799,7 +1780,6 @@ void paintRenamePackModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_RENAMEPACK, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeRenamePack(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -1986,7 +1966,6 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
     auto& br = app.brushes();
 
     chat::MsgKind kind = (chat::MsgKind)g_msg_menu.kind_int;
-    bool is_text = (kind == chat::MsgKind::Text);
     bool is_media = (kind == chat::MsgKind::Image || kind == chat::MsgKind::Gif
                   || kind == chat::MsgKind::Sticker);
 
@@ -2112,7 +2091,6 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
             closeMsgMenu();
         }, true });
     }
-    (void)is_text;
 
     // Menu layout.
     float mw = 180;
@@ -2125,7 +2103,6 @@ void paintMsgContextMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_msg_menu.menu_rect = { mx, my, mw, mh };
-    markOverlayRect(mx, my, mw, mh);
     g_overlays.add(OV_MSG_MENU, OverlayKind::Menu, { mx, my, mw, mh },
                    [](){ closeMsgMenu(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/false,
@@ -2227,7 +2204,6 @@ void paintUserContextMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_user_menu.menu_rect = { mx, my, mw, mh };
-    markOverlayRect(mx, my, mw, mh);
     g_overlays.add(OV_USER_MENU, OverlayKind::Menu, { mx, my, mw, mh },
                    [](){ closeUserMenu(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/false,
@@ -2364,7 +2340,6 @@ void paintChatMoreMenu(D2DApp& app, float W, float H) {
     if (mx < 8) mx = 8;
     if (my < 8) my = 8;
     g_chat_more.menu_rect = { mx, my, mw, mh };
-    markOverlayRect(mx, my, mw, mh);
     g_overlays.add(OV_CHAT_MORE, OverlayKind::Menu, { mx, my, mw, mh },
                    [](){ closeChatMoreMenu(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/false,
@@ -2399,12 +2374,10 @@ void paintMuteUserModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f;
     float cy = (H - ch) * 0.5f;
     prim::fillRR(ctx, cx, cy, cw, ch, 14, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_MUTE_USER, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeMuteUser(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
                    /*blocks_drag_bg*/true, /*owns_child_hwnd*/false);
-    markOverlayRect(cx, cy, cw, ch);   // 统一 overlay 几何:点外关闭判定用
     prim::strokeRR(ctx, cx, cy, cw, ch, 14, br.solidA(pal.divider, t), 1.0f);
     auto* h1 = app.texts().format(L"Microsoft YaHei UI", ptToDip(15.0f), DWRITE_FONT_WEIGHT_BOLD);
     auto* sub = app.texts().format(L"Microsoft YaHei UI", ptToDip(9.5f));
@@ -2472,7 +2445,6 @@ void paintPackPreviewModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f;
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_PACK_PREVIEW, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closePackPreview(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,
@@ -2722,7 +2694,6 @@ void paintSearchModal(D2DApp& app, float W, float H) {
     float cx = (W - cw) * 0.5f, cy = (H - ch) * 0.5f + 8 * (1.0f - t);
     prim::drawShadow(ctx, br, cx, cy, cw, ch, 16.0f, pal.shadow_card_hover, t, 6.0f, 4);
     prim::fillRR(ctx, cx, cy, cw, ch, 16.0f, br.solidA(pal.card, t));
-    markOverlayRect(cx, cy, cw, ch);
     g_overlays.add(OV_SEARCH, OverlayKind::Modal, { cx, cy, cw, ch },
                    [](){ closeSearch(); },
                    /*dismiss_on_outside*/true, /*blocks_wheel*/true,

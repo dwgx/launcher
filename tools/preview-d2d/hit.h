@@ -12,8 +12,6 @@ namespace launcher::d2d {
 
 struct LayoutRect {
     float x{}, y{}, w{}, h{};
-    float right()  const { return x + w; }
-    float bottom() const { return y + h; }
     bool  contains(POINT p) const {
         return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h;
     }
@@ -31,14 +29,6 @@ extern std::vector<HitArea> g_hits;
 extern POINT g_mouse;
 extern bool  g_mouse_pressed;
 
-// 统一浮层几何(旧机制,过渡期保留:markOverlayRect/pointInAnyOverlay 仍被少量
-// 代码填充,但派发已全部走 overlay.h 的 OverlayStack)。
-// TODO(cleanup): markOverlayRect / g_overlay_rects 可随后续清理移除,派发已不依赖它。
-struct LayoutRect;
-void clearOverlayRects();
-void markOverlayRect(float x, float y, float w, float h);
-bool pointInAnyOverlay(POINT p);
-
 inline void hitClear() { g_hits.clear(); }
 
 inline void hit(LayoutRect r, std::function<void()> cb, bool button = false) {
@@ -48,8 +38,6 @@ inline void hit(float x, float y, float w, float h,
                 std::function<void()> cb, bool button = false) {
     g_hits.push_back({ {x, y, w, h}, std::move(cb), button });
 }
-
-inline bool inRect(POINT p, LayoutRect r) { return r.contains(p); }
 
 // 反向找命中 — 后注册的（modal / popover）盖在前面注册的上层
 inline bool dispatchClick(POINT p) {
@@ -62,11 +50,6 @@ inline bool dispatchClick(POINT p) {
     return false;
 }
 
-
-inline bool anyHover(POINT p) {
-    for (auto& h : g_hits) if (h.rect.contains(p)) return true;
-    return false;
-}
 
 // 窗口拖动判定用:命中任何「真实交互区」返回 true(该处让给客户区,不拖窗)。
 // 关键:忽略全屏遮罩/背景吞击 hit —— 公告弹窗、消息/用户菜单、聊天区都注册过
