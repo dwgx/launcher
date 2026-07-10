@@ -669,14 +669,6 @@ float paintBubble(D2DApp& app, const Msg& m, int idx, float x, float y, float ma
     if (!prev_same_author) {
         // author + time 在气泡上方那一行
         // me：和气泡一样靠右；别人：和气泡靠左
-        // 自己显示真昵称（不是 "me" 字面量）
-        std::wstring author_disp;
-        if (me) {
-            author_disp = !m.author.empty() ? m.author
-                        : (g_user.nickname.empty() ? trW("chat.me") : g_user.nickname);
-        } else {
-            author_disp = m.author.empty() ? m.from : m.author;
-        }
         std::wstring author_display = displayAuthorFor(m, app.hwnd());
         float aw_ = measureW(app, author_display, author_fmt);
         float tw_ = m.time.empty() ? 0 : (measureW(app, m.time, time_fmt) + 8);
@@ -1289,6 +1281,7 @@ void paintComposer(D2DApp& app, float ax, float ay, float aw, float ah) {
     hit(g_composer.bounds, [](){
         if (!requireActiveChannelWrite()) return;
         g_focus_composer = true;
+        g_picker_search_focus = false;   // 焦点互斥:点 composer → 搜索框失焦
     }, true);
 
     // send 按钮:改成体现"回车发送"的胶囊(⏎ + 文案),不再用纸飞机。贴文本区底对齐。
@@ -1766,7 +1759,6 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
     if (py < 8.0f) py = 8.0f;
     g_picker_origin_x = px; g_picker_origin_y = py;
     g_picker_rect = { px, py, pw, ph };
-    markOverlayRect(px, py, pw, ph);   // 统一 overlay 几何
     // 浮层栈:picker 是 Popover。关键(修 C5)——把表情切换按钮并入"内部"矩形,
     // 这样点它时走 dispatchClick 命中按钮自身 hit(toggle 关闭),而非被点外逻辑吞掉。
     // 不吞滚轮:chat::onWheel 自己分流(picker 打开时滚 emoji grid)。
@@ -1841,14 +1833,22 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             prim::drawTextNoWrap(ctx, trW("picker.search"), sb_fmt, txt_x, sb_y + 6, txt_w, 16,
                                  br.solidA(pal.text_muted, t * 0.8f));
         } else {
+            // 选区高亮(聚焦且有选区时):仿 auth InputBox。
+            if (sb_focus && g_picker_search.hasSelection()) {
+                float pre_w = measureW(app, g_picker_search.displaySlice(0, g_picker_search.selStart()), sb_fmt);
+                float in_w  = measureW(app, g_picker_search.displaySlice(
+                                  g_picker_search.selStart(), g_picker_search.selEnd()), sb_fmt);
+                prim::fillRR(ctx, txt_x + pre_w, sb_y + 5, in_w, 16, 2.0f,
+                             br.solidA(pal.primary, t * 0.38f));
+            }
             prim::drawTextNoWrap(ctx, g_picker_search.text, sb_fmt, txt_x, sb_y + 6, txt_w, 16,
                                  br.solidA(pal.text, t));
-            // 闪烁光标(聚焦时)
-            if (sb_focus) {
+            // 闪烁光标(聚焦且无选区时,定位到 cursor 处 —— 而非永远画在文字末尾)。
+            if (sb_focus && !g_picker_search.hasSelection()) {
                 int phase = (int)(stages::g_time_in_stage * 1000) % 1000;
                 if (phase < 500) {
-                    float cxx = txt_x + (std::min)(txt_w,
-                        std::ceil(measureW(app, g_picker_search.text, sb_fmt)));
+                    float pre_w = measureW(app, g_picker_search.displaySlice(0, g_picker_search.cursor), sb_fmt);
+                    float cxx = txt_x + (std::min)(txt_w, pre_w);
                     prim::drawLine(ctx, cxx + 1, sb_y + 6, cxx + 1, sb_y + 20,
                                    br.solidA(pal.primary, t), 1.4f);
                 }
@@ -1861,12 +1861,27 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
             hit(xb, [](){
                 g_picker_search.text.clear(); g_picker_search.cursor = 0;
                 g_picker_search.clearSel();
-                g_picker_search_focus = true; g_picker_sel_idx = -1;
+                g_picker_search_focus = true; g_focus_composer = false; g_picker_sel_idx = -1;
                 g_emoji_scroll_y = 0.0f;
             }, true);
         }
-        // 点搜索框 → 聚焦(空框时整条命中;非空时 × 已单独命中,这里覆盖其余区域)
-        hit(sb, [](){ g_picker_search_focus = true; g_picker_sel_idx = -1; }, true);
+        // 点搜索框 → 聚焦 + 按点击 x 定位光标(逐字符测宽找最近 offset),清选区。
+        {
+            std::wstring stext = g_picker_search.text;
+            hit(sb, [stext, txt_x, sb_fmt, &app](){
+                g_picker_search_focus = true; g_focus_composer = false; g_picker_sel_idx = -1;
+                // 按点击 x 找最近字符边界(线性扫描,搜索串短,开销可忽略)。
+                float relx = (float)g_mouse.x - txt_x;
+                int best = 0; float best_d = 1e9f;
+                for (int i = 0; i <= (int)stext.size(); ++i) {
+                    float w = measureW(app, stext.substr(0, i), sb_fmt);
+                    float d = std::abs(w - relx);
+                    if (d < best_d) { best_d = d; best = i; }
+                }
+                g_picker_search.cursor = best;
+                g_picker_search.clearSel();
+            }, true);
+        }
     }
 
     // 决定当前 pack 状态（用于按钮 enable / 操作目标）
@@ -2000,9 +2015,10 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                 br.solidA(pal.text, ct), DWRITE_TEXT_ALIGNMENT_CENTER);
             int gstart = kEmojiGroups[g].start;
             hit(cr, [gstart](){
-                // 滚到该组首行
+                // 滚到该组首行;点分类 = 用网格,清搜索框焦点让方向键走网格。
                 g_emoji_scroll_y = (float)(gstart / 8) * 37.0f;
                 g_picker_sel_idx = -1;
+                g_picker_search_focus = false;
             }, true);
         }
     }
@@ -2109,7 +2125,7 @@ void paintPicker(D2DApp& app, float anchor_x, float anchor_y) {
                                 br.solidA(pal.text, ct),
                                 DWRITE_TEXT_ALIGNMENT_CENTER);
             }
-            hit(cell_r, [e](){ sendEmojiGlyph(e); }, true);
+            hit(cell_r, [e](){ g_picker_search_focus = false; sendEmojiGlyph(e); }, true);
         }
         ctx->PopAxisAlignedClip();
         // 搜索无结果的空态提示

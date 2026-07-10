@@ -668,6 +668,9 @@ void sendEmojiGlyph(const std::wstring& s) {
     }
 }
 
+// 公开:picker 搜索框是否聚焦(main.cpp IME 开关用 —— 搜索框聚焦时也需启用 IME)。
+bool pickerSearchFocused() { return g_picker_search_focus; }
+
 // picker 顶部搜索框打字 → 过滤 emoji。仅 emoji tab + 搜索框聚焦时消费(防止漏进 composer)。
 // 返回 true=已消费(printable/退格/Enter/Tab 都吞掉,避免键漏到下方 composer)。
 bool onPickerChar(HWND hwnd, wchar_t c, bool ctrl) {
@@ -694,6 +697,23 @@ bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
     if (g_picker_tab != 0) return false;   // 导航目前只覆盖 emoji tab
     std::vector<int> filtered = filteredEmojiIndices(g_picker_search.text);
     int total = (int)filtered.size();
+    // 搜索框聚焦时:文本编辑键(左右移光标 / Home/End / Del / Shift+这些选择)转发给搜索框,
+    // 让它能像普通输入框一样编辑;只有 Down/Up 把焦点交给下方 emoji 网格(打完字选表情)。
+    if (g_picker_search_focus) {
+        if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_HOME || vk == VK_END
+            || vk == VK_DELETE) {
+            g_picker_search.onKey(vk, shift, ctrl);
+            return true;   // 吞掉:不漏给 composer,也不当网格导航
+        }
+        if (vk == VK_DOWN) {
+            // 从搜索框按下 → 进入网格选择(离开搜索框焦点)
+            g_picker_search_focus = false;
+            if (total > 0) g_picker_sel_idx = 0;
+            return true;
+        }
+        // Up/其它方向键在搜索框聚焦时无意义 → 吞掉(避免漏给 composer),Enter/Tab 继续走下方。
+        if (vk == VK_UP) return true;
+    }
     if (vk == VK_DOWN || vk == VK_UP || vk == VK_LEFT || vk == VK_RIGHT) {
         if (total == 0) return true;
         if (g_picker_sel_idx < 0) { g_picker_sel_idx = 0; return true; }
@@ -701,7 +721,11 @@ bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (vk == VK_RIGHT) idx = (std::min)(idx + 1, total - 1);
         else if (vk == VK_LEFT) idx = (std::max)(idx - 1, 0);
         else if (vk == VK_DOWN) idx = (std::min)(idx + cols, total - 1);
-        else if (vk == VK_UP)   idx = (std::max)(idx - cols, 0);
+        else if (vk == VK_UP) {
+            // 网格首行再按 Up → 回到搜索框
+            if (g_picker_sel_idx < cols) { g_picker_sel_idx = -1; g_picker_search_focus = true; return true; }
+            idx = (std::max)(idx - cols, 0);
+        }
         g_picker_sel_idx = idx;
         // 滚动跟随:让选中行可见
         float cell = 37.0f;
@@ -715,12 +739,6 @@ bool onPickerKey(HWND hwnd, int vk, bool shift, bool ctrl) {
         if (total == 0) return true;
         int sel = g_picker_sel_idx >= 0 ? g_picker_sel_idx : 0;
         if (sel >= 0 && sel < total) sendEmojiGlyph(kEmoji[filtered[sel]]);
-        return true;
-    }
-    // 搜索框聚焦时吞掉 Del/Home/End,避免漏到下方 composer 误编辑其文本。
-    if (g_picker_search_focus && (vk == VK_DELETE || vk == VK_HOME || vk == VK_END)) {
-        g_picker_search.onKey(vk, shift, ctrl);
-        g_picker_sel_idx = -1;
         return true;
     }
     (void)hwnd; (void)shift; (void)ctrl;

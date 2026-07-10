@@ -58,6 +58,7 @@ void addMentionToComposer(const std::wstring& user_id, const std::wstring& label
 extern bool  g_picker_open;
 extern Tween g_picker_t;
 void setPickerOpen(bool open);   // 公开:统一 overlay 派发(modals.cpp)关闭 picker 用
+bool pickerSearchFocused();      // 公开:picker 搜索框是否聚焦(main.cpp IME 开关用)
 extern int   g_picker_tab;     // 0 = emoji, 1+ = sticker pack idx (1+ = 索引到 sticker::g_packs[idx-1])
 
 // 顶部 tab 滑块动画（[表情] [表情包] pill）

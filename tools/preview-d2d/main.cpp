@@ -167,11 +167,32 @@ static bool inAuthOrMain() {
         || stages::g_stage == stages::Stage::Main;
 }
 
-// IME 是否应自绘内联(仅 chat composer 聚焦时);其它输入(登录框)用系统默认。
+// IME 是否应自绘内联(仅 chat composer 聚焦、且非搜索框聚焦时);其它输入用系统默认。
 static bool imeSelfDrawTarget() {
     return stages::g_stage == stages::Stage::Main
         && stages::g_view == stages::View::Chat
-        && chat::g_focus_composer;
+        && chat::g_focus_composer
+        && !(chat::g_picker_open && chat::pickerSearchFocused());
+}
+
+// IME 是否应启用(关联上下文):composer 聚焦,或表情面板搜索框聚焦时。其它场景禁用,
+// 避免整窗常驻 IME 在主页等任何地方打字冒系统白框。注意与 imeSelfDrawTarget 区分:
+// 后者只决定"是否自绘内联组字"(仅 composer);搜索框启用 IME 但走系统默认组字窗。
+static bool imeShouldEnable() {
+    if (stages::g_stage != stages::Stage::Main || stages::g_view != stages::View::Chat)
+        return false;
+    return chat::g_focus_composer
+        || (chat::g_picker_open && chat::pickerSearchFocused());
+}
+
+// 按聚焦状态开关 IME:该启用时关联默认 IME 上下文,否则彻底断开(关联 NULL)。
+static void updateImeEnable(HWND hwnd) {
+    bool want = imeShouldEnable();
+    static bool s_last = true;   // 窗口初始默认关联 IME
+    if (want == s_last) return;
+    if (want) ImmAssociateContextEx(hwnd, nullptr, IACE_DEFAULT);  // 恢复默认 IME 关联
+    else      ImmAssociateContextEx(hwnd, nullptr, 0);             // 关联 NULL = 禁用 IME
+    s_last = want;
 }
 
 // 启动后异步：tags + 头像云同步 + sticker packs/stickers + market + 个人 profile
@@ -397,7 +418,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 modal::openSearch();
                 return 0;
             }
-            if (wp == 'D') { g_dark = !g_dark; persist::saveTheme(g_dark); return 0; }
             return 0;
         }
         case WM_CHAR: {
@@ -1059,7 +1079,7 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         ui::tickMain(dt);
         toast::tick(dt);
         stages::driveTransitions(g_app, sw, sh);
-
+        updateImeEnable(hwnd);   // 仅聊天输入框聚焦时启用 IME,别处彻底关掉(防到处冒白框)
 
         if (g_app.beginFrame()) {
             stages::paint(g_app);

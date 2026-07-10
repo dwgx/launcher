@@ -120,6 +120,7 @@ void setPickerOpen(bool open) {
         // 首开也要内容淡入(否则 content_t.started=false → paint 用 1.0 瞬显,首次无动画)
         g_picker_content_t.start(0.0f, 1.0f, 0.16f, 0, curve::easeOutCubic);
         g_picker_search_focus = true;    // 打开即聚焦搜索框,可直接打字过滤
+        g_focus_composer = false;        // 焦点互斥:聚焦搜索框时 composer 必须失焦(否则双光标闪烁 + IME 串入)
         g_picker_sel_idx = -1;
     } else {
         g_picker_t.start(g_picker_t.value(), 0.0f, 0.12f, 0, curve::easeOutCubic);
